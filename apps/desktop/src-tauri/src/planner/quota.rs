@@ -77,6 +77,8 @@ pub struct SingleModelTracker {
     pub current_pacific_date: String,
     /// Temporary block flag if 429 received from Google API directly
     pub temporary_api_cooldown_until: Option<u64>,
+    /// Reason why the model is temporarily on cooldown or unavailable
+    pub unavailability_reason: Option<String>,
 }
 
 impl SingleModelTracker {
@@ -91,6 +93,7 @@ impl SingleModelTracker {
             rpd_count: 0,
             current_pacific_date: get_pacific_date_string(),
             temporary_api_cooldown_until: None,
+            unavailability_reason: None,
         }
     }
 
@@ -125,6 +128,7 @@ impl SingleModelTracker {
         if let Some(cd) = self.temporary_api_cooldown_until {
             if now_ms >= cd {
                 self.temporary_api_cooldown_until = None;
+                self.unavailability_reason = None;
             }
         }
     }
@@ -141,15 +145,19 @@ impl SingleModelTracker {
         self.rpd_count
     }
 
-    /// Checks if the model is below 80% on all three dimensions (RPM, TPM, RPD).
-    /// If estimated_tokens is supplied, checks if adding estimated_tokens stays below 80% TPM.
+    /// Checks if the model is below 80% on all three dimensions (RPM, TPM, RPD)
+    /// and is not currently on temporary cooldown or unavailable.
     pub fn is_below_80_percent(&self, now_ms: u64, estimated_tokens: u32) -> Result<(), String> {
         if let Some(cd) = self.temporary_api_cooldown_until {
             if now_ms < cd {
                 let remaining_secs = (cd - now_ms) / 1000 + 1;
+                let reason = self
+                    .unavailability_reason
+                    .as_deref()
+                    .unwrap_or("Temporary API cooldown");
                 return Err(format!(
-                    "Model {} is cooling down after API 429 response ({}s remaining)",
-                    self.display_name, remaining_secs
+                    "Model {} is cooling down: {} ({}s remaining)",
+                    self.display_name, reason, remaining_secs
                 ));
             }
         }
@@ -194,7 +202,13 @@ impl SingleModelTracker {
 
     /// Trips temporary cooldown when an unexpected 429 is received from the Google API.
     pub fn trip_cooldown(&mut self, now_ms: u64, cooldown_ms: u64) {
+        self.trip_unavailable(now_ms, cooldown_ms, "Rate limit (HTTP 429)");
+    }
+
+    /// Trips temporary cooldown when a model is unavailable (5xx, 404, 400 unsupported, network timeout).
+    pub fn trip_unavailable(&mut self, now_ms: u64, cooldown_ms: u64, reason: &str) {
         self.temporary_api_cooldown_until = Some(now_ms + cooldown_ms);
+        self.unavailability_reason = Some(reason.to_string());
     }
 
     /// Returns time in seconds until the earliest sliding window release (RPM or TPM).
@@ -219,6 +233,18 @@ impl SingleModelTracker {
         min_wait_ms.map_or(1, |ms| (ms / 1000) + 1)
     }
 
+    /// Returns time in seconds until the model becomes available (considering sliding release and cooldown).
+    pub fn seconds_until_available(&self, now_ms: u64) -> u64 {
+        let sliding_wait = self.seconds_until_sliding_release(now_ms);
+        if let Some(cd) = self.temporary_api_cooldown_until {
+            if cd > now_ms {
+                let cd_wait = ((cd - now_ms) / 1000) + 1;
+                return sliding_wait.max(cd_wait);
+            }
+        }
+        sliding_wait
+    }
+
     pub fn to_status(&self, now_ms: u64, estimated_tokens: u32) -> ModelQuotaStatus {
         let rpm = self.current_rpm();
         let tpm = self.current_tpm();
@@ -234,6 +260,7 @@ impl SingleModelTracker {
         let (rpd_reset_secs, rpd_reset_formatted) = get_seconds_until_midnight_pacific();
 
         let is_below_80 = self.is_below_80_percent(now_ms, estimated_tokens).is_ok();
+        let is_on_cooldown = self.temporary_api_cooldown_until.map_or(false, |cd| now_ms < cd);
         let is_hard_exhausted = rpm >= self.limits.rpm || tpm >= self.limits.tpm || rpd >= self.limits.rpd;
 
         ModelQuotaStatus {
@@ -255,8 +282,9 @@ impl SingleModelTracker {
             rpd_reset_formatted,
             rpd_reset_seconds: rpd_reset_secs,
 
-            is_available: !is_hard_exhausted,
+            is_available: !is_hard_exhausted && !is_on_cooldown,
             threshold_80_percent_exceeded: !is_below_80,
+            unavailability_reason: self.unavailability_reason.clone(),
         }
     }
 }
@@ -326,12 +354,12 @@ impl ModelQuotaTracker {
                         ));
                     }
                     Err(reason) => {
-                        let wait_secs = tracker.seconds_until_sliding_release(now_ms);
+                        let wait_secs = tracker.seconds_until_available(now_ms);
                         return Err(QuotaExhaustionAction::QueueAndRetry {
                             model_id: pinned.clone(),
                             wait_seconds: wait_secs,
                             reason: format!(
-                                "Pinned model {pinned} exceeded 80% threshold: {reason}"
+                                "Pinned model {pinned} unavailable or exceeded 80% threshold: {reason}"
                             ),
                         });
                     }
@@ -346,11 +374,11 @@ impl ModelQuotaTracker {
             if let Some(tracker) = self.trackers.get(candidate) {
                 match tracker.is_below_80_percent(now_ms, estimated_tokens) {
                     Ok(()) => {
-                        let reason = if candidate == MODEL_PRIMARY {
+                        let reason = if candidate == MODEL_PRIMARY && reasons.is_empty() {
                             "Primary planner (gemini-3.5-flash-lite) under 80% threshold".to_string()
                         } else {
                             format!(
-                                "Auto-switched to {}: prior models exceeded 80% threshold ({})",
+                                "Auto-switched to {}: prior models unavailable or exceeded 80% threshold ({})",
                                 candidate,
                                 reasons.join("; ")
                             )
@@ -365,11 +393,11 @@ impl ModelQuotaTracker {
             }
         }
 
-        // 3. All models are >= 80%: find minimum wait time to queue
+        // 3. All models are >= 80% or cooling down: find minimum wait time to queue
         let mut min_wait = 60u64;
         for &candidate in CASCADE_PRIORITY {
             if let Some(tracker) = self.trackers.get(candidate) {
-                let wait = tracker.seconds_until_sliding_release(now_ms);
+                let wait = tracker.seconds_until_available(now_ms);
                 min_wait = min_wait.min(wait);
             }
         }
@@ -377,7 +405,7 @@ impl ModelQuotaTracker {
         Err(QuotaExhaustionAction::AllModelsAtCapacity {
             earliest_reset_secs: min_wait,
             reason: format!(
-                "All free-tier planner models at or above 80% capacity: {}",
+                "All free-tier planner models are currently unavailable or above 80% capacity: {}",
                 reasons.join(" | ")
             ),
         })
@@ -391,15 +419,20 @@ impl ModelQuotaTracker {
         }
     }
 
-    /// Trips cooldown when a 429 response is returned from Google API.
-    pub fn trip_model_429(&mut self, model_id: &str, cooldown_ms: u64) {
+    /// Trips cooldown when a model is unavailable (server error, timeout, 404, or unsupported).
+    pub fn trip_model_unavailable(&mut self, model_id: &str, cooldown_ms: u64, reason: &str) {
         let now_ms = now_millis();
         if let Some(tracker) = self.trackers.get_mut(model_id) {
-            tracker.trip_cooldown(now_ms, cooldown_ms);
+            tracker.trip_unavailable(now_ms, cooldown_ms, reason);
         }
         self.last_switch_reason = Some(format!(
-            "Model {model_id} returned HTTP 429; failing over to next free model"
+            "Model {model_id} unavailable ({reason}); failing over to next free model in cascade"
         ));
+    }
+
+    /// Trips cooldown when a 429 response is returned from Google API.
+    pub fn trip_model_429(&mut self, model_id: &str, cooldown_ms: u64) {
+        self.trip_model_unavailable(model_id, cooldown_ms, "HTTP 429 rate limit exceeded");
     }
 
     /// Generates full snapshot event for React frontend display.
@@ -468,6 +501,7 @@ pub struct ModelQuotaStatus {
 
     pub is_available: bool,
     pub threshold_80_percent_exceeded: bool,
+    pub unavailability_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -588,5 +622,37 @@ mod tests {
 
         let result = tracker.select_model_for_request(100);
         assert!(matches!(result, Err(QuotaExhaustionAction::AllModelsAtCapacity { .. })));
+    }
+
+    #[test]
+    fn test_unavailable_primary_fails_over_to_secondary() {
+        let mut tracker = ModelQuotaTracker::new();
+        tracker.trip_model_unavailable(MODEL_PRIMARY, 120_000, "HTTP 503 Service Unavailable");
+
+        let (selected, reason) = tracker.select_model_for_request(100).expect("Should failover to secondary");
+        assert_eq!(selected, MODEL_SECONDARY);
+        assert!(reason.contains("gemini-3.1-flash-lite"));
+        assert!(reason.contains("HTTP 503"));
+    }
+
+    #[test]
+    fn test_multiple_unavailable_models_fail_over_to_tertiary() {
+        let mut tracker = ModelQuotaTracker::new();
+        tracker.trip_model_unavailable(MODEL_PRIMARY, 120_000, "Network timeout");
+        tracker.trip_model_unavailable(MODEL_SECONDARY, 120_000, "HTTP 500 Internal Error");
+
+        let (selected, reason) = tracker.select_model_for_request(100).expect("Should failover to tertiary");
+        assert_eq!(selected, MODEL_TERTIARY);
+        assert!(reason.contains("Gemma-4-31b"));
+    }
+
+    #[test]
+    fn test_pinned_model_unavailable_does_not_cascade() {
+        let mut tracker = ModelQuotaTracker::new();
+        tracker.set_pinned_model(Some(MODEL_PINNED_ADVANCED.to_string()));
+        tracker.trip_model_unavailable(MODEL_PINNED_ADVANCED, 60_000, "HTTP 503");
+
+        let result = tracker.select_model_for_request(100);
+        assert!(matches!(result, Err(QuotaExhaustionAction::QueueAndRetry { model_id, .. }) if model_id == MODEL_PINNED_ADVANCED));
     }
 }

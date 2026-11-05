@@ -92,6 +92,7 @@ export interface ModelQuotaStatus {
 
   is_available: boolean;
   threshold_80_percent_exceeded: boolean;
+  unavailability_reason?: string | null;
 }
 
 export interface QuotaUpdateEvent {

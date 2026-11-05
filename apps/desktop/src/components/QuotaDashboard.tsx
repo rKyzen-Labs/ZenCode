@@ -9,6 +9,7 @@ import {
   Activity,
   Layers,
   X,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface QuotaDashboardProps {
@@ -157,6 +158,15 @@ export const QuotaDashboard: FC<QuotaDashboardProps> = ({
                       ≥80% Thresh
                     </span>
                   )}
+                  {!model.is_available && (
+                    <span
+                      className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 border border-amber-500/40 text-[9px] font-mono flex items-center gap-1"
+                      title={model.unavailability_reason || 'Model unavailable or cooling down'}
+                    >
+                      <AlertTriangle className="w-2.5 h-2.5" />
+                      Unavailable
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -244,6 +254,15 @@ export const QuotaDashboard: FC<QuotaDashboardProps> = ({
                   </div>
                 </div>
               </div>
+
+              {model.unavailability_reason && (
+                <div className="text-[10px] text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded px-2.5 py-1.5 flex items-center gap-2 font-mono">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span className="truncate" title={model.unavailability_reason}>
+                    {model.unavailability_reason}
+                  </span>
+                </div>
+              )}
             </div>
           );
         })}

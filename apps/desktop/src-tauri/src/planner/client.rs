@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -46,6 +47,8 @@ impl CascadePlannerClient {
         // Max retry loop for sliding window queues
         let mut attempts = 0;
         let max_queue_attempts = 5;
+        let mut attempted_models: Vec<String> = Vec::new();
+        let mut failure_reasons: HashMap<String, String> = HashMap::new();
 
         loop {
             attempts += 1;
@@ -120,32 +123,72 @@ impl CascadePlannerClient {
 
             let response_result = self.client.post(&url).json(&request_body).send().await;
 
+            // 4. Handle Network Errors
             let response = match response_result {
                 Ok(res) => res,
                 Err(net_err) => {
-                    return Err(format!("Network error while contacting Gemini API: {net_err}"));
+                    let reason = if net_err.is_timeout() {
+                        format!("Network request timed out: {net_err}")
+                    } else if net_err.is_connect() {
+                        format!("Connection failed to Google API: {net_err}")
+                    } else {
+                        format!("Network communication error: {net_err}")
+                    };
+
+                    let is_pinned = {
+                        let tracker = self.quota_tracker.lock().await;
+                        tracker.pinned_model.is_some()
+                    };
+
+                    if is_pinned {
+                        return Err(format!("Network error for pinned model {model_id}: {reason}"));
+                    }
+
+                    {
+                        let mut tracker = self.quota_tracker.lock().await;
+                        tracker.trip_model_unavailable(&model_id, 60_000, &reason);
+                    }
+
+                    attempted_models.push(model_id.clone());
+                    failure_reasons.insert(model_id.clone(), reason);
+                    self.emit_quota_update(&model_id, app_handle).await;
+
+                    if CASCADE_PRIORITY.iter().all(|m| attempted_models.contains(&m.to_string())) {
+                        let summary = CASCADE_PRIORITY
+                            .iter()
+                            .map(|m| {
+                                let r = failure_reasons.get(*m).cloned().unwrap_or_else(|| "capacity exceeded".into());
+                                format!("{m}: {r}")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        return Err(format!(
+                            "All free-tier planner models are currently unavailable: {summary}. Operating in local-only mode."
+                        ));
+                    }
+
+                    continue;
                 }
             };
 
             let status = response.status();
 
-            // 4. Handle rate-limiting (429) or service unavailable (503) from Google
+            // 5. Handle rate-limiting (HTTP 429) from Google
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 429 {
                 let _err_text = response.text().await.unwrap_or_default();
+                let reason = "HTTP 429 Rate Limit Exceeded".to_string();
 
-                {
-                    let mut tracker = self.quota_tracker.lock().await;
-                    // Trip 60s cooldown on this model
-                    tracker.trip_model_429(&model_id, 60_000);
-                }
-
-                self.emit_quota_update(&model_id, app_handle).await;
-
-                // Check if user has pinned this model: if pinned, no auto-failover
                 let is_pinned = {
                     let tracker = self.quota_tracker.lock().await;
                     tracker.pinned_model.is_some()
                 };
+
+                {
+                    let mut tracker = self.quota_tracker.lock().await;
+                    tracker.trip_model_unavailable(&model_id, 60_000, &reason);
+                }
+
+                self.emit_quota_update(&model_id, app_handle).await;
 
                 if is_pinned {
                     return Err(format!(
@@ -153,28 +196,85 @@ impl CascadePlannerClient {
                     ));
                 }
 
-                // If not pinned, retry next iteration — the router will select the next model in cascade
-                continue;
-            }
+                attempted_models.push(model_id.clone());
+                failure_reasons.insert(model_id.clone(), reason);
 
-            // 4b. Handle 404 (if pre-release model identifier is not active on current key)
-            if status == reqwest::StatusCode::NOT_FOUND || status.as_u16() == 404 {
-                let err_text = response.text().await.unwrap_or_default();
-                {
-                    let mut tracker = self.quota_tracker.lock().await;
-                    // Set 5 minute cooldown on unreleased endpoint
-                    tracker.trip_model_429(&model_id, 300_000);
-                    tracker.last_switch_reason = Some(format!(
-                        "Model identifier {model_id} returned 404; automatically failing over to next model in cascade."
+                if CASCADE_PRIORITY.iter().all(|m| attempted_models.contains(&m.to_string())) {
+                    let summary = CASCADE_PRIORITY
+                        .iter()
+                        .map(|m| {
+                            let r = failure_reasons.get(*m).cloned().unwrap_or_else(|| "capacity exceeded".into());
+                            format!("{m}: {r}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(format!(
+                        "All free-tier planner models are currently rate-limited or unavailable: {summary}. Operating in local-only mode."
                     ));
                 }
 
-                self.emit_quota_update(&model_id, app_handle).await;
+                continue;
+            }
+
+            // 6. Handle Server-Side Errors from Google (HTTP 500, 502, 503, 504)
+            if status.is_server_error() {
+                let err_text = response.text().await.unwrap_or_default();
+                let reason = format!("HTTP {status} Server Error: {err_text}");
 
                 let is_pinned = {
                     let tracker = self.quota_tracker.lock().await;
                     tracker.pinned_model.is_some()
                 };
+
+                {
+                    let mut tracker = self.quota_tracker.lock().await;
+                    tracker.trip_model_unavailable(&model_id, 120_000, &reason);
+                }
+
+                self.emit_quota_update(&model_id, app_handle).await;
+
+                if is_pinned {
+                    return Err(format!(
+                        "Pinned model {model_id} unavailable on Google's side ({reason}). Auto-switching is disabled for pinned model."
+                    ));
+                }
+
+                attempted_models.push(model_id.clone());
+                failure_reasons.insert(model_id.clone(), format!("HTTP {status} ({err_text})"));
+
+                if CASCADE_PRIORITY.iter().all(|m| attempted_models.contains(&m.to_string())) {
+                    let summary = CASCADE_PRIORITY
+                        .iter()
+                        .map(|m| {
+                            let r = failure_reasons.get(*m).cloned().unwrap_or_else(|| "capacity exceeded".into());
+                            format!("{m}: {r}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(format!(
+                        "All free-tier planner models are currently experiencing server-side unavailability: {summary}. Operating in local-only mode."
+                    ));
+                }
+
+                continue;
+            }
+
+            // 7. Handle 404 (if pre-release model identifier is not active on current key/region)
+            if status == reqwest::StatusCode::NOT_FOUND || status.as_u16() == 404 {
+                let err_text = response.text().await.unwrap_or_default();
+                let reason = format!("HTTP 404 Model Not Found / Unreleased: {err_text}");
+
+                let is_pinned = {
+                    let tracker = self.quota_tracker.lock().await;
+                    tracker.pinned_model.is_some()
+                };
+
+                {
+                    let mut tracker = self.quota_tracker.lock().await;
+                    tracker.trip_model_unavailable(&model_id, 300_000, &reason);
+                }
+
+                self.emit_quota_update(&model_id, app_handle).await;
 
                 if is_pinned {
                     return Err(format!(
@@ -182,7 +282,80 @@ impl CascadePlannerClient {
                     ));
                 }
 
+                attempted_models.push(model_id.clone());
+                failure_reasons.insert(model_id.clone(), format!("HTTP 404 ({err_text})"));
+
+                if CASCADE_PRIORITY.iter().all(|m| attempted_models.contains(&m.to_string())) {
+                    let summary = CASCADE_PRIORITY
+                        .iter()
+                        .map(|m| {
+                            let r = failure_reasons.get(*m).cloned().unwrap_or_else(|| "capacity exceeded".into());
+                            format!("{m}: {r}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(format!(
+                        "All free-tier planner models are currently unavailable: {summary}. Operating in local-only mode."
+                    ));
+                }
+
                 continue;
+            }
+
+            // 8. Handle 400 Bad Request with model availability/overloaded issues
+            if status == reqwest::StatusCode::BAD_REQUEST || status.as_u16() == 400 {
+                let err_text = response.text().await.unwrap_or_default();
+                let lower = err_text.to_lowercase();
+                let is_model_unavailable = lower.contains("not found")
+                    || lower.contains("unsupported")
+                    || lower.contains("unavailable")
+                    || lower.contains("overloaded")
+                    || lower.contains("capacity")
+                    || lower.contains("not supported")
+                    || lower.contains("invalid model");
+
+                if is_model_unavailable {
+                    let reason = format!("HTTP 400 Model Unavailable: {err_text}");
+
+                    let is_pinned = {
+                        let tracker = self.quota_tracker.lock().await;
+                        tracker.pinned_model.is_some()
+                    };
+
+                    {
+                        let mut tracker = self.quota_tracker.lock().await;
+                        tracker.trip_model_unavailable(&model_id, 300_000, &reason);
+                    }
+
+                    self.emit_quota_update(&model_id, app_handle).await;
+
+                    if is_pinned {
+                        return Err(format!("Pinned model {model_id} unavailable: {err_text}"));
+                    }
+
+                    attempted_models.push(model_id.clone());
+                    failure_reasons.insert(model_id.clone(), format!("HTTP 400 ({err_text})"));
+
+                    if CASCADE_PRIORITY.iter().all(|m| attempted_models.contains(&m.to_string())) {
+                        let summary = CASCADE_PRIORITY
+                            .iter()
+                            .map(|m| {
+                                let r = failure_reasons.get(*m).cloned().unwrap_or_else(|| "capacity exceeded".into());
+                                format!("{m}: {r}")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        return Err(format!(
+                            "All free-tier planner models are currently unavailable: {summary}. Operating in local-only mode."
+                        ));
+                    }
+
+                    continue;
+                } else {
+                    return Err(format!(
+                        "Gemini API returned error 400 Bad Request for model {model_id}: {err_text}"
+                    ));
+                }
             }
 
             if !status.is_success() {
