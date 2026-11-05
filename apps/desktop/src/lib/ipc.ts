@@ -9,6 +9,7 @@ import type {
   WorkerEventPayload,
   TaskState,
   EngineHealth,
+  QuotaUpdateEvent,
 } from '../types';
 
 export async function openProject(path: string): Promise<ProjectState> {
@@ -63,6 +64,22 @@ export async function subscribeToEngineHealth(
   callback: (health: EngineHealth) => void
 ): Promise<UnlistenFn> {
   return await listen<EngineHealth>('engine:health', (event) => {
+    callback(event.payload);
+  });
+}
+
+export async function getQuotaState(): Promise<QuotaUpdateEvent> {
+  return await invoke<QuotaUpdateEvent>('get_quota_state');
+}
+
+export async function setPinnedModel(model: string | null): Promise<QuotaUpdateEvent> {
+  return await invoke<QuotaUpdateEvent>('set_pinned_model', { model });
+}
+
+export async function subscribeToQuotaUpdates(
+  callback: (payload: QuotaUpdateEvent) => void
+): Promise<UnlistenFn> {
+  return await listen<QuotaUpdateEvent>('planner:quota_update', (event) => {
     callback(event.payload);
   });
 }

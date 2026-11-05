@@ -64,4 +64,6 @@ pub struct WorkerEventPayload {
 pub struct PlanSubmissionResult {
     pub plan: ImplementationPlan,
     pub usage: UsageMetadata,
+    pub active_model: String,
+    pub switch_reason: Option<String>,
 }

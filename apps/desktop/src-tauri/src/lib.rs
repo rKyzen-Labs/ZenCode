@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod engine;
 pub mod models;
+pub mod planner;
 pub mod state;
 
 use commands::*;
@@ -21,6 +22,8 @@ pub fn run() {
             submit_plan_request,
             start_worker_session,
             stop_worker_session,
+            get_quota_state,
+            set_pinned_model,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

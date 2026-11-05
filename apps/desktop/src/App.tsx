@@ -7,6 +7,7 @@ import type {
   WorkerEventPayload,
   TaskState,
   EngineHealth,
+  QuotaUpdateEvent,
 } from './types';
 import {
   openProject,
@@ -18,16 +19,26 @@ import {
   subscribeToWorkerMessages,
   subscribeToWorkerStatus,
   subscribeToEngineHealth,
+  getQuotaState,
+  setPinnedModel,
+  subscribeToQuotaUpdates,
 } from './lib/ipc';
 import { StatusBar } from './components/StatusBar';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { WorkspaceScreen } from './components/WorkspaceScreen';
 import { TaskView } from './components/TaskView';
-import { Shield, Sparkles } from 'lucide-react';
+import { QuotaDashboard } from './components/QuotaDashboard';
+import { Shield, Sparkles, Gauge } from 'lucide-react';
 
 export default function App() {
   const [project, setProject] = useState<ProjectState | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [quotaState, setQuotaState] = useState<QuotaUpdateEvent | null>(null);
+  const [showQuotaDashboard, setShowQuotaDashboard] = useState(false);
+  const [isPinnedLoading, setIsPinnedLoading] = useState(false);
+  const [lastActiveModel, setLastActiveModel] = useState<string>('gemini-3.5-flash-lite');
+  const [lastSwitchReason, setLastSwitchReason] = useState<string | null>(null);
+
   const [contextPreview, setContextPreview] = useState<ContextPreview | null>(null);
   const [plan, setPlan] = useState<ZencodePlan | null>(null);
   const [workerEvents, setWorkerEvents] = useState<WorkerEventPayload[]>([]);
@@ -45,7 +56,7 @@ export default function App() {
       setSystemStatus(status);
     } catch (err) {
       console.error('Failed to get project state:', err);
-      // If outside Tauri, set mock status for UI testing
+      // Fallback mock if running outside Tauri
       setSystemStatus({
         gemini_ready: true,
         gemini_status_text: 'Key present in Credential Manager',
@@ -62,9 +73,20 @@ export default function App() {
   useEffect(() => {
     refreshStatus();
 
+    // Fetch initial rate-limit telemetry
+    getQuotaState()
+      .then((qs) => {
+        setQuotaState(qs);
+        if (qs.active_model) {
+          setLastActiveModel(qs.active_model);
+        }
+      })
+      .catch((err) => console.warn('Could not fetch initial quota state:', err));
+
     let unlistenWorkerMsg: (() => void) | undefined;
     let unlistenWorkerStatus: (() => void) | undefined;
     let unlistenEngineHealth: (() => void) | undefined;
+    let unlistenQuotaUpdate: (() => void) | undefined;
 
     const setupListeners = async () => {
       try {
@@ -79,6 +101,16 @@ export default function App() {
         unlistenEngineHealth = await subscribeToEngineHealth((health: EngineHealth) => {
           setSystemStatus((prev) => (prev ? { ...prev, opencode_health: health } : null));
         });
+
+        unlistenQuotaUpdate = await subscribeToQuotaUpdates((qs: QuotaUpdateEvent) => {
+          setQuotaState(qs);
+          if (qs.active_model) {
+            setLastActiveModel(qs.active_model);
+          }
+          if (qs.last_switch_reason) {
+            setLastSwitchReason(qs.last_switch_reason);
+          }
+        });
       } catch (err) {
         console.warn('Tauri event listeners could not be attached:', err);
       }
@@ -90,8 +122,26 @@ export default function App() {
       unlistenWorkerMsg?.();
       unlistenWorkerStatus?.();
       unlistenEngineHealth?.();
+      unlistenQuotaUpdate?.();
     };
   }, [refreshStatus]);
+
+  // Handler: Pin / Unpin model (e.g. gemini-3.8-flash)
+  const handlePinModel = async (modelId: string | null) => {
+    setIsPinnedLoading(true);
+    try {
+      const updated = await setPinnedModel(modelId);
+      setQuotaState(updated);
+      setLastActiveModel(updated.active_model);
+      if (updated.last_switch_reason) {
+        setLastSwitchReason(updated.last_switch_reason);
+      }
+    } catch (err: any) {
+      console.error('Failed to pin model:', err);
+    } finally {
+      setIsPinnedLoading(false);
+    }
+  };
 
   // Handler: Open Project
   const handleOpenProject = async (path: string) => {
@@ -134,11 +184,17 @@ export default function App() {
     try {
       const result = await submitPlanRequest(previewId, true);
       setPlan(result.plan);
+      if (result.active_model) {
+        setLastActiveModel(result.active_model);
+      }
+      if (result.switch_reason) {
+        setLastSwitchReason(result.switch_reason);
+      }
       setSystemStatus((prev) =>
         prev
           ? {
               ...prev,
-              request_count: result.request_count,
+              request_count: result.request_count ?? prev.request_count + 1,
               task_state: 'Idle',
             }
           : null
@@ -228,15 +284,44 @@ export default function App() {
             </div>
           )}
 
-          <div className="flex items-center gap-1 px-2.5 py-1 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20 text-[11px] font-medium">
-            <Sparkles className="w-3 h-3" />
-            <span>Gemini 3.5 Flash-Lite</span>
-          </div>
+          {/* Interactive Rate Limit / Planner Model Pill */}
+          <button
+            type="button"
+            onClick={() => setShowQuotaDashboard(!showQuotaDashboard)}
+            title="Click to view real-time rate limit telemetry & waterfall cascade"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-[11px] font-medium transition-colors cursor-pointer ${
+              showQuotaDashboard
+                ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
+                : quotaState?.pinned_model
+                ? 'bg-purple-500/20 text-purple-300 border-purple-500/40 hover:bg-purple-500/30'
+                : 'bg-purple-500/10 text-purple-400 border-purple-500/20 hover:bg-purple-500/20'
+            }`}
+          >
+            <Sparkles className="w-3 h-3 text-purple-400" />
+            <span className="font-mono">
+              {quotaState?.pinned_model
+                ? 'Pinned: 3.8 Flash'
+                : quotaState?.active_model || 'gemini-3.5-flash-lite'}
+            </span>
+            <Gauge className="w-3 h-3 text-blue-400" />
+          </button>
         </div>
       </header>
 
       {/* Main View Area */}
       <main className="flex-1 flex flex-col overflow-hidden relative">
+        {/* Quota Dashboard Modal / Drawer */}
+        {showQuotaDashboard && (
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 p-6 flex items-center justify-center overflow-y-auto">
+            <QuotaDashboard
+              quotaState={quotaState}
+              onPinModel={handlePinModel}
+              onClose={() => setShowQuotaDashboard(false)}
+              isPinnedActionLoading={isPinnedLoading}
+            />
+          </div>
+        )}
+
         {!project ? (
           <WelcomeScreen
             status={systemStatus}
@@ -252,6 +337,8 @@ export default function App() {
             taskState={systemStatus?.task_state || 'Idle'}
             workerEvents={workerEvents}
             workerSessionId={workerSessionId}
+            activePlannerModel={lastActiveModel}
+            switchReason={lastSwitchReason}
             onConfirmPlanRequest={handleConfirmPlanRequest}
             onStartWorkerSession={handleStartWorkerSession}
             onStopWorkerSession={handleStopWorkerSession}
@@ -271,7 +358,12 @@ export default function App() {
       </main>
 
       {/* Sticky Bottom Status Bar */}
-      <StatusBar project={project} status={systemStatus} />
+      <StatusBar
+        project={project}
+        status={systemStatus}
+        quotaState={quotaState}
+        onOpenQuotaDashboard={() => setShowQuotaDashboard((prev) => !prev)}
+      />
     </div>
   );
 }

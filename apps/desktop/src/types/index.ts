@@ -66,7 +66,40 @@ export interface ZencodePlan {
 
 export interface PlanSubmissionResult {
   plan: ZencodePlan;
-  request_count: number;
+  request_count?: number;
+  active_model?: string;
+  switch_reason?: string | null;
+}
+
+export interface ModelQuotaStatus {
+  model_id: string;
+  display_name: string;
+  rpm_limit: number;
+  rpm_consumed: number;
+  rpm_remaining: number;
+  rpm_reset_seconds: number;
+
+  tpm_limit: number;
+  tpm_consumed: number;
+  tpm_remaining: number;
+  tpm_reset_seconds: number;
+
+  rpd_limit: number;
+  rpd_consumed: number;
+  rpd_remaining: number;
+  rpd_reset_formatted: string;
+  rpd_reset_seconds: number;
+
+  is_available: boolean;
+  threshold_80_percent_exceeded: boolean;
+}
+
+export interface QuotaUpdateEvent {
+  active_model: string;
+  pinned_model: string | null;
+  last_switch_reason: string | null;
+  models: ModelQuotaStatus[];
+  timestamp_ms: number;
 }
 
 export interface WorkerEventPayload {

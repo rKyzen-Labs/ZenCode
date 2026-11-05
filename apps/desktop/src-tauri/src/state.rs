@@ -2,15 +2,16 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use zencode_core::{GeminiPlannerClient, PlanningContext};
+use zencode_core::PlanningContext;
 
 use crate::engine::EngineSupervisor;
 use crate::models::{ProjectState, TaskState};
+use crate::planner::CascadePlannerClient;
 
 pub struct AppState {
     pub active_project: Arc<Mutex<Option<ProjectState>>>,
     pub engine_supervisor: Arc<Mutex<Option<EngineSupervisor>>>,
-    pub planner_client: Arc<GeminiPlannerClient>,
+    pub planner_client: Arc<CascadePlannerClient>,
     pub task_state: Arc<Mutex<TaskState>>,
     pub request_count: Arc<AtomicU32>,
     pub pending_previews: Arc<Mutex<HashMap<String, PlanningContext>>>,
@@ -21,7 +22,7 @@ impl AppState {
         Self {
             active_project: Arc::new(Mutex::new(None)),
             engine_supervisor: Arc::new(Mutex::new(None)),
-            planner_client: Arc::new(GeminiPlannerClient::new()),
+            planner_client: Arc::new(CascadePlannerClient::new()),
             task_state: Arc::new(Mutex::new(TaskState::Idle)),
             request_count: Arc::new(AtomicU32::new(0)),
             pending_previews: Arc::new(Mutex::new(HashMap::new())),

@@ -11,6 +11,7 @@ use crate::models::{
     ContextPreview, EngineHealth, PlanSubmissionResult, ProjectState, SystemStatus, TaskState,
     WorkerEventPayload,
 };
+use crate::planner::{QuotaUpdateEvent, MODEL_PRIMARY};
 use crate::state::AppState;
 
 /// Open a local project directory, detect its characteristics and Git state.
@@ -260,6 +261,7 @@ pub async fn execute_submit_plan(
     context_preview_id: &str,
     confirmed: bool,
     state: &AppState,
+    app_handle: Option<&AppHandle>,
 ) -> Result<PlanSubmissionResult, String> {
     // HARD ENFORCEMENT: confirmed must be true in Rust
     if !confirmed {
@@ -287,20 +289,32 @@ pub async fn execute_submit_plan(
     let api_key = CredentialService::get_gemini_api_key()
         .map_err(|e| format!("Failed to read Gemini API key from OS Credential Store: {e}"))?;
 
-    // Execute 1 explicit planning request
-    let plan_result = state.planner_client.plan(&api_key, &context).await;
+    // Execute plan request through Rate Limit Manager & Auto-Cascade Router
+    let plan_result = state
+        .planner_client
+        .plan_with_cascade(&api_key, &context, app_handle)
+        .await;
 
     match plan_result {
-        Ok((plan, usage)) => {
+        Ok((plan, active_model, usage)) => {
             state.increment_request_count();
+            let switch_reason = {
+                let tracker = state.planner_client.quota_tracker.lock().await;
+                tracker.last_switch_reason.clone()
+            };
             {
                 let mut task = state.task_state.lock().await;
                 *task = TaskState::AwaitingReview;
             }
-            Ok(PlanSubmissionResult { plan, usage })
+            Ok(PlanSubmissionResult {
+                plan,
+                usage,
+                active_model,
+                switch_reason,
+            })
         }
         Err(e) => {
-            let sanitized = redact_secrets(&e.to_string(), Some(&api_key));
+            let sanitized = redact_secrets(&e, Some(&api_key));
             {
                 let mut task = state.task_state.lock().await;
                 *task = TaskState::Failed(sanitized.clone());
@@ -310,15 +324,44 @@ pub async fn execute_submit_plan(
     }
 }
 
-/// Submits the confirmed planning request to Gemini.
+/// Submits the confirmed planning request to Gemini using rate-limit cascade.
 /// Enforces confirmed == true in Rust.
 #[tauri::command]
 pub async fn submit_plan_request(
     context_preview_id: String,
     confirmed: bool,
+    app_handle: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<PlanSubmissionResult, String> {
-    execute_submit_plan(&context_preview_id, confirmed, &state).await
+    execute_submit_plan(&context_preview_id, confirmed, &state, Some(&app_handle)).await
+}
+
+/// Returns current real-time quota telemetry across all 4 supported models.
+#[tauri::command]
+pub async fn get_quota_state(state: State<'_, AppState>) -> Result<QuotaUpdateEvent, String> {
+    let mut tracker = state.planner_client.quota_tracker.lock().await;
+    let active = tracker
+        .pinned_model
+        .clone()
+        .unwrap_or_else(|| MODEL_PRIMARY.to_string());
+    Ok(tracker.to_quota_update_event(&active))
+}
+
+/// Manually pin gemini-3.8-flash for advanced planning, or revert to None (auto-cascade).
+#[tauri::command]
+pub async fn set_pinned_model(
+    model: Option<String>,
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<QuotaUpdateEvent, String> {
+    let event = {
+        let mut tracker = state.planner_client.quota_tracker.lock().await;
+        tracker.set_pinned_model(model.clone());
+        let active = model.unwrap_or_else(|| MODEL_PRIMARY.to_string());
+        tracker.to_quota_update_event(&active)
+    };
+    let _ = app_handle.emit("planner:quota_update", &event);
+    Ok(event)
 }
 
 /// Starts an OpenCode worker session restricted strictly to local Ollama.
@@ -459,7 +502,7 @@ mod tests {
         let app_state = AppState::new();
 
         // 1. Calling execute_submit_plan with confirmed = false MUST return an error immediately
-        let result = execute_submit_plan("test_preview_123", false, &app_state).await;
+        let result = execute_submit_plan("test_preview_123", false, &app_state, None).await;
         assert!(result.is_err(), "Must fail when confirmed == false");
         let err = result.unwrap_err();
         assert!(

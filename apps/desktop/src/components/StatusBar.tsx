@@ -1,13 +1,20 @@
 import type { FC } from 'react';
-import type { SystemStatus, ProjectState } from '../types';
-import { GitBranch, Cpu, Brain, Activity, CircleDot } from 'lucide-react';
+import type { SystemStatus, ProjectState, QuotaUpdateEvent } from '../types';
+import { GitBranch, Cpu, Brain, Activity, CircleDot, Gauge } from 'lucide-react';
 
 interface StatusBarProps {
   project: ProjectState | null;
   status: SystemStatus | null;
+  quotaState?: QuotaUpdateEvent | null;
+  onOpenQuotaDashboard?: () => void;
 }
 
-export const StatusBar: FC<StatusBarProps> = ({ project, status }) => {
+export const StatusBar: FC<StatusBarProps> = ({
+  project,
+  status,
+  quotaState,
+  onOpenQuotaDashboard,
+}) => {
   const getHealthColor = (health?: string) => {
     switch (health) {
       case 'Ready':
@@ -62,12 +69,31 @@ export const StatusBar: FC<StatusBarProps> = ({ project, status }) => {
 
       {/* Right: AI Models & Engine Health & Task status */}
       <div className="flex items-center gap-4">
-        {/* Planner requests */}
-        <div className="flex items-center gap-1 text-zinc-300">
+        {/* Planner Model & Quota Dashboard trigger */}
+        <button
+          type="button"
+          onClick={onOpenQuotaDashboard}
+          title="Click to view real-time rate limit telemetry & waterfall cascade"
+          className="flex items-center gap-1.5 text-zinc-300 hover:text-white px-1.5 py-0.5 rounded hover:bg-zinc-800 transition-colors cursor-pointer"
+        >
           <Brain className="w-3.5 h-3.5 text-purple-400" />
-          <span>Gemini:</span>
+          <span className="font-mono text-[10px] text-zinc-200">
+            {quotaState?.active_model || 'gemini-3.5-flash-lite'}
+          </span>
+          {quotaState?.pinned_model && (
+            <span className="text-[9px] px-1 rounded bg-purple-500/20 text-purple-300">
+              PINNED
+            </span>
+          )}
+          <Gauge className="w-3 h-3 text-blue-400 ml-0.5" />
+        </button>
+
+        <span className="text-zinc-600">|</span>
+
+        {/* Requests Count */}
+        <div className="flex items-center gap-1 text-zinc-400">
+          <span>Reqs:</span>
           <span className="font-mono text-zinc-200">{status?.request_count ?? 0}</span>
-          <span className="text-zinc-500 text-[10px]">reqs (free)</span>
         </div>
 
         <span className="text-zinc-600">|</span>
