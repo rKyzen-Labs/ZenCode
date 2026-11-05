@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/zencode-core",
+    "tests/engine-contract",
+    "apps/desktop/src-tauri",
+]

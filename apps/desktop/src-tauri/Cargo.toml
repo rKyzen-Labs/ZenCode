@@ -1,0 +1,26 @@
+[package]
+name = "zencode-desktop"
+version = "0.1.0"
+description = "Zencode - Free-first, local-first AI-assisted development workspace"
+edition = "2021"
+
+[lib]
+name = "zencode_desktop_lib"
+crate-type = ["lib"]
+
+[build-dependencies]
+tauri-build = { version = "2.2", features = [] }
+
+[dependencies]
+tauri = { version = "2.2", features = [] }
+tauri-plugin-shell = "2.2"
+zencode-core = { path = "../../../crates/zencode-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.43", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+eventsource-stream = "0.2"
+futures-util = "0.3"
+rand = "0.8"
+base64 = "0.22"
+thiserror = "2.0"
