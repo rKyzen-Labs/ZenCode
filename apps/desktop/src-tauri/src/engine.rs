@@ -176,11 +176,12 @@ impl EngineSupervisor {
         let url = format!("http://127.0.0.1:{}/session", self.port);
 
         let body = serde_json::json!({
-            "directory": directory
+            "title": format!("Worker: {}", Path::new(directory).file_name().and_then(|n| n.to_str()).unwrap_or("project"))
         });
 
         let resp = client
             .post(&url)
+            .query(&[("directory", directory)])
             .header("Authorization", self.auth_header())
             .json(&body)
             .send()
@@ -224,8 +225,8 @@ impl EngineSupervisor {
                 }
             ],
             "model": {
-                "provider": "ollama",
-                "name": worker_model
+                "providerID": "ollama",
+                "modelID": worker_model
             }
         });
 
