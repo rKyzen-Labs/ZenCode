@@ -73,7 +73,7 @@ export const TaskView: FC<TaskViewProps> = ({
         <div className="flex items-center gap-2 text-xs">
           <span className="text-[var(--foreground-muted)]">Task:</span>
           <span className="text-zinc-200 font-medium truncate max-w-md">
-            {contextPreview?.task_description || plan?.goal || 'Active Task'}
+            {contextPreview?.task_description || plan?.task_summary || plan?.goal || 'Active Task'}
           </span>
         </div>
 
@@ -131,11 +131,11 @@ export const TaskView: FC<TaskViewProps> = ({
           {/* Shallow Tree Preview */}
           <div className="p-3 rounded-lg bg-[var(--surface-raised)] border border-[var(--surface-border)] space-y-2">
             <div className="flex items-center justify-between text-xs text-zinc-400 font-medium">
-              <span>Shallow File Tree ({contextPreview.shallow_tree.length} entries):</span>
+              <span>Shallow File Tree ({contextPreview.shallow_tree?.length || 0} entries):</span>
               <span className="text-[10px] text-zinc-500">Excluded: node_modules, .git, target, .venv</span>
             </div>
             <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
-              {contextPreview.shallow_tree.map((entry, idx) => (
+              {(contextPreview.shallow_tree || []).map((entry, idx) => (
                 <span
                   key={idx}
                   className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono text-[10px]"
@@ -155,7 +155,7 @@ export const TaskView: FC<TaskViewProps> = ({
             >
               <div className="flex items-center gap-2">
                 <FileText className="w-3.5 h-3.5 text-zinc-400" />
-                <span>View Raw Assembled Gemini Prompt ({contextPreview.preview_text.length} chars)</span>
+                <span>View Raw Assembled Gemini Prompt ({contextPreview.preview_text?.length || 0} chars)</span>
               </div>
               {showFullPrompt ? (
                 <ChevronDown className="w-4 h-4 text-zinc-400" />
@@ -266,78 +266,167 @@ export const TaskView: FC<TaskViewProps> = ({
             </div>
           </div>
 
-          {/* Goal & Architecture Notes */}
+          {/* Goal & Task Summary */}
           <div className="space-y-3">
             <div className="p-3.5 rounded-lg bg-[var(--surface-raised)] border border-[var(--surface-border)] space-y-1">
-              <span className="text-xs font-semibold text-zinc-300">Goal:</span>
-              <p className="text-xs text-zinc-200 leading-relaxed">{plan.goal}</p>
+              <span className="text-xs font-semibold text-zinc-300">Goal / Task Summary:</span>
+              <p className="text-xs text-zinc-200 leading-relaxed font-sans">
+                {plan.task_summary || plan.goal || 'No task summary provided.'}
+              </p>
             </div>
 
-            {plan.architecture_notes && (
-              <div className="p-3.5 rounded-lg bg-[var(--surface-raised)] border border-[var(--surface-border)] space-y-1">
-                <span className="text-xs font-semibold text-zinc-300">Architecture Notes:</span>
-                <p className="text-xs text-zinc-400 leading-relaxed">{plan.architecture_notes}</p>
+            {/* Architecture Notes & Project Findings */}
+            {((plan.project_findings && plan.project_findings.length > 0) || plan.architecture_notes) && (
+              <div className="p-3.5 rounded-lg bg-[var(--surface-raised)] border border-[var(--surface-border)] space-y-1.5">
+                <span className="text-xs font-semibold text-zinc-300">Project Findings & Context:</span>
+                {plan.project_findings && plan.project_findings.length > 0 ? (
+                  <ul className="list-disc list-inside text-xs text-zinc-300 space-y-1">
+                    {plan.project_findings.map((finding, idx) => (
+                      <li key={idx} className="leading-relaxed">{finding}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-zinc-400 leading-relaxed">{plan.architecture_notes}</p>
+                )}
+              </div>
+            )}
+
+            {/* Assumptions */}
+            {plan.assumptions && plan.assumptions.length > 0 && (
+              <div className="p-3 rounded-lg bg-[var(--surface-raised)] border border-[var(--surface-border)] space-y-1 text-xs">
+                <span className="font-semibold text-zinc-400">Assumptions:</span>
+                <ul className="list-disc list-inside text-zinc-400 space-y-0.5">
+                  {plan.assumptions.map((item, idx) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
               </div>
             )}
           </div>
 
           {/* Implementation Steps */}
-          <div className="space-y-2">
+          <div className="space-y-3">
             <h3 className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
               <Layers className="w-3.5 h-3.5 text-blue-400" />
-              <span>Implementation Steps ({plan.steps.length})</span>
+              <span>Implementation Steps ({(plan.steps || []).length})</span>
             </h3>
 
-            <div className="space-y-2">
-              {plan.steps.map((step) => (
-                <div
-                  key={step.step_number}
-                  className="p-3 rounded-lg bg-[var(--surface-raised)] border border-[var(--surface-border)] flex items-start gap-3"
-                >
-                  <span className="w-5 h-5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30 text-[10px] font-mono flex items-center justify-center shrink-0 mt-0.5">
-                    {step.step_number}
-                  </span>
-                  <div className="flex-1 space-y-1.5">
-                    <p className="text-xs text-zinc-200">{step.description}</p>
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-[10px] text-zinc-500">Target files:</span>
-                      {step.target_files.map((file, fIdx) => (
-                        <span
-                          key={fIdx}
-                          className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-[10px] font-mono text-zinc-300"
-                        >
-                          {file}
+            <div className="space-y-3">
+              {(plan.steps || []).map((step, idx) => {
+                const stepNum = step.step_number ?? (idx + 1);
+                const stepId = step.id || `step_${stepNum}`;
+                const stepGoal = step.goal || step.description || `Step ${stepNum}`;
+                const files = step.likely_files || step.target_files || [];
+                const instructions = step.instructions || [];
+                const checks = step.acceptance_checks || [];
+
+                return (
+                  <div
+                    key={stepId}
+                    className="p-4 rounded-xl bg-[var(--surface-raised)] border border-[var(--surface-border)] space-y-2.5 shadow-sm"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start gap-2.5">
+                        <span className="w-5 h-5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30 text-[10px] font-mono flex items-center justify-center shrink-0 mt-0.5">
+                          {stepNum}
                         </span>
-                      ))}
-                      <span
-                        className={`text-[9px] px-1.5 py-0.2 rounded font-mono ml-auto ${
-                          step.risk_level === 'High'
-                            ? 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
-                            : step.risk_level === 'Medium'
-                            ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-                            : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                        }`}
-                      >
-                        Risk: {step.risk_level}
-                      </span>
+                        <div>
+                          <h4 className="text-xs font-semibold text-zinc-100">{stepGoal}</h4>
+                          {step.id && (
+                            <span className="text-[10px] text-zinc-500 font-mono">ID: {step.id}</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {step.risk_level && (
+                        <span
+                          className={`text-[9px] px-2 py-0.5 rounded font-mono ml-auto ${
+                            step.risk_level === 'High'
+                              ? 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
+                              : step.risk_level === 'Medium'
+                              ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                              : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                          }`}
+                        >
+                          Risk: {step.risk_level}
+                        </span>
+                      )}
                     </div>
+
+                    {/* Step Instructions */}
+                    {instructions.length > 0 && (
+                      <div className="space-y-1 pl-7">
+                        <span className="text-[11px] font-medium text-zinc-400">Instructions:</span>
+                        <ul className="list-disc list-inside text-xs text-zinc-300 space-y-0.5">
+                          {instructions.map((inst, iIdx) => (
+                            <li key={iIdx} className="leading-relaxed">{inst}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Target / Likely Files */}
+                    {files.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 pl-7 pt-1">
+                        <span className="text-[10px] text-zinc-500">Likely files:</span>
+                        {files.map((file, fIdx) => (
+                          <span
+                            key={fIdx}
+                            className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-[10px] font-mono text-zinc-300"
+                          >
+                            {file}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Step Verification Checks */}
+                    {checks.length > 0 && (
+                      <div className="space-y-0.5 pl-7 pt-1 text-[11px]">
+                        <span className="font-medium text-emerald-400/90">Verification checks:</span>
+                        <ul className="list-disc list-inside text-zinc-400 space-y-0.5">
+                          {checks.map((check, cIdx) => (
+                            <li key={cIdx}>{check}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
-          {/* Acceptance Criteria */}
-          {plan.acceptance_criteria && plan.acceptance_criteria.length > 0 && (
+          {/* Risks section */}
+          {plan.risks && plan.risks.length > 0 && (
+            <div className="space-y-2">
+              <h3 className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                <span>Identified Risks</span>
+              </h3>
+              <div className="p-3.5 rounded-lg bg-amber-500/10 border border-amber-500/30 space-y-1.5">
+                {plan.risks.map((risk, rIdx) => (
+                  <div key={rIdx} className="flex items-center gap-2 text-xs text-amber-300">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0"></span>
+                    <span>{risk}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Acceptance Criteria & Verification Suggestions */}
+          {((plan.verification_suggestions && plan.verification_suggestions.length > 0) ||
+            (plan.acceptance_criteria && plan.acceptance_criteria.length > 0)) && (
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-zinc-300 flex items-center gap-1.5">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Acceptance Criteria</span>
+                <span>Acceptance & Verification Suggestions</span>
               </h3>
               <div className="p-3 rounded-lg bg-[var(--surface-raised)] border border-[var(--surface-border)] space-y-1.5">
-                {plan.acceptance_criteria.map((criteria, cIdx) => (
+                {(plan.verification_suggestions || plan.acceptance_criteria || []).map((criteria, cIdx) => (
                   <div key={cIdx} className="flex items-center gap-2 text-xs text-zinc-300">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></span>
                     <span>{criteria}</span>
                   </div>
                 ))}
@@ -376,18 +465,29 @@ export const TaskView: FC<TaskViewProps> = ({
             {workerEvents.length === 0 ? (
               <div className="text-zinc-600 italic">Waiting for initial worker response...</div>
             ) : (
-              workerEvents.map((event, idx) => (
-                <div key={idx} className="space-y-1">
-                  <div className="flex items-center gap-2 text-[10px] text-zinc-500">
-                    <Clock className="w-3 h-3" />
-                    <span>{new Date(event.timestamp_ms).toLocaleTimeString()}</span>
-                    <span className="px-1 rounded bg-zinc-900 text-zinc-400">{event.event_type}</span>
+              workerEvents.map((event, idx) => {
+                const timeStr = event?.timestamp_ms
+                  ? new Date(event.timestamp_ms).toLocaleTimeString()
+                  : '';
+                const contentStr =
+                  typeof event?.content === 'string'
+                    ? event.content
+                    : JSON.stringify(event?.content, null, 2);
+                const eventTypeStr = String(event?.event_type || 'message');
+
+                return (
+                  <div key={idx} className="space-y-1">
+                    <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+                      <Clock className="w-3 h-3" />
+                      <span>{timeStr}</span>
+                      <span className="px-1 rounded bg-zinc-900 text-zinc-400">{eventTypeStr}</span>
+                    </div>
+                    <pre className="text-zinc-300 font-mono text-[11px] whitespace-pre-wrap leading-relaxed">
+                      {contentStr}
+                    </pre>
                   </div>
-                  <pre className="text-zinc-300 font-mono text-[11px] whitespace-pre-wrap leading-relaxed">
-                    {event.content}
-                  </pre>
-                </div>
-              ))
+                );
+              })
             )}
             <div ref={eventsEndRef} />
           </div>

@@ -47,9 +47,11 @@ pub struct SystemStatus {
 pub struct ContextPreview {
     pub preview_id: String,
     pub task_description: String,
-    pub preview_text: String,
+    pub project_type: String,
     pub shallow_tree: Vec<String>,
     pub manifest_summaries: Vec<String>,
+    pub git_branch_and_status: String,
+    pub preview_text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

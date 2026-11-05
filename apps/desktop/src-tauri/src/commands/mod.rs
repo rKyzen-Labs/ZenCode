@@ -215,10 +215,10 @@ pub async fn preview_planning_context(
 
     let context = PlanningContext {
         task_description: task_description.clone(),
-        project_type: active_project.project_type,
+        project_type: active_project.project_type.clone(),
         shallow_tree: shallow_tree.clone(),
         manifest_summaries: manifest_summaries.clone(),
-        git_branch_and_status,
+        git_branch_and_status: git_branch_and_status.clone(),
         approved_source_excerpts: Vec::new(),
         constraints: vec![
             "Free-tier planning only: produce clear step-by-step guidance".into(),
@@ -249,9 +249,11 @@ pub async fn preview_planning_context(
     Ok(ContextPreview {
         preview_id,
         task_description,
-        preview_text,
+        project_type: active_project.project_type,
         shallow_tree,
         manifest_summaries,
+        git_branch_and_status,
+        preview_text,
     })
 }
 

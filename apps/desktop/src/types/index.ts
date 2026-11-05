@@ -50,18 +50,34 @@ export interface ContextPreview {
   preview_text: string;
 }
 
-export interface ZencodePlanStep {
-  step_number: number;
-  description: string;
-  target_files: string[];
-  risk_level: 'Low' | 'Medium' | 'High' | string;
+export interface PlanStep {
+  id?: string;
+  goal?: string;
+  likely_files?: string[];
+  instructions?: string[];
+  depends_on?: string[];
+  acceptance_checks?: string[];
+  // Compatibility fields
+  step_number?: number;
+  description?: string;
+  target_files?: string[];
+  risk_level?: 'Low' | 'Medium' | 'High' | string;
 }
 
+export type ZencodePlanStep = PlanStep;
+
 export interface ZencodePlan {
-  goal: string;
-  architecture_notes: string;
-  steps: ZencodePlanStep[];
-  acceptance_criteria: string[];
+  task_summary?: string;
+  assumptions?: string[];
+  questions?: string[];
+  project_findings?: string[];
+  steps: PlanStep[];
+  risks?: string[];
+  verification_suggestions?: string[];
+  // Compatibility fields
+  goal?: string;
+  architecture_notes?: string;
+  acceptance_criteria?: string[];
 }
 
 export interface PlanSubmissionResult {

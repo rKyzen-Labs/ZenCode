@@ -62,7 +62,7 @@ export const StatusBar: FC<StatusBarProps> = ({
         <div className="flex items-center gap-1">
           <span className="text-zinc-400">Worktree:</span>
           <span className="text-zinc-300 font-mono text-[10px]">
-            {project ? (project.git_status_summary.includes('clean') ? 'Clean' : 'Modified') : 'Detached'}
+            {project ? (project.git_status_summary?.includes('clean') ? 'Clean' : 'Modified') : 'Detached'}
           </span>
         </div>
       </div>
