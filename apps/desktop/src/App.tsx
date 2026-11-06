@@ -34,20 +34,23 @@ import {
   recoverOrphanedWorktree,
   subscribeToInventoryReady,
 } from './lib/ipc';
-import { StatusBar } from './components/StatusBar';
+import { HeaderTabBar } from './components/HeaderTabBar';
+import { SideToolRail, type ActiveToolPane } from './components/SideToolRail';
+import { PromptDock } from './components/PromptDock';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { WorkspaceScreen } from './components/WorkspaceScreen';
 import { TaskView } from './components/TaskView';
 import { QuotaDashboard } from './components/QuotaDashboard';
 import { DirtyTreeDialog } from './components/DirtyTreeDialog';
 import { OrphanRecoveryDialog } from './components/OrphanRecoveryDialog';
-import { Shield, Sparkles, Gauge } from 'lucide-react';
+import { ReviewPanel } from './features/review/ReviewPanel';
+import { StatusBar } from './components/StatusBar';
 
 export default function App() {
   const [project, setProject] = useState<ProjectState | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [quotaState, setQuotaState] = useState<QuotaUpdateEvent | null>(null);
-  const [showQuotaDashboard, setShowQuotaDashboard] = useState(false);
+  const [activeToolPane, setActiveToolPane] = useState<ActiveToolPane>(null);
   const [isPinnedLoading, setIsPinnedLoading] = useState(false);
   const [lastActiveModel, setLastActiveModel] = useState<string>('gemini-3.5-flash-lite');
   const [lastSwitchReason, setLastSwitchReason] = useState<string | null>(null);
@@ -87,6 +90,30 @@ export default function App() {
         request_count: 0,
       });
     }
+  }, []);
+
+  // Global Keyboard Shortcuts (matching Example Image 2)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.altKey) {
+        const k = e.key.toLowerCase();
+        if (k === 'r') {
+          e.preventDefault();
+          setActiveToolPane((prev) => (prev === 'review' ? null : 'review'));
+        } else if (k === 'b') {
+          e.preventDefault();
+          setActiveToolPane((prev) => (prev === 'quota' ? null : 'quota'));
+        } else if (k === 't') {
+          e.preventDefault();
+          setActiveToolPane((prev) => (prev === 'terminal' ? null : 'terminal'));
+        } else if (k === 'p') {
+          e.preventDefault();
+          setActiveToolPane((prev) => (prev === 'files' ? null : 'files'));
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
   // Subscribe to real-time events on mount
@@ -144,6 +171,8 @@ export default function App() {
 
         unlistenInventoryReady = await subscribeToInventoryReady((inv: ChangeInventory) => {
           setInventory(inv);
+          // Automatically open review pane when inventory is received
+          setActiveToolPane('review');
         });
       } catch (err) {
         console.warn('Tauri event listeners could not be attached:', err);
@@ -340,6 +369,7 @@ export default function App() {
       if ('Success' in res || (res as any).status === 'Success') {
         setInventory(null);
         setActiveTaskId(null);
+        setActiveToolPane(null);
         await refreshStatus();
       }
       return res;
@@ -355,6 +385,7 @@ export default function App() {
       await rejectTask(tid);
       setInventory(null);
       setActiveTaskId(null);
+      setActiveToolPane(null);
       await refreshStatus();
     } finally {
       setIsLoading(false);
@@ -369,6 +400,7 @@ export default function App() {
       if (inv) {
         setInventory(inv);
         setActiveTaskId(tid);
+        setActiveToolPane('review');
         setOrphanedWorktrees((prev) => prev.filter((o) => o.task_id !== tid));
       }
     } catch (err: any) {
@@ -407,7 +439,7 @@ export default function App() {
     }
   };
 
-  // Handler: Reset Task State
+  // Handler: Reset Task State / New Session
   const handleResetTask = () => {
     setContextPreview(null);
     setPlan(null);
@@ -415,6 +447,7 @@ export default function App() {
     setWorkerSessionId(null);
     setInventory(null);
     setActiveTaskId(null);
+    setActiveToolPane(null);
     setError(null);
   };
 
@@ -427,7 +460,7 @@ export default function App() {
   const isTaskActive = Boolean(contextPreview || plan || workerEvents.length > 0 || inventory);
 
   return (
-    <div className="flex h-screen w-screen flex-col bg-[var(--background)] text-[var(--foreground)] overflow-hidden font-sans">
+    <div className="flex h-screen w-screen flex-col bg-[#0d0d0f] text-[#e4e4e7] overflow-hidden font-sans select-none">
       {/* Dirty Tree Modal (Step 4 Policy) */}
       {dirtyFiles && dirtyFiles.length > 0 && (
         <DirtyTreeDialog
@@ -452,118 +485,146 @@ export default function App() {
         />
       )}
 
-      {/* Top Application Header */}
-      <header className="h-11 w-full border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 flex items-center justify-between text-xs select-none shrink-0 z-10">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 font-semibold tracking-wide text-zinc-100">
-            <div className="w-5 h-5 rounded-md bg-blue-600 flex items-center justify-center text-white font-bold text-[10px] shadow-sm">
-              Z
-            </div>
-            <span>Zencode</span>
+      {/* Top Window / Session Tab Header (Matching Example Image 2) */}
+      <HeaderTabBar
+        project={project}
+        taskState={systemStatus?.task_state || 'Idle'}
+        activeTab="Worker: ZenCode"
+        activePlannerModel={lastActiveModel}
+        isPinned={Boolean(quotaState?.pinned_model)}
+        onNewSession={handleResetTask}
+        onOpenQuota={() => setActiveToolPane(activeToolPane === 'quota' ? null : 'quota')}
+        onChangeProject={handleChangeProject}
+        tokenCount="8k"
+      />
+
+      {/* Main Split Layout: Center Chat/Canvas + Right Action Rail/Pane */}
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* Center Workspace & Chat Area */}
+        <div className="flex-1 flex flex-col h-full overflow-hidden relative bg-[#0d0d0f]">
+          <div className="flex-1 overflow-y-auto">
+            {!project ? (
+              <WelcomeScreen
+                status={systemStatus}
+                onOpenProject={handleOpenProject}
+                onRefreshStatus={refreshStatus}
+                isLoading={isLoading}
+                error={error}
+              />
+            ) : isTaskActive ? (
+              <TaskView
+                contextPreview={contextPreview}
+                plan={plan}
+                taskState={systemStatus?.task_state || 'Idle'}
+                workerEvents={workerEvents}
+                workerSessionId={workerSessionId}
+                activePlannerModel={lastActiveModel}
+                switchReason={lastSwitchReason}
+                inventory={inventory}
+                activeTaskId={activeTaskId}
+                onConfirmPlanRequest={handleConfirmPlanRequest}
+                onStartWorkerSession={handleStartWorkerSession}
+                onStopWorkerSession={handleStopWorkerSession}
+                onAcceptTask={handleAcceptTask}
+                onRejectTask={handleRejectTask}
+                onResetTask={handleResetTask}
+                onOpenReviewPane={() => setActiveToolPane('review')}
+                isLoading={isLoading}
+                error={error}
+              />
+            ) : (
+              <WorkspaceScreen
+                project={project}
+                onPreviewContext={handlePreviewContext}
+                onChangeProject={handleChangeProject}
+                isLoading={isLoading}
+                error={error}
+              />
+            )}
           </div>
 
-          <span className="text-zinc-600">|</span>
-
-          <div className="flex items-center gap-1.5 text-zinc-400">
-            <Shield className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="text-[11px]">Git Isolation Active</span>
-          </div>
+          {/* Floating Bottom Prompt Dock (Matching Example Image 2) */}
+          {project && (
+            <PromptDock
+              onSubmit={(text, mode) => {
+                if (mode === 'plan' || !plan) {
+                  handlePreviewContext(text);
+                } else {
+                  handleStartWorkerSession(plan);
+                }
+              }}
+              isLoading={isLoading}
+              activeModelName={quotaState?.pinned_model ? '3.8 Flash' : lastActiveModel}
+              isPinned={Boolean(quotaState?.pinned_model)}
+              onSelectModel={handlePinModel}
+            />
+          )}
         </div>
 
-        {/* Right side indicators */}
-        <div className="flex items-center gap-2">
-          {project && (
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[var(--surface-raised)] border border-[var(--surface-border)] text-zinc-300 font-mono text-[11px]">
-              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-              <span>{project.name}</span>
+        {/* Right Tool Rail & Side Pane (Matching Example Image 2) */}
+        <SideToolRail
+          activePane={activeToolPane}
+          onTogglePane={setActiveToolPane}
+          inventory={inventory}
+          workerEventCount={workerEvents.length}
+        >
+          {activeToolPane === 'review' && inventory && (
+            <ReviewPanel
+              inventory={inventory}
+              taskId={activeTaskId || 'active-task'}
+              onAccept={handleAcceptTask}
+              onReject={handleRejectTask}
+              isLoading={isLoading}
+            />
+          )}
+
+          {activeToolPane === 'quota' && quotaState && (
+            <div className="h-full overflow-y-auto">
+              <QuotaDashboard
+                quotaState={quotaState}
+                onClose={() => setActiveToolPane(null)}
+                onPinModel={handlePinModel}
+                isPinnedActionLoading={isPinnedLoading}
+              />
             </div>
           )}
 
-          {/* Interactive Rate Limit / Planner Model Pill */}
-          <button
-            type="button"
-            onClick={() => setShowQuotaDashboard(!showQuotaDashboard)}
-            title="Click to view real-time rate limit telemetry & waterfall cascade"
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-[11px] font-medium transition-colors cursor-pointer ${
-              showQuotaDashboard
-                ? 'bg-blue-600 text-white border-blue-500 shadow-sm'
-                : quotaState?.pinned_model
-                ? 'bg-purple-500/20 text-purple-300 border-purple-500/40 hover:bg-purple-500/30'
-                : 'bg-purple-500/10 text-purple-400 border-purple-500/20 hover:bg-purple-500/20'
-            }`}
-          >
-            <Sparkles className="w-3 h-3 text-purple-400" />
-            <span>
-              Planner:{' '}
-              {quotaState?.pinned_model ? (
-                <strong className="text-purple-300">Pinned ({quotaState.pinned_model})</strong>
-              ) : (
-                <span>Auto ({lastActiveModel})</span>
-              )}
-            </span>
-            <Gauge className="w-3 h-3 text-zinc-400 ml-0.5" />
-          </button>
-        </div>
-      </header>
+          {activeToolPane === 'terminal' && (
+            <div className="h-full flex flex-col font-mono text-xs bg-zinc-950 p-3 rounded-lg border border-zinc-800 space-y-2 overflow-y-auto">
+              <div className="text-zinc-500 text-[10px] uppercase font-bold border-b border-zinc-800 pb-1">
+                SSE Worker Stream Output ({workerEvents.length} events)
+              </div>
+              {workerEvents.map((e, idx) => (
+                <div key={idx} className="space-y-0.5">
+                  <span className="text-[10px] text-zinc-500">[{e.event_type}]</span>
+                  <pre className="text-zinc-300 text-[11px] whitespace-pre-wrap">{e.content}</pre>
+                </div>
+              ))}
+            </div>
+          )}
 
-      {/* Main View Area */}
-      <main className="flex-1 flex overflow-hidden relative">
-        {showQuotaDashboard && quotaState && (
-          <div className="absolute top-2 right-4 z-40 w-96 shadow-2xl">
-            <QuotaDashboard
-              quotaState={quotaState}
-              onClose={() => setShowQuotaDashboard(false)}
-              onPinModel={handlePinModel}
-              isPinnedActionLoading={isPinnedLoading}
-            />
-          </div>
-        )}
-
-        {!project ? (
-          <WelcomeScreen
-            status={systemStatus}
-            onOpenProject={handleOpenProject}
-            onRefreshStatus={refreshStatus}
-            isLoading={isLoading}
-            error={error}
-          />
-        ) : isTaskActive ? (
-          <TaskView
-            contextPreview={contextPreview}
-            plan={plan}
-            taskState={systemStatus?.task_state || 'Idle'}
-            workerEvents={workerEvents}
-            workerSessionId={workerSessionId}
-            activePlannerModel={lastActiveModel}
-            switchReason={lastSwitchReason}
-            inventory={inventory}
-            activeTaskId={activeTaskId}
-            onConfirmPlanRequest={handleConfirmPlanRequest}
-            onStartWorkerSession={handleStartWorkerSession}
-            onStopWorkerSession={handleStopWorkerSession}
-            onAcceptTask={handleAcceptTask}
-            onRejectTask={handleRejectTask}
-            onResetTask={handleResetTask}
-            isLoading={isLoading}
-            error={error}
-          />
-        ) : (
-          <WorkspaceScreen
-            project={project}
-            onPreviewContext={handlePreviewContext}
-            onChangeProject={handleChangeProject}
-            isLoading={isLoading}
-            error={error}
-          />
-        )}
-      </main>
+          {activeToolPane === 'files' && project && (
+            <div className="h-full flex flex-col font-mono text-xs bg-zinc-950 p-3 rounded-lg border border-zinc-800 space-y-2 overflow-y-auto">
+              <div className="text-zinc-500 text-[10px] uppercase font-bold border-b border-zinc-800 pb-1">
+                Project Root: {project.path}
+              </div>
+              <p className="text-zinc-400 text-xs">
+                Active Branch: <span className="text-blue-400">{project.current_branch || 'none'}</span>
+              </p>
+              <p className="text-zinc-400 text-xs">
+                Status: <span className="text-emerald-400">{project.git_status_summary}</span>
+              </p>
+            </div>
+          )}
+        </SideToolRail>
+      </div>
 
       {/* Sticky Bottom Status Bar */}
       <StatusBar
         project={project}
         status={systemStatus}
         quotaState={quotaState}
-        onOpenQuotaDashboard={() => setShowQuotaDashboard((prev) => !prev)}
+        onOpenQuotaDashboard={() => setActiveToolPane(activeToolPane === 'quota' ? null : 'quota')}
       />
     </div>
   );

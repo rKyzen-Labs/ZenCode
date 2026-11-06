@@ -1,14 +1,11 @@
-import { useState, type FC, type FormEvent } from 'react';
+import { type FC } from 'react';
 import type { ProjectState } from '../types';
 import {
-  FolderGit2,
   Brain,
   Cpu,
   ArrowRight,
   Shield,
-  FileCode,
-  Sparkles,
-  RotateCcw,
+  Code2,
 } from 'lucide-react';
 
 interface WorkspaceScreenProps {
@@ -19,136 +16,92 @@ interface WorkspaceScreenProps {
   error: string | null;
 }
 
+const EXAMPLE_PROMPTS = [
+  'Add a function called add_numbers that takes two integers and returns their sum, with unit tests',
+  'Implement health check endpoint with JSON uptime telemetry',
+  'Add logging to error handling branches with structured metadata',
+  'Create unit test suite covering edge case scenarios',
+];
+
 export const WorkspaceScreen: FC<WorkspaceScreenProps> = ({
   project,
   onPreviewContext,
-  onChangeProject,
   isLoading,
   error,
 }) => {
-  const [taskDescription, setTaskDescription] = useState('');
-
-  const handleSubmit = (e: FormEvent) => {
-    e.preventDefault();
-    if (taskDescription.trim()) {
-      onPreviewContext(taskDescription.trim());
-    }
-  };
-
   return (
-    <div className="flex-1 flex flex-col p-6 max-w-5xl mx-auto w-full space-y-6">
-      {/* Active Project Banner */}
-      <div className="bg-[var(--surface)] border border-[var(--surface-border)] rounded-xl p-5 shadow-lg flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <div className="w-11 h-11 rounded-lg bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400">
-            <FolderGit2 className="w-6 h-6" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-base font-semibold text-zinc-100">{project.name}</h1>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[var(--surface-raised)] border border-[var(--surface-border)] text-zinc-300">
-                {project.project_type}
-              </span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-500/10 border border-blue-500/30 text-blue-400">
-                {project.current_branch || 'no-branch'}
-              </span>
-            </div>
-            <p className="text-xs text-[var(--foreground-muted)] font-mono mt-0.5">
-              {project.path}
-            </p>
-          </div>
+    <div className="flex-1 flex flex-col justify-center items-center p-6 max-w-3xl mx-auto w-full space-y-6">
+      {error && (
+        <div className="w-full p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs">
+          {error}
         </div>
+      )}
 
-        <button
-          type="button"
-          onClick={onChangeProject}
-          className="px-3 py-1.5 rounded-lg bg-[var(--surface-raised)] hover:bg-zinc-800 border border-[var(--surface-border)] text-xs text-zinc-300 transition-colors flex items-center gap-1.5"
-        >
-          <RotateCcw className="w-3.5 h-3.5 text-zinc-400" />
-          <span>Switch Project</span>
-        </button>
+      {/* Hero Welcome in Workspace */}
+      <div className="text-center space-y-2">
+        <div className="w-12 h-12 rounded-2xl bg-blue-600/15 border border-blue-500/30 flex items-center justify-center text-blue-400 mx-auto shadow-inner">
+          <Code2 className="w-6 h-6" />
+        </div>
+        <h2 className="text-lg font-semibold text-zinc-100">
+          What would you like to build in <span className="text-blue-400">{project.name}</span>?
+        </h2>
+        <p className="text-xs text-zinc-400 max-w-md mx-auto">
+          Every coding task runs in an isolated Git worktree branch. Your primary working tree is never touched until you accept changes.
+        </p>
       </div>
 
-      {/* Model Configuration Strip */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <div className="p-3.5 rounded-lg bg-[var(--surface)] border border-[var(--surface-border)] flex items-center gap-3">
-          <div className="w-8 h-8 rounded-md bg-purple-500/10 border border-purple-500/30 flex items-center justify-center text-purple-400 shrink-0">
-            <Brain className="w-4 h-4" />
-          </div>
-          <div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-semibold text-zinc-200">Planner: Gemini 3.5 Flash-Lite</span>
-              <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20">Free Tier</span>
-            </div>
-            <p className="text-[11px] text-[var(--foreground-muted)]">
-              Explicit single plan call (store=false). Zero code editing capability.
-            </p>
-          </div>
+      {/* Suggested Quick Starts */}
+      <div className="w-full space-y-2">
+        <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider px-1">
+          Example Tasks
         </div>
-
-        <div className="p-3.5 rounded-lg bg-[var(--surface)] border border-[var(--surface-border)] flex items-center gap-3">
-          <div className="w-8 h-8 rounded-md bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-            <Cpu className="w-4 h-4" />
-          </div>
-          <div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-semibold text-zinc-200">Worker: Ollama Qwen 3.5 (9B)</span>
-              <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Local Inference</span>
-            </div>
-            <p className="text-[11px] text-[var(--foreground-muted)]">
-              All editing, building, tool calls, and repair loops remain on your Windows 11 machine.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {/* Task Input Section */}
-      <div className="bg-[var(--surface)] border border-[var(--surface-border)] rounded-xl p-6 shadow-xl space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
-            <Sparkles className="w-4 h-4 text-blue-400" />
-            <span>Describe Your Task</span>
-          </div>
-          <span className="text-[11px] text-[var(--foreground-subtle)] flex items-center gap-1">
-            <Shield className="w-3.5 h-3.5 text-emerald-400" />
-            Payload inspected locally before transmission
-          </span>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="relative">
-            <textarea
-              rows={5}
-              value={taskDescription}
-              onChange={(e) => setTaskDescription(e.target.value)}
-              placeholder="E.g., Implement an async health-check endpoint that pings dependencies, or refactor state persistence into SQLite..."
-              className="w-full bg-[var(--surface-raised)] border border-[var(--surface-border)] rounded-lg p-3.5 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-blue-500 font-sans leading-relaxed resize-none"
-              disabled={isLoading}
-            />
-          </div>
-
-          {error && (
-            <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs">
-              {error}
-            </div>
-          )}
-
-          <div className="flex items-center justify-between pt-2">
-            <div className="text-[11px] text-[var(--foreground-muted)] flex items-center gap-1.5">
-              <FileCode className="w-3.5 h-3.5 text-zinc-400" />
-              <span>Next step: review full context package before sending to Gemini</span>
-            </div>
-
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {EXAMPLE_PROMPTS.map((promptText, idx) => (
             <button
-              type="submit"
-              disabled={isLoading || !taskDescription.trim()}
-              className="px-5 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-medium text-sm flex items-center gap-2 transition-colors shadow-sm"
+              key={idx}
+              type="button"
+              onClick={() => onPreviewContext(promptText)}
+              disabled={isLoading}
+              className="p-3 rounded-xl bg-[#141417] hover:bg-[#1a1a20] border border-[#27272a] hover:border-zinc-700 text-left text-xs text-zinc-300 hover:text-zinc-100 transition-all flex items-start justify-between group shadow-sm disabled:opacity-50"
             >
-              <span>{isLoading ? 'Assembling Context...' : 'Preview Planning Context'}</span>
-              <ArrowRight className="w-4 h-4" />
+              <span className="leading-relaxed line-clamp-2">{promptText}</span>
+              <ArrowRight className="w-3.5 h-3.5 text-zinc-600 group-hover:text-blue-400 shrink-0 ml-2 mt-0.5 transition-colors" />
             </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Architecture Guarantees */}
+      <div className="grid grid-cols-3 gap-3 w-full text-xs font-mono">
+        <div className="p-3 rounded-xl bg-[#141417] border border-[#27272a] space-y-1">
+          <div className="flex items-center gap-1.5 text-purple-400 font-sans font-semibold text-[11px]">
+            <Brain className="w-3.5 h-3.5" />
+            <span>Gemini Planner</span>
           </div>
-        </form>
+          <p className="text-zinc-400 text-[10px] font-sans">
+            Auto-cascade across free-tier Flash-Lite models with strict quota tracking.
+          </p>
+        </div>
+
+        <div className="p-3 rounded-xl bg-[#141417] border border-[#27272a] space-y-1">
+          <div className="flex items-center gap-1.5 text-emerald-400 font-sans font-semibold text-[11px]">
+            <Cpu className="w-3.5 h-3.5" />
+            <span>Local Worker</span>
+          </div>
+          <p className="text-zinc-400 text-[10px] font-sans">
+            Ollama Qwen 3.5 (9B) executes tools directly on your local machine.
+          </p>
+        </div>
+
+        <div className="p-3 rounded-xl bg-[#141417] border border-[#27272a] space-y-1">
+          <div className="flex items-center gap-1.5 text-blue-400 font-sans font-semibold text-[11px]">
+            <Shield className="w-3.5 h-3.5" />
+            <span>Git Worktree</span>
+          </div>
+          <p className="text-zinc-400 text-[10px] font-sans">
+            Dedicated worktree branch per task. Zero primary tree pollution.
+          </p>
+        </div>
       </div>
     </div>
   );
