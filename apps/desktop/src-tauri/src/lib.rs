@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod engine;
+pub mod git;
 pub mod models;
 pub mod planner;
 pub mod state;
@@ -24,6 +25,14 @@ pub fn run() {
             stop_worker_session,
             get_quota_state,
             set_pinned_model,
+            get_change_inventory,
+            accept_task,
+            reject_task,
+            get_primary_tree_status,
+            stash_primary_changes,
+            commit_primary_changes,
+            list_active_worktrees_command,
+            recover_orphaned_worktree,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

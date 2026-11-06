@@ -7,9 +7,13 @@ use zencode_core::{
 };
 
 use crate::engine::EngineSupervisor;
+use crate::git::{
+    clean_path_for_git, ChangeInventory, GitError, GitService, MergeResult, OrphanWorktree,
+    PrimaryTreeStatus, WorktreeInfo,
+};
 use crate::models::{
     ContextPreview, EngineHealth, PlanSubmissionResult, ProjectState, SystemStatus, TaskState,
-    WorkerEventPayload,
+    WorkerEventPayload, WorkerStartError,
 };
 use crate::planner::{QuotaUpdateEvent, MODEL_PRIMARY};
 use crate::state::AppState;
@@ -44,16 +48,15 @@ pub async fn open_project(
         "Generic Project".to_string()
     };
 
-    // Check Git state using argument arrays
-    let is_git_repo = Command::new("git")
-        .args(["-C", &path, "rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    // Check Git state using GitService
+    let is_git_repo = GitService::is_git_repo(p).unwrap_or(false);
 
-    let current_branch = if is_git_repo {
-        Command::new("git")
-            .args(["-C", &path, "branch", "--show-current"])
+    let (current_branch, git_status_summary, is_clean) = if is_git_repo {
+        let clean_p = clean_path_for_git(p);
+        let branch = Command::new("git")
+            .arg("-C")
+            .arg(&clean_p)
+            .args(["branch", "--show-current"])
             .output()
             .ok()
             .and_then(|o| {
@@ -63,28 +66,21 @@ pub async fn open_project(
                 } else {
                     None
                 }
-            })
-    } else {
-        None
-    };
+            });
 
-    let git_status_summary = if is_git_repo {
-        Command::new("git")
-            .args(["-C", &path, "status", "--short"])
-            .output()
-            .ok()
-            .map(|o| {
-                let lines = String::from_utf8_lossy(&o.stdout);
-                let count = lines.lines().count();
-                if count == 0 {
+        match GitService::get_primary_tree_status(p) {
+            Ok(st) => {
+                let summary = if st.is_clean {
                     "Clean working tree".to_string()
                 } else {
-                    format!("{count} modified/untracked file(s)")
-                }
-            })
-            .unwrap_or_else(|| "Unknown Git status".to_string())
+                    format!("{} uncommitted file(s)", st.uncommitted_files.len())
+                };
+                (branch, summary, st.is_clean)
+            }
+            Err(_) => (branch, "Unknown Git status".to_string(), false),
+        }
     } else {
-        "Not a Git repository".to_string()
+        (None, "Not a Git repository".to_string(), false)
     };
 
     let project_state = ProjectState {
@@ -94,6 +90,7 @@ pub async fn open_project(
         is_git_repo,
         current_branch,
         git_status_summary,
+        is_clean,
     };
 
     // Store in AppState
@@ -370,35 +367,111 @@ pub async fn set_pinned_model(
 #[tauri::command]
 pub async fn start_worker_session(
     plan: ImplementationPlan,
+    task_id: Option<String>,
+    acknowledge_dirty: Option<bool>,
     app_handle: AppHandle,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<String, WorkerStartError> {
     let project_dir = {
         let guard = state.active_project.lock().await;
         guard
             .as_ref()
             .map(|p| p.path.clone())
-            .ok_or_else(|| "No active project open".to_string())?
+            .ok_or_else(|| WorkerStartError {
+                error_type: "NO_ACTIVE_PROJECT".into(),
+                message: "No active project is open. Please open a project first.".into(),
+                uncommitted_files: None,
+            })?
     };
 
-    // 1. Ensure engine supervisor is active
-    let mut supervisor_guard = state.engine_supervisor.lock().await;
-    if supervisor_guard.is_none() {
-        let sup = EngineSupervisor::start(Some(Path::new(&project_dir)))
-            .await
-            .map_err(|e| format!("Failed to launch OpenCode sidecar: {e}"))?;
-        *supervisor_guard = Some(sup);
+    // 1. Verify Git repository
+    let is_git = GitService::is_git_repo(Path::new(&project_dir)).map_err(|e| WorkerStartError {
+        error_type: "GIT_ERROR".into(),
+        message: e.to_string(),
+        uncommitted_files: None,
+    })?;
+
+    if !is_git {
+        return Err(WorkerStartError {
+            error_type: "NOT_GIT_REPO".into(),
+            message: "Project is not inside a Git repository. Git isolation requires a Git repository.".into(),
+            uncommitted_files: None,
+        });
     }
+
+    // 2. Generate or validate task_id
+    let tid = task_id.unwrap_or_else(|| {
+        format!(
+            "task_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        )
+    });
+
+    // 3. HARD ENFORCEMENT: Create task worktree before launching OpenCode
+    // If worktree creation fails for any reason, abort and return typed error - NEVER fall back to primary tree!
+    let ack = acknowledge_dirty.unwrap_or(false);
+    let worktree_info = match GitService::create_task_worktree(Path::new(&project_dir), &tid, ack) {
+        Ok(info) => info,
+        Err(GitError::DirtyPrimaryTree {
+            count,
+            uncommitted_files,
+        }) => {
+            return Err(WorkerStartError {
+                error_type: "DIRTY_PRIMARY_TREE".into(),
+                message: format!(
+                    "Primary working tree is dirty with {count} uncommitted file(s). Explicit acknowledgment required."
+                ),
+                uncommitted_files: Some(uncommitted_files),
+            });
+        }
+        Err(e) => {
+            return Err(WorkerStartError {
+                error_type: "WORKTREE_CREATION_FAILED".into(),
+                message: format!("Failed to create isolated task worktree: {e}"),
+                uncommitted_files: None,
+            });
+        }
+    };
+
+    // Store active worktree in AppState
+    {
+        let mut wt_map = state.active_worktrees.lock().await;
+        wt_map.insert(tid.clone(), worktree_info.clone());
+        let mut cur_tid = state.current_task_id.lock().await;
+        *cur_tid = Some(tid.clone());
+    }
+
+    // 4. Configure OpenCode sidecar strictly with worktree path as its working directory
+    let mut supervisor_guard = state.engine_supervisor.lock().await;
+    if let Some(mut existing) = supervisor_guard.take() {
+        existing.shutdown();
+    }
+
+    let sup = EngineSupervisor::start(Some(Path::new(&worktree_info.worktree_path)))
+        .await
+        .map_err(|e| WorkerStartError {
+            error_type: "SIDECAR_ERROR".into(),
+            message: format!("Failed to launch OpenCode sidecar in worktree: {e}"),
+            uncommitted_files: None,
+        })?;
+    *supervisor_guard = Some(sup);
 
     let supervisor = supervisor_guard.as_ref().unwrap();
 
-    // 2. Create OpenCode session
+    // 5. Create OpenCode session targeting the worktree directory
     let session_id = supervisor
-        .create_session(&project_dir)
+        .create_session(&worktree_info.worktree_path)
         .await
-        .map_err(|e| format!("Failed to create OpenCode worker session: {e}"))?;
+        .map_err(|e| WorkerStartError {
+            error_type: "SIDECAR_ERROR".into(),
+            message: format!("Failed to create OpenCode worker session: {e}"),
+            uncommitted_files: None,
+        })?;
 
-    // 3. Format initial worker prompt from plan
+    // 6. Format initial worker prompt from plan
     let mut prompt = format!(
         "Execute the following implementation plan using local tools only:\n\nTask: {}\n\nSteps:\n",
         plan.task_summary
@@ -410,11 +483,15 @@ pub async fn start_worker_session(
         ));
     }
 
-    // 4. Send asynchronous prompt specifying Ollama worker model (Qwen 3.5 9B)
+    // 7. Send asynchronous prompt specifying Ollama worker model (Qwen 3.5 9B)
     supervisor
         .send_prompt(&session_id, &prompt, "qwen3.5:9b")
         .await
-        .map_err(|e| format!("Failed to dispatch prompt to worker: {e}"))?;
+        .map_err(|e| WorkerStartError {
+            error_type: "PROMPT_DISPATCH_FAILED".into(),
+            message: format!("Failed to dispatch prompt to worker: {e}"),
+            uncommitted_files: None,
+        })?;
 
     // Update state to WorkerRunning
     {
@@ -432,11 +509,15 @@ pub async fn start_worker_session(
         },
     );
 
-    // 5. Spawn SSE event listener thread for real-time streaming to React
+    // 8. Spawn SSE event listener thread for real-time streaming to React and inventory emit upon completion
     let sse_url = supervisor.sse_event_url();
     let auth_header = supervisor.auth_header();
     let app_handle_clone = app_handle.clone();
     let ses_id_clone = session_id.clone();
+    let wt_path_clone = worktree_info.worktree_path.clone();
+    let task_id_clone = tid.clone();
+    let inventories_arc = state.active_task_inventories.clone();
+    let task_state_arc = state.task_state.clone();
 
     tokio::spawn(async move {
         use eventsource_stream::Eventsource;
@@ -488,7 +569,31 @@ pub async fn start_worker_session(
                     let _ = app_handle_clone.emit("worker:message", &payload);
 
                     if is_idle_transition {
-                        let _ = app_handle_clone.emit("worker:status", &TaskState::Complete);
+                        // Worker execution finished: compute complete Git diff inventory
+                        match GitService::get_worktree_diff(Path::new(&wt_path_clone)) {
+                            Ok(inventory) => {
+                                {
+                                    let mut inv_map = inventories_arc.lock().await;
+                                    inv_map.insert(task_id_clone.clone(), inventory.clone());
+                                }
+                                // Emit review:inventory_ready event with full change inventory
+                                let _ = app_handle_clone.emit("review:inventory_ready", &inventory);
+
+                                {
+                                    let mut task = task_state_arc.lock().await;
+                                    *task = TaskState::AwaitingReview;
+                                }
+                                let _ = app_handle_clone.emit("worker:status", &TaskState::AwaitingReview);
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to generate diff inventory: {e}");
+                                {
+                                    let mut task = task_state_arc.lock().await;
+                                    *task = TaskState::Complete;
+                                }
+                                let _ = app_handle_clone.emit("worker:status", &TaskState::Complete);
+                            }
+                        }
                     }
                 }
             }
@@ -519,6 +624,356 @@ pub async fn stop_worker_session(
 
     let _ = app_handle.emit("worker:status", &TaskState::Idle);
     Ok(())
+}
+
+/// Returns the complete change inventory for an active task worktree.
+#[tauri::command]
+pub async fn get_change_inventory(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<ChangeInventory, String> {
+    // 1. Check cached inventory first
+    {
+        let inv_map = state.active_task_inventories.lock().await;
+        if let Some(inv) = inv_map.get(&task_id) {
+            return Ok(inv.clone());
+        }
+    }
+
+    // 2. Resolve worktree path
+    let worktree_path = {
+        let worktrees = state.active_worktrees.lock().await;
+        if let Some(info) = worktrees.get(&task_id) {
+            info.worktree_path.clone()
+        } else {
+            let active_proj = state.active_project.lock().await;
+            let proj = active_proj
+                .as_ref()
+                .ok_or_else(|| "No active project open".to_string())?;
+
+            let p = Path::new(&proj.path);
+            let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+            let clean = clean_path_for_git(&canonical);
+            let dir = if let Some(parent) = clean.parent() {
+                parent.join(".zencode-worktrees").join(&task_id)
+            } else {
+                clean.join(".zencode-worktrees").join(&task_id)
+            };
+            dir.to_string_lossy().to_string()
+        }
+    };
+
+    let inventory = GitService::get_worktree_diff(Path::new(&worktree_path))
+        .map_err(|e| format!("Failed to read worktree diff: {e}"))?;
+
+    // Cache
+    {
+        let mut inv_map = state.active_task_inventories.lock().await;
+        inv_map.insert(task_id, inventory.clone());
+    }
+
+    Ok(inventory)
+}
+
+/// Merges or fast-forwards the task branch into the target branch after user confirmation.
+/// Confirms target branch is clean and handles conflicts without auto-resolving.
+#[tauri::command]
+pub async fn accept_task(
+    task_id: String,
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<MergeResult, String> {
+    let (worktree_path, target_branch) = {
+        let active_proj = state.active_project.lock().await;
+        let proj = active_proj
+            .as_ref()
+            .ok_or_else(|| "No active project open".to_string())?;
+
+        let target_br = proj
+            .current_branch
+            .clone()
+            .unwrap_or_else(|| "main".to_string());
+
+        let worktrees = state.active_worktrees.lock().await;
+        let wt_path = if let Some(info) = worktrees.get(&task_id) {
+            info.worktree_path.clone()
+        } else {
+            let p = Path::new(&proj.path);
+            let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+            let clean = clean_path_for_git(&canonical);
+            let dir = if let Some(parent) = clean.parent() {
+                parent.join(".zencode-worktrees").join(&task_id)
+            } else {
+                clean.join(".zencode-worktrees").join(&task_id)
+            };
+            dir.to_string_lossy().to_string()
+        };
+
+        (wt_path, target_br)
+    };
+
+    let merge_result = GitService::accept_task_changes(Path::new(&worktree_path), &target_branch)
+        .map_err(|e| format!("Failed to accept task changes: {e}"))?;
+
+    match &merge_result {
+        MergeResult::Success { .. } => {
+            // Clean up state
+            {
+                let mut worktrees = state.active_worktrees.lock().await;
+                worktrees.remove(&task_id);
+                let mut inventories = state.active_task_inventories.lock().await;
+                inventories.remove(&task_id);
+                let mut current_tid = state.current_task_id.lock().await;
+                if current_tid.as_deref() == Some(&task_id) {
+                    *current_tid = None;
+                }
+            }
+
+            {
+                let mut task = state.task_state.lock().await;
+                *task = TaskState::Complete;
+            }
+            let _ = app_handle.emit("worker:status", &TaskState::Complete);
+        }
+        MergeResult::Conflict { .. } => {
+            // Conflict occurred: merge aborted, primary tree remains clean, return conflict to UI
+        }
+    }
+
+    Ok(merge_result)
+}
+
+/// Removes the task worktree and deletes the task branch after user confirmation.
+/// Never touches the primary working tree. Never runs git reset --hard.
+#[tauri::command]
+pub async fn reject_task(
+    task_id: String,
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let worktree_path = {
+        let active_proj = state.active_project.lock().await;
+        let proj = active_proj
+            .as_ref()
+            .ok_or_else(|| "No active project open".to_string())?;
+
+        let worktrees = state.active_worktrees.lock().await;
+        if let Some(info) = worktrees.get(&task_id) {
+            info.worktree_path.clone()
+        } else {
+            let p = Path::new(&proj.path);
+            let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+            let clean = clean_path_for_git(&canonical);
+            let dir = if let Some(parent) = clean.parent() {
+                parent.join(".zencode-worktrees").join(&task_id)
+            } else {
+                clean.join(".zencode-worktrees").join(&task_id)
+            };
+            dir.to_string_lossy().to_string()
+        }
+    };
+
+    GitService::reject_task_changes(Path::new(&worktree_path), &task_id)
+        .map_err(|e| format!("Failed to reject task changes: {e}"))?;
+
+    {
+        let mut worktrees = state.active_worktrees.lock().await;
+        worktrees.remove(&task_id);
+        let mut inventories = state.active_task_inventories.lock().await;
+        inventories.remove(&task_id);
+        let mut current_tid = state.current_task_id.lock().await;
+        if current_tid.as_deref() == Some(&task_id) {
+            *current_tid = None;
+        }
+    }
+
+    {
+        let mut task = state.task_state.lock().await;
+        *task = TaskState::Idle;
+    }
+    let _ = app_handle.emit("worker:status", &TaskState::Idle);
+
+    Ok(())
+}
+
+/// Checks the primary working tree clean/dirty status and returns uncommitted files.
+#[tauri::command]
+pub async fn get_primary_tree_status(
+    state: State<'_, AppState>,
+) -> Result<PrimaryTreeStatus, String> {
+    let repo_path = {
+        let active_proj = state.active_project.lock().await;
+        active_proj
+            .as_ref()
+            .map(|p| p.path.clone())
+            .ok_or_else(|| "No active project open".to_string())?
+    };
+
+    GitService::get_primary_tree_status(Path::new(&repo_path))
+        .map_err(|e| format!("Failed to check primary tree status: {e}"))
+}
+
+/// Stashes uncommitted changes in the primary tree using argument arrays.
+#[tauri::command]
+pub async fn stash_primary_changes(
+    message: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let repo_path = {
+        let active_proj = state.active_project.lock().await;
+        active_proj
+            .as_ref()
+            .map(|p| p.path.clone())
+            .ok_or_else(|| "No active project open".to_string())?
+    };
+
+    let p = clean_path_for_git(Path::new(&repo_path));
+    let msg = message.unwrap_or_else(|| "Zencode: stash before task".to_string());
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&p)
+        .args(["stash", "push", "-u", "-m", &msg])
+        .output()
+        .map_err(|e| format!("Failed to run git stash: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git stash failed: {stderr}"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Commits uncommitted changes in the primary tree using argument arrays.
+#[tauri::command]
+pub async fn commit_primary_changes(
+    message: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    if message.trim().is_empty() {
+        return Err("Commit message cannot be empty".to_string());
+    }
+
+    let repo_path = {
+        let active_proj = state.active_project.lock().await;
+        active_proj
+            .as_ref()
+            .map(|p| p.path.clone())
+            .ok_or_else(|| "No active project open".to_string())?
+    };
+
+    let p = clean_path_for_git(Path::new(&repo_path));
+
+    let add_output = Command::new("git")
+        .arg("-C")
+        .arg(&p)
+        .args(["add", "-A"])
+        .output()
+        .map_err(|e| format!("Failed to run git add: {e}"))?;
+
+    if !add_output.status.success() {
+        let stderr = String::from_utf8_lossy(&add_output.stderr);
+        return Err(format!("git add failed: {stderr}"));
+    }
+
+    let commit_output = Command::new("git")
+        .arg("-C")
+        .arg(&p)
+        .args(["commit", "-m", &message])
+        .output()
+        .map_err(|e| format!("Failed to run git commit: {e}"))?;
+
+    if !commit_output.status.success() {
+        let stderr = String::from_utf8_lossy(&commit_output.stderr);
+        return Err(format!("git commit failed: {stderr}"));
+    }
+
+    Ok(String::from_utf8_lossy(&commit_output.stdout).trim().to_string())
+}
+
+/// Lists all active Zencode-managed worktrees for orphan detection.
+#[tauri::command]
+pub async fn list_active_worktrees_command(
+    state: State<'_, AppState>,
+) -> Result<Vec<OrphanWorktree>, String> {
+    let repo_path = {
+        let active_proj = state.active_project.lock().await;
+        match active_proj.as_ref() {
+            Some(p) => p.path.clone(),
+            None => return Ok(Vec::new()),
+        }
+    };
+
+    GitService::list_active_worktrees(Path::new(&repo_path))
+        .map_err(|e| format!("Failed to list worktrees: {e}"))
+}
+
+/// Handles recovery action for an orphaned worktree from a previous session.
+#[tauri::command]
+pub async fn recover_orphaned_worktree(
+    task_id: String,
+    action: String, // "review", "reject", "ignore"
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<ChangeInventory>, String> {
+    let repo_path = {
+        let active_proj = state.active_project.lock().await;
+        active_proj
+            .as_ref()
+            .map(|p| p.path.clone())
+            .ok_or_else(|| "No active project open".to_string())?
+    };
+
+    let p = Path::new(&repo_path);
+    let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let clean = clean_path_for_git(&canonical);
+    let wt_path = if let Some(parent) = clean.parent() {
+        parent.join(".zencode-worktrees").join(&task_id)
+    } else {
+        clean.join(".zencode-worktrees").join(&task_id)
+    };
+
+    match action.as_str() {
+        "review" => {
+            let inv = GitService::get_worktree_diff(&wt_path)
+                .map_err(|e| format!("Failed to inspect orphaned worktree: {e}"))?;
+
+            {
+                let mut worktrees = state.active_worktrees.lock().await;
+                worktrees.insert(
+                    task_id.clone(),
+                    WorktreeInfo {
+                        task_id: task_id.clone(),
+                        branch_name: format!("zencode/task-{}", task_id),
+                        worktree_path: wt_path.to_string_lossy().to_string(),
+                        base_commit: inv.base_commit.clone(),
+                        created_at: 0,
+                    },
+                );
+                let mut inventories = state.active_task_inventories.lock().await;
+                inventories.insert(task_id.clone(), inv.clone());
+                let mut current_tid = state.current_task_id.lock().await;
+                *current_tid = Some(task_id);
+            }
+
+            let _ = app_handle.emit("review:inventory_ready", &inv);
+            {
+                let mut task = state.task_state.lock().await;
+                *task = TaskState::AwaitingReview;
+            }
+            let _ = app_handle.emit("worker:status", &TaskState::AwaitingReview);
+
+            Ok(Some(inv))
+        }
+        "reject" => {
+            GitService::reject_task_changes(&wt_path, &task_id)
+                .map_err(|e| format!("Failed to clean orphaned worktree: {e}"))?;
+            Ok(None)
+        }
+        "ignore" => Ok(None),
+        other => Err(format!("Unknown recovery action: '{other}'")),
+    }
 }
 
 #[cfg(test)]

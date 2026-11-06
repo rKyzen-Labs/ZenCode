@@ -4,7 +4,10 @@ import type {
   ZencodePlan,
   WorkerEventPayload,
   TaskState,
+  ChangeInventory as ChangeInventoryType,
+  MergeResult,
 } from '../types';
+import { ReviewPanel } from '../features/review/ReviewPanel';
 import {
   ShieldAlert,
   Brain,
@@ -29,9 +32,13 @@ interface TaskViewProps {
   workerSessionId: string | null;
   activePlannerModel?: string;
   switchReason?: string | null;
+  inventory: ChangeInventoryType | null;
+  activeTaskId: string | null;
   onConfirmPlanRequest: (previewId: string) => Promise<void>;
   onStartWorkerSession: (plan: ZencodePlan) => Promise<void>;
   onStopWorkerSession: (sessionId: string) => Promise<void>;
+  onAcceptTask: (taskId: string) => Promise<MergeResult>;
+  onRejectTask: (taskId: string) => Promise<void>;
   onResetTask: () => void;
   isLoading: boolean;
   error: string | null;
@@ -45,9 +52,13 @@ export const TaskView: FC<TaskViewProps> = ({
   workerSessionId,
   activePlannerModel,
   switchReason,
+  inventory,
+  activeTaskId,
   onConfirmPlanRequest,
   onStartWorkerSession,
   onStopWorkerSession,
+  onAcceptTask,
+  onRejectTask,
   onResetTask,
   isLoading,
   error,
@@ -543,6 +554,19 @@ export const TaskView: FC<TaskViewProps> = ({
             )}
             <div ref={eventsEndRef} />
           </div>
+        </div>
+      )}
+
+      {/* PHASE 4: CHANGE REVIEW PANEL (Git Isolation & Change Acceptance) */}
+      {inventory && (
+        <div className="flex-1 min-h-[520px] flex flex-col pt-2">
+          <ReviewPanel
+            inventory={inventory}
+            taskId={activeTaskId || 'active-task'}
+            onAccept={onAcceptTask}
+            onReject={onRejectTask}
+            isLoading={isLoading}
+          />
         </div>
       )}
     </div>

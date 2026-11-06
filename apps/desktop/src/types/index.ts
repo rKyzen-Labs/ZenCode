@@ -10,9 +10,78 @@ export interface ProjectState {
   path: string;
   name: string;
   project_type: ProjectType;
-  has_git: boolean;
+  has_git?: boolean;
+  is_git_repo?: boolean;
   current_branch: string | null;
   git_status_summary: string;
+  is_clean?: boolean;
+}
+
+export type ChangeCategory =
+  | 'Modified'
+  | 'Added'
+  | 'Untracked'
+  | 'Deleted'
+  | 'Renamed'
+  | 'Copied'
+  | 'Binary'
+  | 'ModeChange'
+  | 'Symlink';
+
+export interface FileChange {
+  path: string;
+  original_path?: string | null;
+  category: ChangeCategory;
+  is_binary: boolean;
+  is_symlink: boolean;
+  mode_change?: string | null;
+  additions: number;
+  deletions: number;
+  diff_content?: string | null;
+}
+
+export interface ChangeInventory {
+  worktree_path: string;
+  branch_name: string;
+  base_commit: string;
+  files: FileChange[];
+  total_additions: number;
+  total_deletions: number;
+  modified_count: number;
+  added_count: number;
+  untracked_count: number;
+  deleted_count: number;
+  renamed_count: number;
+  binary_count: number;
+}
+
+export interface UncommittedFile {
+  path: string;
+  status_code: string;
+  description: string;
+}
+
+export interface PrimaryTreeStatus {
+  is_clean: boolean;
+  uncommitted_files: UncommittedFile[];
+}
+
+export interface OrphanWorktree {
+  task_id: string;
+  branch_name: string;
+  worktree_path: string;
+  head_commit: string;
+  age_seconds: number;
+}
+
+export type MergeResult =
+  | { status: 'Success'; commit_sha: string }
+  | { status: 'Conflict'; conflicting_files: string[] };
+
+export interface WorkerStartError {
+  error_type: string;
+  message: string;
+  uncommitted_files?: UncommittedFile[] | null;
 }
 
 export type TaskState =

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use zencode_core::{ImplementationPlan, UsageMetadata};
+use crate::git::UncommittedFile;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectState {
@@ -9,6 +10,21 @@ pub struct ProjectState {
     pub is_git_repo: bool,
     pub current_branch: Option<String>,
     pub git_status_summary: String,
+    #[serde(default)]
+    pub is_clean: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerStartError {
+    pub error_type: String, // "DIRTY_PRIMARY_TREE", "NOT_GIT_REPO", "WORKTREE_ERROR", "SIDECAR_ERROR"
+    pub message: String,
+    pub uncommitted_files: Option<Vec<UncommittedFile>>,
+}
+
+impl std::fmt::Display for WorkerStartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

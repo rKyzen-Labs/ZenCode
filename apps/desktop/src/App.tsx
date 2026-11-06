@@ -8,6 +8,10 @@ import type {
   TaskState,
   EngineHealth,
   QuotaUpdateEvent,
+  ChangeInventory,
+  OrphanWorktree,
+  UncommittedFile,
+  MergeResult,
 } from './types';
 import {
   openProject,
@@ -22,12 +26,21 @@ import {
   getQuotaState,
   setPinnedModel,
   subscribeToQuotaUpdates,
+  acceptTask,
+  rejectTask,
+  stashPrimaryChanges,
+  commitPrimaryChanges,
+  listActiveWorktrees,
+  recoverOrphanedWorktree,
+  subscribeToInventoryReady,
 } from './lib/ipc';
 import { StatusBar } from './components/StatusBar';
 import { WelcomeScreen } from './components/WelcomeScreen';
 import { WorkspaceScreen } from './components/WorkspaceScreen';
 import { TaskView } from './components/TaskView';
 import { QuotaDashboard } from './components/QuotaDashboard';
+import { DirtyTreeDialog } from './components/DirtyTreeDialog';
+import { OrphanRecoveryDialog } from './components/OrphanRecoveryDialog';
 import { Shield, Sparkles, Gauge } from 'lucide-react';
 
 export default function App() {
@@ -45,6 +58,13 @@ export default function App() {
   const [workerSessionId, setWorkerSessionId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Milestone 2 Git Isolation & Review State
+  const [inventory, setInventory] = useState<ChangeInventory | null>(null);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [dirtyFiles, setDirtyFiles] = useState<UncommittedFile[] | null>(null);
+  const [pendingPlanForDirty, setPendingPlanForDirty] = useState<ZencodePlan | null>(null);
+  const [orphanedWorktrees, setOrphanedWorktrees] = useState<OrphanWorktree[]>([]);
 
   // Refresh status from Rust backend
   const refreshStatus = useCallback(async () => {
@@ -83,10 +103,20 @@ export default function App() {
       })
       .catch((err) => console.warn('Could not fetch initial quota state:', err));
 
+    // Check for orphaned worktrees on startup before showing screens
+    listActiveWorktrees()
+      .then((orphans) => {
+        if (orphans && orphans.length > 0) {
+          setOrphanedWorktrees(orphans);
+        }
+      })
+      .catch((err) => console.warn('Could not check for orphaned worktrees on launch:', err));
+
     let unlistenWorkerMsg: (() => void) | undefined;
     let unlistenWorkerStatus: (() => void) | undefined;
     let unlistenEngineHealth: (() => void) | undefined;
     let unlistenQuotaUpdate: (() => void) | undefined;
+    let unlistenInventoryReady: (() => void) | undefined;
 
     const setupListeners = async () => {
       try {
@@ -111,6 +141,10 @@ export default function App() {
             setLastSwitchReason(qs.last_switch_reason);
           }
         });
+
+        unlistenInventoryReady = await subscribeToInventoryReady((inv: ChangeInventory) => {
+          setInventory(inv);
+        });
       } catch (err) {
         console.warn('Tauri event listeners could not be attached:', err);
       }
@@ -123,6 +157,7 @@ export default function App() {
       unlistenWorkerStatus?.();
       unlistenEngineHealth?.();
       unlistenQuotaUpdate?.();
+      unlistenInventoryReady?.();
     };
   }, [refreshStatus]);
 
@@ -151,6 +186,12 @@ export default function App() {
       const proj = await openProject(path);
       setProject(proj);
       await refreshStatus();
+
+      // Check for orphaned worktrees in this newly opened repository
+      const orphans = await listActiveWorktrees();
+      if (orphans && orphans.length > 0) {
+        setOrphanedWorktrees(orphans);
+      }
     } catch (err: any) {
       console.error('Error opening project:', err);
       setError(typeof err === 'string' ? err : err.message || 'Failed to open project folder');
@@ -169,6 +210,8 @@ export default function App() {
       setPlan(null);
       setWorkerEvents([]);
       setWorkerSessionId(null);
+      setInventory(null);
+      setActiveTaskId(null);
     } catch (err: any) {
       console.error('Error previewing context:', err);
       setError(typeof err === 'string' ? err : err.message || 'Failed to assemble planning context');
@@ -207,22 +250,148 @@ export default function App() {
     }
   };
 
-  // Handler: Execute Plan with Local Worker
-  const handleStartWorkerSession = async (planToExecute: ZencodePlan) => {
+  // Handler: Execute Plan with Local Worker inside isolated Git worktree
+  const handleStartWorkerSession = async (
+    planToExecute: ZencodePlan,
+    taskId?: string,
+    acknowledgeDirty?: boolean
+  ) => {
     setIsLoading(true);
     setError(null);
     try {
-      const sessionId = await startWorkerSession(planToExecute);
+      const tid = taskId || `task_${Date.now()}`;
+      setActiveTaskId(tid);
+      const sessionId = await startWorkerSession(planToExecute, tid, acknowledgeDirty);
       setWorkerSessionId(sessionId);
       setSystemStatus((prev) =>
         prev ? { ...prev, task_state: 'WorkerRunning' } : null
       );
     } catch (err: any) {
       console.error('Error starting worker session:', err);
-      setError(typeof err === 'string' ? err : err.message || 'Failed to start worker session');
+      if (err?.error_type === 'DIRTY_PRIMARY_TREE' || err?.uncommitted_files) {
+        setDirtyFiles(err.uncommitted_files || []);
+        setPendingPlanForDirty(planToExecute);
+      } else {
+        setError(typeof err === 'string' ? err : err.message || 'Failed to start worker session');
+      }
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Dirty Tree Resolution: Stash
+  const handleStashDirty = async (msg?: string) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      await stashPrimaryChanges(msg);
+      setDirtyFiles(null);
+      if (pendingPlanForDirty) {
+        const p = pendingPlanForDirty;
+        setPendingPlanForDirty(null);
+        await handleStartWorkerSession(p, undefined, false);
+      }
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to stash changes');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Dirty Tree Resolution: Commit
+  const handleCommitDirty = async (msg: string) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      await commitPrimaryChanges(msg);
+      setDirtyFiles(null);
+      if (pendingPlanForDirty) {
+        const p = pendingPlanForDirty;
+        setPendingPlanForDirty(null);
+        await handleStartWorkerSession(p, undefined, false);
+      }
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to commit changes');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Dirty Tree Resolution: Acknowledge & proceed anyway
+  const handleProceedAnywayDirty = async () => {
+    setDirtyFiles(null);
+    if (pendingPlanForDirty) {
+      const p = pendingPlanForDirty;
+      setPendingPlanForDirty(null);
+      await handleStartWorkerSession(p, undefined, true);
+    }
+  };
+
+  const handleCancelDirty = () => {
+    setDirtyFiles(null);
+    setPendingPlanForDirty(null);
+  };
+
+  // Handler: Accept Task Changes
+  const handleAcceptTask = async (tid: string): Promise<MergeResult> => {
+    setIsLoading(true);
+    try {
+      const res = await acceptTask(tid);
+      if ('Success' in res || (res as any).status === 'Success') {
+        setInventory(null);
+        setActiveTaskId(null);
+        await refreshStatus();
+      }
+      return res;
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Handler: Reject Task Changes
+  const handleRejectTask = async (tid: string): Promise<void> => {
+    setIsLoading(true);
+    try {
+      await rejectTask(tid);
+      setInventory(null);
+      setActiveTaskId(null);
+      await refreshStatus();
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Orphan Worktree Recovery Handlers
+  const handleReviewOrphan = async (tid: string) => {
+    setIsLoading(true);
+    try {
+      const inv = await recoverOrphanedWorktree(tid, 'review');
+      if (inv) {
+        setInventory(inv);
+        setActiveTaskId(tid);
+        setOrphanedWorktrees((prev) => prev.filter((o) => o.task_id !== tid));
+      }
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to review orphaned worktree');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleRejectOrphan = async (tid: string) => {
+    setIsLoading(true);
+    try {
+      await recoverOrphanedWorktree(tid, 'reject');
+      setOrphanedWorktrees((prev) => prev.filter((o) => o.task_id !== tid));
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to reject orphaned worktree');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleIgnoreOrphans = () => {
+    setOrphanedWorktrees([]);
   };
 
   // Handler: Stop Worker Session
@@ -244,6 +413,8 @@ export default function App() {
     setPlan(null);
     setWorkerEvents([]);
     setWorkerSessionId(null);
+    setInventory(null);
+    setActiveTaskId(null);
     setError(null);
   };
 
@@ -253,10 +424,34 @@ export default function App() {
     handleResetTask();
   };
 
-  const isTaskActive = Boolean(contextPreview || plan || workerEvents.length > 0);
+  const isTaskActive = Boolean(contextPreview || plan || workerEvents.length > 0 || inventory);
 
   return (
     <div className="flex h-screen w-screen flex-col bg-[var(--background)] text-[var(--foreground)] overflow-hidden font-sans">
+      {/* Dirty Tree Modal (Step 4 Policy) */}
+      {dirtyFiles && dirtyFiles.length > 0 && (
+        <DirtyTreeDialog
+          uncommittedFiles={dirtyFiles}
+          onStash={handleStashDirty}
+          onCommit={handleCommitDirty}
+          onCancel={handleCancelDirty}
+          onProceedAnyway={handleProceedAnywayDirty}
+          isLoading={isLoading}
+          error={error}
+        />
+      )}
+
+      {/* Orphan Recovery Modal (Step 6) */}
+      {orphanedWorktrees.length > 0 && (
+        <OrphanRecoveryDialog
+          orphans={orphanedWorktrees}
+          onReview={handleReviewOrphan}
+          onReject={handleRejectOrphan}
+          onIgnore={handleIgnoreOrphans}
+          isLoading={isLoading}
+        />
+      )}
+
       {/* Top Application Header */}
       <header className="h-11 w-full border-b border-[var(--surface-border)] bg-[var(--surface)] px-4 flex items-center justify-between text-xs select-none shrink-0 z-10">
         <div className="flex items-center gap-3">
@@ -271,7 +466,7 @@ export default function App() {
 
           <div className="flex items-center gap-1.5 text-zinc-400">
             <Shield className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="text-[11px]">Free-first Local-first</span>
+            <span className="text-[11px]">Git Isolation Active</span>
           </div>
         </div>
 
@@ -298,25 +493,27 @@ export default function App() {
             }`}
           >
             <Sparkles className="w-3 h-3 text-purple-400" />
-            <span className="font-mono">
-              {quotaState?.pinned_model
-                ? 'Pinned: 3.8 Flash'
-                : quotaState?.active_model || 'gemini-3.5-flash-lite'}
+            <span>
+              Planner:{' '}
+              {quotaState?.pinned_model ? (
+                <strong className="text-purple-300">Pinned ({quotaState.pinned_model})</strong>
+              ) : (
+                <span>Auto ({lastActiveModel})</span>
+              )}
             </span>
-            <Gauge className="w-3 h-3 text-blue-400" />
+            <Gauge className="w-3 h-3 text-zinc-400 ml-0.5" />
           </button>
         </div>
       </header>
 
       {/* Main View Area */}
-      <main className="flex-1 flex flex-col overflow-hidden relative">
-        {/* Quota Dashboard Modal / Drawer */}
-        {showQuotaDashboard && (
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-50 p-6 flex items-center justify-center overflow-y-auto">
+      <main className="flex-1 flex overflow-hidden relative">
+        {showQuotaDashboard && quotaState && (
+          <div className="absolute top-2 right-4 z-40 w-96 shadow-2xl">
             <QuotaDashboard
               quotaState={quotaState}
-              onPinModel={handlePinModel}
               onClose={() => setShowQuotaDashboard(false)}
+              onPinModel={handlePinModel}
               isPinnedActionLoading={isPinnedLoading}
             />
           </div>
@@ -339,9 +536,13 @@ export default function App() {
             workerSessionId={workerSessionId}
             activePlannerModel={lastActiveModel}
             switchReason={lastSwitchReason}
+            inventory={inventory}
+            activeTaskId={activeTaskId}
             onConfirmPlanRequest={handleConfirmPlanRequest}
             onStartWorkerSession={handleStartWorkerSession}
             onStopWorkerSession={handleStopWorkerSession}
+            onAcceptTask={handleAcceptTask}
+            onRejectTask={handleRejectTask}
             onResetTask={handleResetTask}
             isLoading={isLoading}
             error={error}
