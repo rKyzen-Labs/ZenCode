@@ -53,6 +53,7 @@ export const TaskView: FC<TaskViewProps> = ({
   error,
 }) => {
   const [showFullPrompt, setShowFullPrompt] = useState(false);
+  const [showRawEvents, setShowRawEvents] = useState(false);
   const eventsEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll worker messages as they stream in
@@ -446,14 +447,23 @@ export const TaskView: FC<TaskViewProps> = ({
                 Local Worker Stream (Ollama: qwen2.5-coder:7b)
               </h3>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowRawEvents(!showRawEvents)}
+                className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition-colors"
+              >
+                {showRawEvents ? 'View Output' : 'View Raw SSE'}
+              </button>
+
               {isWorkerRunning ? (
                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30 text-[10px] font-mono">
                   <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>
-                  Streaming SSE
+                  Local Worker Running
                 </span>
               ) : (
-                <span className="px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 text-[10px] font-mono">
+                <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[10px] font-mono flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3" />
                   Finished
                 </span>
               )}
@@ -463,31 +473,73 @@ export const TaskView: FC<TaskViewProps> = ({
           {/* Real-time SSE event log feed */}
           <div className="p-4 rounded-lg bg-zinc-950 border border-zinc-900 font-mono text-xs space-y-2 max-h-80 overflow-y-auto">
             {workerEvents.length === 0 ? (
-              <div className="text-zinc-600 italic">Waiting for initial worker response...</div>
+              <div className="text-zinc-600 italic">Waiting for initial worker response from Ollama...</div>
             ) : (
-              workerEvents.map((event, idx) => {
-                const timeStr = event?.timestamp_ms
-                  ? new Date(event.timestamp_ms).toLocaleTimeString()
-                  : '';
-                const contentStr =
-                  typeof event?.content === 'string'
-                    ? event.content
-                    : JSON.stringify(event?.content, null, 2);
-                const eventTypeStr = String(event?.event_type || 'message');
+              workerEvents
+                .map((event, idx) => {
+                  let parsed: any = null;
+                  if (typeof event?.content === 'string') {
+                    try {
+                      parsed = JSON.parse(event.content);
+                    } catch {
+                      // plain text
+                    }
+                  }
 
-                return (
-                  <div key={idx} className="space-y-1">
-                    <div className="flex items-center gap-2 text-[10px] text-zinc-500">
-                      <Clock className="w-3 h-3" />
-                      <span>{timeStr}</span>
-                      <span className="px-1 rounded bg-zinc-900 text-zinc-400">{eventTypeStr}</span>
+                  const eventType = parsed?.type || event?.event_type || 'message';
+                  const isNoise = [
+                    'plugin.added',
+                    'catalog.updated',
+                    'reference.updated',
+                    'integration.updated',
+                    'server.connected',
+                  ].includes(eventType);
+
+                  if (!showRawEvents && isNoise) {
+                    return null;
+                  }
+
+                  const timeStr = event?.timestamp_ms
+                    ? new Date(event.timestamp_ms).toLocaleTimeString()
+                    : '';
+
+                  let cleanText: string | null = null;
+                  let statusInfo: string | null = null;
+
+                  if (parsed?.properties?.part?.text) {
+                    cleanText = parsed.properties.part.text;
+                  } else if (parsed?.properties?.status?.type) {
+                    statusInfo = `Worker status: ${parsed.properties.status.type}`;
+                  } else if (parsed?.properties?.info?.title) {
+                    statusInfo = `Session: "${parsed.properties.info.title}"`;
+                  } else if (parsed?.type === 'session.diff' && parsed.properties?.diff?.length > 0) {
+                    statusInfo = `Staged diff across ${parsed.properties.diff.length} file(s)`;
+                  }
+
+                  const contentStr =
+                    typeof event?.content === 'string'
+                      ? event.content
+                      : JSON.stringify(event?.content, null, 2);
+
+                  return (
+                    <div key={idx} className="space-y-1">
+                      <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+                        <Clock className="w-3 h-3" />
+                        <span>{timeStr}</span>
+                        <span className="px-1 rounded bg-zinc-900 text-zinc-400">{eventType}</span>
+                        {statusInfo && (
+                          <span className="px-1.5 py-0.2 rounded bg-blue-900/40 text-blue-300 font-sans text-[10px]">
+                            {statusInfo}
+                          </span>
+                        )}
+                      </div>
+                      <pre className="text-zinc-300 font-mono text-[11px] whitespace-pre-wrap leading-relaxed">
+                        {!showRawEvents && cleanText ? cleanText : contentStr}
+                      </pre>
                     </div>
-                    <pre className="text-zinc-300 font-mono text-[11px] whitespace-pre-wrap leading-relaxed">
-                      {contentStr}
-                    </pre>
-                  </div>
-                );
-              })
+                  );
+                })
+                .filter(Boolean)
             )}
             <div ref={eventsEndRef} />
           </div>

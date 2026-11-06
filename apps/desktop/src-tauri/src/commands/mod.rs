@@ -450,6 +450,8 @@ pub async fn start_worker_session(
             .await
         {
             let mut stream = response.bytes_stream().eventsource();
+            let mut was_busy = false;
+
             while let Some(event_result) = stream.next().await {
                 if let Ok(event) = event_result {
                     let now = SystemTime::now()
@@ -457,13 +459,37 @@ pub async fn start_worker_session(
                         .unwrap_or_default()
                         .as_millis() as u64;
 
+                    // Extract the event type from the JSON payload if present
+                    let (event_type, is_idle_transition) = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                        let t = val.get("type").and_then(|s| s.as_str()).unwrap_or(&event.event).to_string();
+                        let mut idle = false;
+                        if t == "session.status" {
+                            if let Some(status_type) = val.get("properties").and_then(|p| p.get("status")).and_then(|s| s.get("type")).and_then(|st| st.as_str()) {
+                                if status_type == "busy" {
+                                    was_busy = true;
+                                } else if status_type == "idle" && was_busy {
+                                    idle = true;
+                                }
+                            }
+                        } else if t == "session.idle" && was_busy {
+                            idle = true;
+                        }
+                        (t, idle)
+                    } else {
+                        (event.event.clone(), false)
+                    };
+
                     let payload = WorkerEventPayload {
                         session_id: ses_id_clone.clone(),
-                        event_type: event.event,
+                        event_type,
                         content: event.data,
                         timestamp_ms: now,
                     };
                     let _ = app_handle_clone.emit("worker:message", &payload);
+
+                    if is_idle_transition {
+                        let _ = app_handle_clone.emit("worker:status", &TaskState::Complete);
+                    }
                 }
             }
         }
