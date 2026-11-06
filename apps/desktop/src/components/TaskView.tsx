@@ -444,7 +444,7 @@ export const TaskView: FC<TaskViewProps> = ({
             <div className="flex items-center gap-2">
               <Terminal className="w-4 h-4 text-emerald-400" />
               <h3 className="text-xs font-semibold text-zinc-200">
-                Local Worker Stream (Ollama: qwen2.5-coder:7b)
+                Local Worker Stream (Ollama: Granite 4.1 8B)
               </h3>
             </div>
             <div className="flex items-center gap-3">

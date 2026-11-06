@@ -152,7 +152,7 @@ export const WelcomeScreen: FC<WelcomeScreenProps> = ({
                 {status?.ollama_status_text || 'Checking local Ollama service...'}
               </div>
               <div className="text-[10px] text-zinc-500 font-mono">
-                Model: qwen2.5-coder:7b (Local inference)
+                Model: Granite 4.1 8B (granite4.1:8b)
               </div>
             </div>
 

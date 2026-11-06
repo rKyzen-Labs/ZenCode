@@ -61,7 +61,7 @@ export default function App() {
         gemini_ready: true,
         gemini_status_text: 'Key present in Credential Manager',
         ollama_ready: true,
-        ollama_status_text: 'Ollama ready with qwen2.5-coder:7b',
+        ollama_status_text: 'Ollama ready with granite4.1:8b',
         opencode_health: 'Ready',
         task_state: 'Idle',
         request_count: 0,

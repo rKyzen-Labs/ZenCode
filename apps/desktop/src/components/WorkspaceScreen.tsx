@@ -92,7 +92,7 @@ export const WorkspaceScreen: FC<WorkspaceScreenProps> = ({
           </div>
           <div>
             <div className="flex items-center gap-1.5">
-              <span className="text-xs font-semibold text-zinc-200">Worker: Ollama qwen2.5-coder:7b</span>
+              <span className="text-xs font-semibold text-zinc-200">Worker: Ollama Granite 4.1 (8B)</span>
               <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Local Inference</span>
             </div>
             <p className="text-[11px] text-[var(--foreground-muted)]">

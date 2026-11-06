@@ -73,7 +73,7 @@ impl EngineSupervisor {
     }
 
     /// Ensures that OpenCode's configuration file registers the local Ollama provider
-    /// and its models (including qwen2.5-coder:7b).
+    /// and its models (including granite4.1:8b and qwen2.5-coder:7b).
     pub fn ensure_ollama_config() -> Result<PathBuf, EngineError> {
         let config_path = Self::get_opencode_config_path()
             .ok_or_else(|| EngineError::SessionError("Could not determine user profile or home directory for OpenCode configuration".into()))?;
@@ -116,6 +116,9 @@ impl EngineSupervisor {
                         "baseURL": "http://127.0.0.1:11434/v1"
                     },
                     "models": {
+                        "granite4.1:8b": {
+                            "name": "Granite 4.1 8B"
+                        },
                         "qwen2.5-coder:7b": {
                             "name": "Qwen 2.5 Coder 7B"
                         }
@@ -152,6 +155,14 @@ impl EngineSupervisor {
             }
 
             let models_obj = ollama_map.get_mut("models").unwrap().as_object_mut().unwrap();
+            if !models_obj.contains_key("granite4.1:8b") {
+                models_obj.insert(
+                    "granite4.1:8b".to_string(),
+                    serde_json::json!({
+                        "name": "Granite 4.1 8B"
+                    }),
+                );
+            }
             if !models_obj.contains_key("qwen2.5-coder:7b") {
                 models_obj.insert(
                     "qwen2.5-coder:7b".to_string(),
@@ -227,7 +238,7 @@ impl EngineSupervisor {
 
     /// Spawns the OpenCode HTTP server bound strictly to loopback 127.0.0.1.
     pub async fn start(working_dir: Option<&Path>) -> Result<Self, EngineError> {
-        // Automatically ensure Ollama provider and qwen2.5-coder:7b are registered
+        // Automatically ensure Ollama provider and granite4.1:8b are registered
         if let Ok(cfg_path) = Self::ensure_ollama_config() {
             Self::sync_installed_ollama_models(&cfg_path).await;
         }
@@ -490,8 +501,8 @@ mod tests {
             "Ollama baseURL must point to loopback 11434 v1"
         );
         assert!(
-            ollama["models"]["qwen2.5-coder:7b"].is_object(),
-            "qwen2.5-coder:7b must be registered in ollama models"
+            ollama["models"]["granite4.1:8b"].is_object(),
+            "granite4.1:8b must be registered in ollama models"
         );
     }
 }
