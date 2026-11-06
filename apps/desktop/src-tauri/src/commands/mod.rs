@@ -153,7 +153,7 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<SystemStatu
         ollama_status,
         opencode_health,
         planner_model: "gemini-3.5-flash-lite".to_string(),
-        worker_model: "granite4.1:8b".to_string(),
+        worker_model: "qwen3.5:9b".to_string(),
     })
 }
 
@@ -410,9 +410,9 @@ pub async fn start_worker_session(
         ));
     }
 
-    // 4. Send asynchronous prompt specifying Ollama worker model (Granite 4.1 8B)
+    // 4. Send asynchronous prompt specifying Ollama worker model (Qwen 3.5 9B)
     supervisor
-        .send_prompt(&session_id, &prompt, "granite4.1:8b")
+        .send_prompt(&session_id, &prompt, "qwen3.5:9b")
         .await
         .map_err(|e| format!("Failed to dispatch prompt to worker: {e}"))?;
 

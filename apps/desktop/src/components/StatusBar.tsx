@@ -102,7 +102,7 @@ export const StatusBar: FC<StatusBarProps> = ({
         <div className="flex items-center gap-1 text-zinc-300">
           <Cpu className="w-3.5 h-3.5 text-emerald-400" />
           <span>Worker:</span>
-          <span className="font-mono text-zinc-200 text-[10px]">granite4.1:8b</span>
+          <span className="font-mono text-zinc-200 text-[10px]">qwen3.5:9b</span>
         </div>
 
         <span className="text-zinc-600">|</span>
