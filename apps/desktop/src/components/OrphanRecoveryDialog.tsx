@@ -1,13 +1,5 @@
 import { type FC } from 'react';
 import type { OrphanWorktree } from '../types';
-import {
-  GitBranch,
-  Clock,
-  Eye,
-  Trash2,
-  X,
-  History,
-} from 'lucide-react';
 
 interface OrphanRecoveryDialogProps {
   orphans: OrphanWorktree[];
@@ -37,80 +29,70 @@ export const OrphanRecoveryDialog: FC<OrphanRecoveryDialogProps> = ({
   if (orphans.length === 0) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-zinc-900 border border-blue-500/40 rounded-xl max-w-xl w-full p-6 shadow-2xl space-y-4">
+    <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4 font-mono text-xs">
+      <div className="bg-[#121214] border border-[#3f3f46] rounded max-w-xl w-full p-5 space-y-4 shadow-2xl">
         {/* Header */}
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 shrink-0">
-              <History className="w-5 h-5" />
+        <div className="flex items-start justify-between border-b border-[#27272a] pb-3">
+          <div className="space-y-0.5">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-zinc-100">[orphaned_worktree_recovery]</span>
+              <span className="text-[10px] text-zinc-400 border border-[#27272a] px-1.5 rounded">
+                {orphans.length} found
+              </span>
             </div>
-            <div>
-              <h3 className="text-sm font-semibold text-zinc-100">
-                Orphaned Worktree Recovery
-              </h3>
-              <p className="text-xs text-zinc-400">
-                {orphans.length} unmerged task worktree(s) detected from previous sessions
-              </p>
-            </div>
+            <p className="text-[11px] text-zinc-500">
+              Unmerged worktree(s) detected from a previous session. Zencode never silently deletes orphaned worktrees.
+            </p>
           </div>
 
           <button
             type="button"
             onClick={onIgnore}
             disabled={isLoading}
-            className="text-zinc-500 hover:text-zinc-300 transition-colors"
+            className="text-zinc-500 hover:text-zinc-200"
           >
-            <X className="w-5 h-5" />
+            [x]
           </button>
         </div>
 
-        <p className="text-xs text-zinc-300 leading-relaxed">
-          Zencode never silently deletes orphaned worktrees. You can review the proposed changes before deciding to merge or discard them.
-        </p>
-
         {/* Orphan List */}
-        <div className="max-h-64 overflow-y-auto space-y-2">
+        <div className="max-h-60 overflow-y-auto space-y-2">
           {orphans.map((orphan) => (
             <div
               key={orphan.task_id}
-              className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 flex items-center justify-between text-xs font-mono"
+              className="p-2.5 rounded bg-[#09090b] border border-[#27272a] flex items-center justify-between"
             >
-              <div className="space-y-1 truncate pr-2">
+              <div className="space-y-0.5 truncate pr-2">
                 <div className="flex items-center gap-2">
-                  <GitBranch className="w-3.5 h-3.5 text-blue-400 shrink-0" />
                   <span className="text-zinc-200 font-semibold truncate">
                     {orphan.branch_name}
                   </span>
-                  <span className="text-[10px] text-zinc-500 font-sans flex items-center gap-1 shrink-0">
-                    <Clock className="w-3 h-3" />
-                    {formatAge(orphan.age_seconds)}
+                  <span className="text-[10px] text-zinc-500">
+                    ({formatAge(orphan.age_seconds)})
                   </span>
                 </div>
-                <div className="text-[11px] text-zinc-500 truncate" title={orphan.worktree_path}>
+                <div className="text-[10px] text-zinc-600 truncate" title={orphan.worktree_path}>
                   {orphan.worktree_path}
                 </div>
               </div>
 
-              <div className="flex items-center gap-1.5 shrink-0 font-sans">
+              <div className="flex items-center gap-1.5 shrink-0">
                 <button
                   type="button"
                   onClick={() => onReview(orphan.task_id)}
                   disabled={isLoading}
-                  className="px-2.5 py-1 rounded bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/40 text-[11px] font-medium flex items-center gap-1 transition-colors disabled:opacity-50"
+                  className="px-2 py-0.5 rounded bg-[#18181b] hover:bg-[#27272a] text-zinc-300 hover:text-white border border-[#27272a] text-[11px] transition-colors disabled:opacity-40"
                 >
-                  <Eye className="w-3 h-3" />
-                  <span>Review</span>
+                  [review]
                 </button>
 
                 <button
                   type="button"
                   onClick={() => onReject(orphan.task_id)}
                   disabled={isLoading}
-                  className="px-2.5 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-[11px] font-medium flex items-center gap-1 transition-colors disabled:opacity-50"
+                  className="px-2 py-0.5 rounded bg-[#18181b] hover:bg-[#27272a] text-zinc-400 hover:text-zinc-200 border border-[#27272a] text-[11px] transition-colors disabled:opacity-40"
                 >
-                  <Trash2 className="w-3 h-3" />
-                  <span>Reject</span>
+                  [reject]
                 </button>
               </div>
             </div>
@@ -118,14 +100,17 @@ export const OrphanRecoveryDialog: FC<OrphanRecoveryDialogProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="pt-2 border-t border-zinc-800 flex items-center justify-end">
+        <div className="pt-2 border-t border-[#27272a] flex items-center justify-between">
+          <span className="text-[10px] text-zinc-600">
+            * reject will delete worktree folder and task branch cleanly
+          </span>
           <button
             type="button"
             onClick={onIgnore}
             disabled={isLoading}
-            className="px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-300 font-medium transition-colors"
+            className="px-3 py-1 rounded bg-[#18181b] hover:bg-[#27272a] text-zinc-400 hover:text-zinc-200 text-xs"
           >
-            Ignore for Now
+            [ignore_for_now]
           </button>
         </div>
       </div>

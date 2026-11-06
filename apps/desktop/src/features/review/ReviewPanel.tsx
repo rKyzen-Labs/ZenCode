@@ -2,15 +2,6 @@ import { useState, type FC } from 'react';
 import type { ChangeInventory as ChangeInventoryType, FileChange, MergeResult } from '../../types';
 import { ChangeInventory } from './ChangeInventory';
 import { FileDiff } from './FileDiff';
-import {
-  CheckCheck,
-  Trash2,
-  AlertTriangle,
-  GitMerge,
-  ShieldCheck,
-  X,
-  AlertOctagon,
-} from 'lucide-react';
 
 interface ReviewPanelProps {
   inventory: ChangeInventoryType;
@@ -64,24 +55,18 @@ export const ReviewPanel: FC<ReviewPanelProps> = ({
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full space-y-4 overflow-hidden">
-      {/* Top Banner */}
-      <div className="p-3.5 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-            <ShieldCheck className="w-4 h-4" />
+    <div className="flex-1 flex flex-col h-full space-y-3 overflow-hidden font-mono text-xs">
+      {/* Top Banner - Monochromatic */}
+      <div className="p-2.5 rounded bg-[#121214] border border-[#27272a] flex items-center justify-between shrink-0">
+        <div className="space-y-0.5">
+          <div className="flex items-center gap-2">
+            <span className="text-zinc-100 font-semibold">[review_changes]</span>
+            <span className="text-[10px] text-zinc-400 border border-[#3f3f46] px-1.5 py-0.2 rounded">
+              isolated worktree
+            </span>
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-sm font-semibold text-zinc-100">Task Diff Review</h2>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">
-                Isolated Worktree
-              </span>
-            </div>
-            <p className="text-[11px] text-zinc-400">
-              Agent changes exist only in worktree branch <span className="font-mono text-zinc-300">{inventory.branch_name}</span>.
-              The primary working tree is untouched until you accept.
-            </p>
+          <div className="text-[11px] text-zinc-500">
+            branch: <span className="text-zinc-300">{inventory.branch_name}</span> | primary tree untouched
           </div>
         </div>
 
@@ -91,42 +76,37 @@ export const ReviewPanel: FC<ReviewPanelProps> = ({
             type="button"
             onClick={() => setShowRejectModal(true)}
             disabled={isLoading}
-            className="px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50"
+            className="px-2.5 py-1 rounded bg-[#18181b] hover:bg-[#27272a] text-zinc-300 hover:text-white border border-[#27272a] text-xs transition-colors disabled:opacity-40"
           >
-            <Trash2 className="w-3.5 h-3.5" />
-            <span>Reject Task</span>
+            [reject_task]
           </button>
 
           <button
             type="button"
             onClick={() => setShowAcceptModal(true)}
             disabled={isLoading}
-            className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs flex items-center gap-1.5 shadow-sm transition-colors disabled:opacity-50"
+            className="px-3 py-1 rounded bg-zinc-200 hover:bg-white text-black font-medium text-xs transition-colors disabled:opacity-40"
           >
-            <CheckCheck className="w-3.5 h-3.5" />
-            <span>Accept All Changes</span>
+            [accept_all]
           </button>
         </div>
       </div>
 
       {actionError && (
-        <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 shrink-0" />
-            <span>{actionError}</span>
-          </div>
+        <div className="p-2 bg-[#18181b] border border-rose-900/60 text-rose-300 text-xs flex items-center justify-between shrink-0">
+          <span>[error]: {actionError}</span>
           <button
             type="button"
             onClick={() => setActionError(null)}
-            className="text-zinc-400 hover:text-zinc-200"
+            className="text-zinc-500 hover:text-zinc-200 px-1"
           >
-            <X className="w-3.5 h-3.5" />
+            [x]
           </button>
         </div>
       )}
 
-      {/* Main Diff Area: ChangeInventory on the left, FileDiff on the right */}
-      <div className="flex-1 flex gap-4 min-h-0 overflow-hidden">
+      {/* Main Diff Area */}
+      <div className="flex-1 flex gap-3 min-h-0 overflow-hidden">
         <ChangeInventory
           inventory={inventory}
           selectedFile={selectedFile}
@@ -137,59 +117,57 @@ export const ReviewPanel: FC<ReviewPanelProps> = ({
 
       {/* ACCEPT CONFIRMATION MODAL */}
       {showAcceptModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-700 rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4">
-            <div className="flex items-center gap-3 text-emerald-400">
-              <div className="w-10 h-10 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center">
-                <GitMerge className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-100">Accept Task Changes?</h3>
-                <p className="text-xs text-zinc-400">Apply agent changes to primary branch</p>
-              </div>
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 font-mono text-xs">
+          <div className="bg-[#121214] border border-[#3f3f46] rounded max-w-md w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-[#27272a] pb-2">
+              <span className="font-semibold text-zinc-100">[confirm_accept]</span>
+              <button
+                type="button"
+                onClick={() => setShowAcceptModal(false)}
+                className="text-zinc-500 hover:text-zinc-200"
+              >
+                [x]
+              </button>
             </div>
 
-            <div className="p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-xs text-zinc-300 space-y-2 font-mono">
-              <div className="flex justify-between text-zinc-400">
-                <span>Task ID:</span>
+            <p className="text-zinc-300 leading-relaxed">
+              Accepting will verify the primary working tree is clean and fast-forward or merge the task branch.
+              The temporary worktree and branch will then be safely deleted.
+            </p>
+
+            <div className="p-2.5 bg-[#09090b] border border-[#27272a] text-[11px] text-zinc-400 space-y-1">
+              <div className="flex justify-between">
+                <span>task_id:</span>
                 <span className="text-zinc-200">{taskId}</span>
               </div>
-              <div className="flex justify-between text-zinc-400">
-                <span>Branch:</span>
+              <div className="flex justify-between">
+                <span>worktree_branch:</span>
                 <span className="text-zinc-200">{inventory.branch_name}</span>
               </div>
-              <div className="flex justify-between text-zinc-400">
-                <span>Total Changes:</span>
-                <span>
-                  <span className="text-emerald-400">+{inventory.total_additions}</span>{' '}
-                  <span className="text-rose-400">-{inventory.total_deletions}</span> across{' '}
-                  {inventory.files.length} file(s)
+              <div className="flex justify-between">
+                <span>total_changes:</span>
+                <span className="text-zinc-200">
+                  +{inventory.total_additions} / -{inventory.total_deletions} ({inventory.files.length} files)
                 </span>
               </div>
             </div>
 
-            <p className="text-xs text-zinc-400 leading-relaxed">
-              Accepting will verify your primary working tree is clean and merge the task branch.
-              The temporary worktree and branch will be cleanly removed.
-            </p>
-
-            <div className="flex items-center justify-end gap-2 pt-2">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#27272a]">
               <button
                 type="button"
                 onClick={() => setShowAcceptModal(false)}
                 disabled={isLoading}
-                className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-300 font-medium transition-colors"
+                className="px-3 py-1 rounded bg-[#18181b] hover:bg-[#27272a] text-zinc-400 hover:text-zinc-200"
               >
-                Cancel
+                [cancel]
               </button>
               <button
                 type="button"
                 onClick={handleConfirmAccept}
                 disabled={isLoading}
-                className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs shadow transition-colors flex items-center gap-1.5"
+                className="px-3 py-1 rounded bg-zinc-200 hover:bg-white text-black font-medium"
               >
-                <CheckCheck className="w-3.5 h-3.5" />
-                <span>Confirm & Accept</span>
+                {isLoading ? '[merging...]' : '[confirm_merge]'}
               </button>
             </div>
           </div>
@@ -198,96 +176,92 @@ export const ReviewPanel: FC<ReviewPanelProps> = ({
 
       {/* REJECT CONFIRMATION MODAL */}
       {showRejectModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-700 rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4">
-            <div className="flex items-center gap-3 text-rose-400">
-              <div className="w-10 h-10 rounded-full bg-rose-500/10 border border-rose-500/30 flex items-center justify-center">
-                <Trash2 className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-100">Reject Task Changes?</h3>
-                <p className="text-xs text-zinc-400">Discard all proposed modifications</p>
-              </div>
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 font-mono text-xs">
+          <div className="bg-[#121214] border border-[#3f3f46] rounded max-w-md w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-[#27272a] pb-2">
+              <span className="font-semibold text-zinc-100">[confirm_reject]</span>
+              <button
+                type="button"
+                onClick={() => setShowRejectModal(false)}
+                className="text-zinc-500 hover:text-zinc-200"
+              >
+                [x]
+              </button>
             </div>
 
-            <p className="text-xs text-zinc-300 leading-relaxed">
-              Are you sure you want to reject this task? This action will completely remove worktree{' '}
-              <span className="font-mono text-zinc-200">{inventory.branch_name}</span>.
+            <p className="text-zinc-300 leading-relaxed">
+              Discard all proposed changes in worktree <span className="text-zinc-100 underline">{inventory.branch_name}</span>?
             </p>
 
-            <div className="p-3 rounded-lg bg-rose-950/20 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 shrink-0 text-rose-400" />
-              <span>
-                Your primary repository and working directory will remain completely untouched.
-              </span>
+            <div className="p-2.5 bg-[#09090b] border border-[#27272a] text-[11px] text-zinc-400">
+              * Safety guarantee: Your primary repository and working directory remain untouched.
+              The temporary worktree and branch will be cleanly removed.
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#27272a]">
               <button
                 type="button"
                 onClick={() => setShowRejectModal(false)}
                 disabled={isLoading}
-                className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-300 font-medium transition-colors"
+                className="px-3 py-1 rounded bg-[#18181b] hover:bg-[#27272a] text-zinc-400 hover:text-zinc-200"
               >
-                Cancel
+                [cancel]
               </button>
               <button
                 type="button"
                 onClick={handleConfirmReject}
                 disabled={isLoading}
-                className="px-4 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs shadow transition-colors flex items-center gap-1.5"
+                className="px-3 py-1 rounded bg-[#27272a] hover:bg-zinc-700 text-zinc-200 font-medium"
               >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>Discard Task Changes</span>
+                {isLoading ? '[removing...]' : '[discard_changes]'}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* MERGE CONFLICT DIALOG (Strictly stops and shows options, NEVER auto-resolves) */}
+      {/* MERGE CONFLICT MODAL */}
       {conflictFiles && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-amber-500/40 rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-4">
-            <div className="flex items-center gap-3 text-amber-400">
-              <div className="w-10 h-10 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
-                <AlertOctagon className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-100">Merge Conflict Detected</h3>
-                <p className="text-xs text-zinc-400">Auto-resolution disabled for safety</p>
-              </div>
+        <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4 font-mono text-xs">
+          <div className="bg-[#121214] border border-zinc-600 rounded max-w-lg w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-[#27272a] pb-2">
+              <span className="font-semibold text-zinc-100">[merge_conflict: stopped]</span>
+              <button
+                type="button"
+                onClick={() => setConflictFiles(null)}
+                className="text-zinc-500 hover:text-zinc-200"
+              >
+                [x]
+              </button>
             </div>
 
-            <p className="text-xs text-zinc-300 leading-relaxed">
-              The task branch cannot be fast-forwarded or automatically merged into your target branch
-              because conflicting changes exist in the following files:
+            <p className="text-zinc-300 leading-relaxed">
+              The task branch cannot be fast-forwarded or automatically merged into the target branch.
+              Automatic conflict resolution is disabled for safety.
             </p>
 
-            <div className="max-h-40 overflow-y-auto p-3 rounded-lg bg-zinc-950 border border-zinc-800 font-mono text-xs text-amber-300 space-y-1">
+            <div className="max-h-40 overflow-y-auto p-2.5 bg-[#09090b] border border-[#27272a] text-zinc-300 space-y-1">
+              <div className="text-[10px] text-zinc-500 uppercase pb-1 border-b border-[#1f1f23]">
+                Conflicting files:
+              </div>
               {conflictFiles.map((file, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-                  <span>{file}</span>
+                <div key={i} className="text-[11px] text-zinc-300">
+                  ! {file}
                 </div>
               ))}
             </div>
 
-            <div className="p-3 rounded-lg bg-zinc-800/50 border border-zinc-700 text-xs text-zinc-300 space-y-1">
-              <p className="font-semibold text-zinc-200">Safety Guarantee:</p>
-              <p className="text-zinc-400">
-                The merge attempt was automatically aborted (<code className="text-zinc-300 font-mono">git merge --abort</code>).
-                Your primary working tree remains clean and untouched.
-              </p>
+            <div className="p-2 bg-[#09090b] border border-[#27272a] text-[11px] text-zinc-500">
+              * Merge aborted (git merge --abort). Primary working tree remains clean.
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#27272a]">
               <button
                 type="button"
                 onClick={() => setConflictFiles(null)}
-                className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-300 font-medium transition-colors"
+                className="px-3 py-1 rounded bg-[#18181b] hover:bg-[#27272a] text-zinc-400 hover:text-zinc-200"
               >
-                Close & Keep Reviewing
+                [close]
               </button>
               <button
                 type="button"
@@ -295,10 +269,9 @@ export const ReviewPanel: FC<ReviewPanelProps> = ({
                   setConflictFiles(null);
                   setShowRejectModal(true);
                 }}
-                className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs transition-colors flex items-center gap-1.5"
+                className="px-3 py-1 rounded bg-[#27272a] hover:bg-zinc-700 text-zinc-200 font-medium"
               >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>Reject & Clean Up</span>
+                [reject_and_clean_up]
               </button>
             </div>
           </div>

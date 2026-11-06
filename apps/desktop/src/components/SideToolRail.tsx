@@ -1,11 +1,4 @@
 import { type FC, type ReactNode } from 'react';
-import {
-  GitCompare,
-  Globe,
-  Terminal,
-  FolderOpen,
-  X,
-} from 'lucide-react';
 import type { ChangeInventory as ChangeInventoryType } from '../types';
 
 export type ActiveToolPane = 'review' | 'terminal' | 'quota' | 'files' | null;
@@ -25,135 +18,124 @@ export const SideToolRail: FC<SideToolRailProps> = ({
   workerEventCount,
   children,
 }) => {
-  const hasChanges = inventory && inventory.files.length > 0;
+  const hasChanges = Boolean(inventory && inventory.files.length > 0);
 
   return (
-    <aside className="flex h-full border-l border-[#1f1f23] bg-[#0d0d0f] shrink-0 z-10 select-none">
-      {/* Expanded Pane (if a tool is active) */}
+    <aside className="flex h-full border-l border-[#27272a] bg-[#09090b] shrink-0 z-10 select-none font-mono text-xs">
+      {/* Expanded Side Pane */}
       {activePane && (
-        <div className="w-[520px] lg:w-[640px] xl:w-[720px] flex flex-col h-full bg-[#121215] border-r border-[#1f1f23] overflow-hidden shadow-2xl">
-          {/* Pane Top Tab Header (matches Image 2: "New tab x +") */}
-          <div className="h-9 px-3 bg-[#18181b] border-b border-[#27272a] flex items-center justify-between text-xs font-medium text-zinc-300">
+        <div className="w-[520px] lg:w-[620px] xl:w-[700px] flex flex-col h-full bg-[#0d0d0f] border-r border-[#27272a] overflow-hidden">
+          {/* Header */}
+          <div className="h-8 px-3 bg-[#121214] border-b border-[#27272a] flex items-center justify-between text-xs text-zinc-300">
             <div className="flex items-center gap-2">
-              <span className="font-semibold text-zinc-200 capitalize">
+              <span className="font-semibold text-zinc-200">
                 {activePane === 'review'
-                  ? 'Review Changes'
+                  ? 'review_changes'
                   : activePane === 'terminal'
-                  ? 'Worker Terminal'
+                  ? 'worker_terminal'
                   : activePane === 'quota'
-                  ? 'Rate Limit Quotas'
-                  : 'Project Files'}
+                  ? 'rate_limits'
+                  : 'project_files'}
               </span>
-              {activePane === 'review' && hasChanges && (
-                <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  {inventory.files.length} file{inventory.files.length !== 1 ? 's' : ''} (+{inventory.total_additions} -{inventory.total_deletions})
+              {activePane === 'review' && hasChanges && inventory && (
+                <span className="text-[10px] text-zinc-400">
+                  [{inventory.files.length} files: +{inventory.total_additions}/-{inventory.total_deletions}]
                 </span>
               )}
             </div>
 
-            <div className="flex items-center gap-1 text-zinc-400">
-              <button
-                type="button"
-                onClick={() => onTogglePane(null)}
-                className="p-1 rounded hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
-                title="Close side pane"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => onTogglePane(null)}
+              className="text-zinc-500 hover:text-zinc-200 px-1 font-mono transition-colors"
+              title="close pane"
+            >
+              [x]
+            </button>
           </div>
 
-          {/* Pane Content */}
-          <div className="flex-1 overflow-hidden p-3">{children}</div>
+          {/* Body */}
+          <div className="flex-1 overflow-hidden p-2">{children}</div>
         </div>
       )}
 
-      {/* Slim Action Button Rail (Identical to Image 2) */}
-      <div className="w-56 p-3 flex flex-col gap-2 shrink-0 bg-[#0d0d0f]">
-        <div className="text-[10px] font-semibold text-zinc-500 uppercase tracking-wider px-2 py-1">
-          Quick Tools
+      {/* Slim Action Rail (Matching Image 2 without colorful SVG icons) */}
+      <div className="w-52 p-2 flex flex-col gap-1.5 shrink-0 bg-[#09090b]">
+        <div className="text-[10px] text-zinc-500 uppercase px-2 py-1 tracking-wider">
+          tools
         </div>
 
-        {/* 1. Review [CTRL ALT R] */}
+        {/* 1. Review */}
         <button
           type="button"
           onClick={() => onTogglePane(activePane === 'review' ? null : 'review')}
-          className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all ${
+          className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded text-left transition-colors text-xs ${
             activePane === 'review'
-              ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40'
+              ? 'bg-[#27272a] text-white border border-[#3f3f46]'
               : hasChanges
-              ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/20'
-              : 'bg-zinc-900/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-800/80'
+              ? 'bg-[#18181b] text-zinc-100 border border-[#27272a] hover:bg-[#27272a]'
+              : 'text-zinc-400 hover:text-zinc-200 hover:bg-[#18181b] border border-transparent'
           }`}
-          title="Review Git Changes (Ctrl+Alt+R)"
         >
-          <div className="flex items-center gap-2">
-            <GitCompare className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span>Review</span>
-            {hasChanges && (
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            )}
+          <div className="flex items-center gap-1.5">
+            <span className="text-zinc-500">{hasChanges ? '[*]' : '[ ]'}</span>
+            <span>review</span>
           </div>
-          <span className="text-[9px] font-mono text-zinc-500">CTRL ALT R</span>
+          <span className="text-[9px] text-zinc-600">ctrl alt r</span>
         </button>
 
-        {/* 2. Browser / Quota [CTRL ALT B] */}
+        {/* 2. Browser / Quota */}
         <button
           type="button"
           onClick={() => onTogglePane(activePane === 'quota' ? null : 'quota')}
-          className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all ${
+          className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded text-left transition-colors text-xs ${
             activePane === 'quota'
-              ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40'
-              : 'bg-zinc-900/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-800/80'
+              ? 'bg-[#27272a] text-white border border-[#3f3f46]'
+              : 'text-zinc-400 hover:text-zinc-200 hover:bg-[#18181b] border border-transparent'
           }`}
-          title="Quota Telemetry (Ctrl+Alt+B)"
         >
-          <div className="flex items-center gap-2">
-            <Globe className="w-4 h-4 text-blue-400 shrink-0" />
-            <span>Browser</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-zinc-500">[~]</span>
+            <span>browser</span>
           </div>
-          <span className="text-[9px] font-mono text-zinc-500">CTRL ALT B</span>
+          <span className="text-[9px] text-zinc-600">ctrl alt b</span>
         </button>
 
-        {/* 3. Terminal [CTRL ALT T] */}
+        {/* 3. Terminal */}
         <button
           type="button"
           onClick={() => onTogglePane(activePane === 'terminal' ? null : 'terminal')}
-          className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all ${
+          className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded text-left transition-colors text-xs ${
             activePane === 'terminal'
-              ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40'
-              : 'bg-zinc-900/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-800/80'
+              ? 'bg-[#27272a] text-white border border-[#3f3f46]'
+              : 'text-zinc-400 hover:text-zinc-200 hover:bg-[#18181b] border border-transparent'
           }`}
-          title="Worker Stream & Logs (Ctrl+Alt+T)"
         >
-          <div className="flex items-center gap-2">
-            <Terminal className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>Terminal</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-zinc-500">[&gt;]</span>
+            <span>terminal</span>
             {workerEventCount > 0 && (
-              <span className="text-[9px] font-mono px-1 rounded bg-zinc-800 text-zinc-400">
-                {workerEventCount}
-              </span>
+              <span className="text-[10px] text-zinc-500">({workerEventCount})</span>
             )}
           </div>
-          <span className="text-[9px] font-mono text-zinc-500">CTRL ALT T</span>
+          <span className="text-[9px] text-zinc-600">ctrl alt t</span>
         </button>
 
-        {/* 4. Open file [CTRL ALT P] */}
+        {/* 4. Files */}
         <button
           type="button"
           onClick={() => onTogglePane(activePane === 'files' ? null : 'files')}
-          className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all ${
+          className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded text-left transition-colors text-xs ${
             activePane === 'files'
-              ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40'
-              : 'bg-zinc-900/60 hover:bg-zinc-800 text-zinc-300 border border-zinc-800/80'
+              ? 'bg-[#27272a] text-white border border-[#3f3f46]'
+              : 'text-zinc-400 hover:text-zinc-200 hover:bg-[#18181b] border border-transparent'
           }`}
-          title="Inspect Files (Ctrl+Alt+P)"
         >
-          <div className="flex items-center gap-2">
-            <FolderOpen className="w-4 h-4 text-purple-400 shrink-0" />
-            <span>Open file</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-zinc-500">[/]</span>
+            <span>open file</span>
           </div>
-          <span className="text-[9px] font-mono text-zinc-500">CTRL ALT P</span>
+          <span className="text-[9px] text-zinc-600">ctrl alt p</span>
         </button>
       </div>
     </aside>

@@ -1,5 +1,4 @@
 import { Component, type ReactNode, type ErrorInfo } from 'react';
-import { AlertOctagon, RotateCcw } from 'lucide-react';
 
 interface Props {
   children: ReactNode;
@@ -34,32 +33,24 @@ export class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="flex h-screen w-screen flex-col items-center justify-center bg-[var(--background)] p-8 text-[var(--foreground)] select-none">
-          <div className="max-w-lg w-full bg-[var(--surface)] border border-rose-500/40 rounded-xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center gap-3 border-b border-[var(--surface-border)] pb-3">
-              <div className="w-10 h-10 rounded-lg bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
-                <AlertOctagon className="w-5 h-5" />
-              </div>
-              <div>
-                <h2 className="text-sm font-semibold text-zinc-100">Something went wrong</h2>
-                <p className="text-xs text-[var(--foreground-muted)]">
-                  An unexpected UI error occurred.
-                </p>
-              </div>
+        <div className="flex h-screen w-screen flex-col items-center justify-center bg-[#09090b] p-8 text-zinc-100 select-none font-mono text-xs">
+          <div className="max-w-lg w-full bg-[#121214] border border-[#3f3f46] rounded p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-[#27272a] pb-2">
+              <span className="font-semibold text-zinc-100">[ui_error: crashed]</span>
+              <span className="text-[10px] text-zinc-500">error_boundary</span>
             </div>
 
-            <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-lg text-xs font-mono text-rose-300 overflow-x-auto max-h-40 whitespace-pre-wrap">
+            <div className="p-2.5 bg-[#09090b] border border-[#27272a] text-zinc-300 overflow-x-auto max-h-40 whitespace-pre-wrap text-[11px]">
               {this.state.error?.message || 'Unknown UI Error'}
             </div>
 
-            <div className="flex justify-end pt-2">
+            <div className="flex justify-end pt-2 border-t border-[#27272a]">
               <button
                 type="button"
                 onClick={this.handleReset}
-                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs flex items-center gap-2 transition-colors shadow-sm"
+                className="px-3 py-1.5 rounded bg-zinc-200 hover:bg-white text-black font-medium transition-colors"
               >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Reload Application</span>
+                [reload_application]
               </button>
             </div>
           </div>
