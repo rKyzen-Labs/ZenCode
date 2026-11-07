@@ -655,4 +655,52 @@ mod tests {
         let result = tracker.select_model_for_request(100);
         assert!(matches!(result, Err(QuotaExhaustionAction::QueueAndRetry { model_id, .. }) if model_id == MODEL_PINNED_ADVANCED));
     }
+
+    #[test]
+    fn test_three_rapid_successive_planning_requests() {
+        let mut tracker = ModelQuotaTracker::new();
+        let now_ms = now_millis();
+
+        // 1. Initial state
+        let status_0 = tracker.to_quota_update_event(MODEL_PRIMARY);
+        let primary_0 = status_0.models.iter().find(|m| m.model_id == MODEL_PRIMARY).unwrap();
+        assert_eq!(primary_0.rpm_consumed, 0);
+        assert_eq!(primary_0.tpm_consumed, 0);
+        assert_eq!(primary_0.rpd_consumed, 0);
+
+        // Request 1
+        let (m1, _) = tracker.select_model_for_request(250).unwrap();
+        assert_eq!(m1, MODEL_PRIMARY);
+        tracker.trackers.get_mut(MODEL_PRIMARY).unwrap().record_actual_usage(now_ms, 250);
+        let status_1 = tracker.to_quota_update_event(MODEL_PRIMARY);
+        let p1 = status_1.models.iter().find(|m| m.model_id == MODEL_PRIMARY).unwrap();
+        assert_eq!(p1.rpm_consumed, 1);
+        assert_eq!(p1.tpm_consumed, 250);
+        assert_eq!(p1.rpd_consumed, 1);
+
+        // Request 2
+        let (m2, _) = tracker.select_model_for_request(300).unwrap();
+        assert_eq!(m2, MODEL_PRIMARY);
+        tracker.trackers.get_mut(MODEL_PRIMARY).unwrap().record_actual_usage(now_ms + 100, 300);
+        let status_2 = tracker.to_quota_update_event(MODEL_PRIMARY);
+        let p2 = status_2.models.iter().find(|m| m.model_id == MODEL_PRIMARY).unwrap();
+        assert_eq!(p2.rpm_consumed, 2);
+        assert_eq!(p2.tpm_consumed, 550);
+        assert_eq!(p2.rpd_consumed, 2);
+
+        // Request 3
+        let (m3, _) = tracker.select_model_for_request(450).unwrap();
+        assert_eq!(m3, MODEL_PRIMARY);
+        tracker.trackers.get_mut(MODEL_PRIMARY).unwrap().record_actual_usage(now_ms + 200, 450);
+        let status_3 = tracker.to_quota_update_event(MODEL_PRIMARY);
+        let p3 = status_3.models.iter().find(|m| m.model_id == MODEL_PRIMARY).unwrap();
+        assert_eq!(p3.rpm_consumed, 3);
+        assert_eq!(p3.tpm_consumed, 1000);
+        assert_eq!(p3.rpd_consumed, 3);
+
+        // Confirm all 3 requests routed only to free-tier primary model (gemini-3.5-flash-lite), zero paid models
+        assert_eq!(m1, "gemini-3.5-flash-lite");
+        assert_eq!(m2, "gemini-3.5-flash-lite");
+        assert_eq!(m3, "gemini-3.5-flash-lite");
+    }
 }

@@ -190,4 +190,45 @@ mod tests {
         assert!(!redacted.contains("SECRET"));
         assert!(redacted.contains("[REDACTED_API_KEY]"));
     }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn test_invalid_gemini_key_halts_cleanly_and_restores() {
+        use crate::planner::{GeminiPlannerClient, PlanningContext};
+
+        // 1. Read real key
+        let real_key = CredentialService::get_gemini_api_key().expect("Failed to read initial key");
+        assert!(!real_key.is_empty());
+
+        // 2. Set invalid key
+        CredentialService::set_gemini_api_key("AQ.INVALID_KEY_9999999999").expect("Failed to write invalid key");
+
+        // 3. Confirm invalid key is now in Credential Manager
+        let current_key = CredentialService::get_gemini_api_key().expect("Failed to read invalid key");
+        assert_eq!(current_key, "AQ.INVALID_KEY_9999999999");
+
+        // 4. Run planner with invalid key and confirm clean halt
+        let planner = GeminiPlannerClient::new();
+        let context = PlanningContext {
+            task_description: "Test task".into(),
+            project_type: "Rust".into(),
+            shallow_tree: vec![],
+            manifest_summaries: vec![],
+            git_branch_and_status: "main clean".into(),
+            approved_source_excerpts: vec![],
+            constraints: vec![],
+        };
+        let plan_result = planner.plan(&current_key, &context).await;
+        assert!(plan_result.is_err(), "Expected planning to fail with invalid API key");
+        let err_msg = plan_result.err().unwrap().to_string();
+        println!("  -> Confirmed clean halt with error: {}", redact_secrets(&err_msg, Some(&current_key)));
+
+        // 5. Restore real key
+        CredentialService::set_gemini_api_key(&real_key).expect("Failed to restore real key");
+
+        // 6. Verify real key restored
+        let restored_key = CredentialService::get_gemini_api_key().expect("Failed to read restored key");
+        assert_eq!(restored_key, real_key);
+        println!("  -> Confirmed real key safely restored to Windows Credential Manager.");
+    }
 }
