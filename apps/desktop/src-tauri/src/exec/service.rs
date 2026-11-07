@@ -1,0 +1,324 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command as TokioCommand;
+use tokio::sync::Mutex;
+use zencode_core::redact_secrets;
+
+use super::job::ProcessJob;
+use super::models::{
+    BuildSystemType, CommandRequest, ExecutionResult, ProcessOutputEvent,
+};
+
+pub struct ActiveProcess {
+    pub command_id: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: String,
+    pub start_time: Instant,
+    pub job: ProcessJob,
+}
+
+pub struct ExecutionService {
+    pub pending_approvals: Mutex<HashMap<String, CommandRequest>>,
+    pub active_processes: Mutex<HashMap<String, Arc<Mutex<ActiveProcess>>>>,
+    pub execution_history: Mutex<Vec<ExecutionResult>>,
+}
+
+impl ExecutionService {
+    pub fn new() -> Self {
+        Self {
+            pending_approvals: Mutex::new(HashMap::new()),
+            active_processes: Mutex::new(HashMap::new()),
+            execution_history: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Detect the build system used by the project in the given directory.
+    pub fn detect_build_system(dir: &Path) -> BuildSystemType {
+        if dir.join("Cargo.toml").exists() {
+            BuildSystemType::Cargo
+        } else if dir.join("pnpm-lock.yaml").exists() {
+            BuildSystemType::Pnpm
+        } else if dir.join("package-lock.json").exists() {
+            BuildSystemType::Npm
+        } else if dir.join("yarn.lock").exists() {
+            BuildSystemType::Yarn
+        } else if dir.join("package.json").exists() {
+            BuildSystemType::Npm
+        } else if dir.join("go.mod").exists() {
+            BuildSystemType::Go
+        } else if dir.join("pyproject.toml").exists() || dir.join("requirements.txt").exists() {
+            BuildSystemType::Python
+        } else {
+            BuildSystemType::Unknown
+        }
+    }
+
+    /// Creates and stages a command request requiring user approval.
+    pub async fn create_approval_request(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: &Path,
+        description: &str,
+    ) -> CommandRequest {
+        let id = format!(
+            "cmd_{}_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            rand::random::<u16>()
+        );
+
+        let req = CommandRequest {
+            id: id.clone(),
+            program: program.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            cwd: cwd.to_string_lossy().to_string(),
+            description: description.to_string(),
+            timeout_seconds: Some(180),
+        };
+
+        let mut lock = self.pending_approvals.lock().await;
+        lock.insert(id, req.clone());
+
+        req
+    }
+
+    /// Cancels a running command process and terminates its entire process tree.
+    pub async fn cancel_execution(&self, command_id: &str) -> bool {
+        let process_opt = {
+            let mut active = self.active_processes.lock().await;
+            active.remove(command_id)
+        };
+
+        if let Some(proc_arc) = process_opt {
+            let mut proc = proc_arc.lock().await;
+            proc.job.terminate();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Executes an approved command with line-by-line streaming, output limits, and process tree supervision.
+    pub async fn execute_command(
+        &self,
+        command_id: &str,
+        app_handle: Option<&AppHandle>,
+        redact_key: Option<&str>,
+    ) -> Result<ExecutionResult, String> {
+        // Take request from pending approvals (guarantees one-time use approval)
+        let request = {
+            let mut lock = self.pending_approvals.lock().await;
+            lock.remove(command_id).ok_or_else(|| {
+                format!("Command '{}' has not been approved or has already executed.", command_id)
+            })?
+        };
+
+        let cwd_path = Path::new(&request.cwd);
+        if !cwd_path.exists() {
+            return Err(format!("Working directory does not exist: {}", request.cwd));
+        }
+
+        let start_time = Instant::now();
+        let mut job = ProcessJob::new();
+
+        // Spawn child process with piped stdout and stderr
+        let mut child = TokioCommand::new(&request.program)
+            .args(&request.args)
+            .current_dir(cwd_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn process '{}': {}", request.program, e))?;
+
+        let pid = child.id().ok_or_else(|| "Failed to obtain process ID".to_string())?;
+        job.assign_process(pid);
+
+        // Register active process for cancellation
+        let active_proc = Arc::new(Mutex::new(ActiveProcess {
+            command_id: command_id.to_string(),
+            program: request.program.clone(),
+            args: request.args.clone(),
+            cwd: request.cwd.clone(),
+            start_time,
+            job,
+        }));
+
+        {
+            let mut active_map = self.active_processes.lock().await;
+            active_map.insert(command_id.to_string(), active_proc.clone());
+        }
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let stdout_tail = Arc::new(Mutex::new(Vec::<String>::new()));
+        let stderr_tail = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        let cmd_id_stdout = command_id.to_string();
+        let app_handle_stdout = app_handle.cloned();
+        let stdout_tail_clone = stdout_tail.clone();
+        let redact_key_stdout = redact_key.map(|s| s.to_string());
+
+        // Spawn stdout streaming task
+        let stdout_handle = tokio::spawn(async move {
+            if let Some(out) = stdout {
+                let mut reader = BufReader::new(out).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let sanitized = redact_secrets(&line, redact_key_stdout.as_deref());
+                    {
+                        let mut tail = stdout_tail_clone.lock().await;
+                        if tail.len() >= 1000 {
+                            tail.remove(0);
+                        }
+                        tail.push(sanitized.clone());
+                    }
+
+                    if let Some(ref handle) = app_handle_stdout {
+                        let _ = handle.emit(
+                            "exec:output",
+                            ProcessOutputEvent {
+                                command_id: cmd_id_stdout.clone(),
+                                stream: "stdout".into(),
+                                line: sanitized,
+                                timestamp_ms: SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                            },
+                        );
+                    }
+                }
+            }
+        });
+
+        let cmd_id_stderr = command_id.to_string();
+        let app_handle_stderr = app_handle.cloned();
+        let stderr_tail_clone = stderr_tail.clone();
+        let redact_key_stderr = redact_key.map(|s| s.to_string());
+
+        // Spawn stderr streaming task
+        let stderr_handle = tokio::spawn(async move {
+            if let Some(err) = stderr {
+                let mut reader = BufReader::new(err).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let sanitized = redact_secrets(&line, redact_key_stderr.as_deref());
+                    {
+                        let mut tail = stderr_tail_clone.lock().await;
+                        if tail.len() >= 1000 {
+                            tail.remove(0);
+                        }
+                        tail.push(sanitized.clone());
+                    }
+
+                    if let Some(ref handle) = app_handle_stderr {
+                        let _ = handle.emit(
+                            "exec:output",
+                            ProcessOutputEvent {
+                                command_id: cmd_id_stderr.clone(),
+                                stream: "stderr".into(),
+                                line: sanitized,
+                                timestamp_ms: SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                            },
+                        );
+                    }
+                }
+            }
+        });
+
+        // Wait for child process exit or timeout
+        let timeout_duration = Duration::from_secs(request.timeout_seconds.unwrap_or(300));
+        let wait_result = tokio::time::timeout(timeout_duration, child.wait()).await;
+
+        let _ = stdout_handle.await;
+        let _ = stderr_handle.await;
+
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+
+        // Clean up active process handle
+        let was_cancelled = {
+            let mut active_map = self.active_processes.lock().await;
+            active_map.remove(command_id).is_none()
+        };
+
+        let result = match wait_result {
+            Ok(Ok(status)) => {
+                let exit_code = status.code();
+                let success = status.success() && !was_cancelled;
+                ExecutionResult {
+                    command_id: command_id.to_string(),
+                    program: request.program,
+                    args: request.args,
+                    cwd: request.cwd,
+                    exit_code,
+                    success,
+                    duration_ms,
+                    stdout_tail: stdout_tail.lock().await.clone(),
+                    stderr_tail: stderr_tail.lock().await.clone(),
+                    cancelled: was_cancelled,
+                    error_message: if was_cancelled {
+                        Some("Execution was cancelled by the user.".into())
+                    } else if !status.success() {
+                        Some(format!("Command exited with status code: {:?}", exit_code))
+                    } else {
+                        None
+                    },
+                }
+            }
+            Ok(Err(e)) => ExecutionResult {
+                command_id: command_id.to_string(),
+                program: request.program,
+                args: request.args,
+                cwd: request.cwd,
+                exit_code: None,
+                success: false,
+                duration_ms,
+                stdout_tail: stdout_tail.lock().await.clone(),
+                stderr_tail: stderr_tail.lock().await.clone(),
+                cancelled: was_cancelled,
+                error_message: Some(format!("Process error: {}", e)),
+            },
+            Err(_) => {
+                // Timeout occurred
+                ProcessJob::kill_tree(pid);
+                ExecutionResult {
+                    command_id: command_id.to_string(),
+                    program: request.program,
+                    args: request.args,
+                    cwd: request.cwd,
+                    exit_code: None,
+                    success: false,
+                    duration_ms,
+                    stdout_tail: stdout_tail.lock().await.clone(),
+                    stderr_tail: stderr_tail.lock().await.clone(),
+                    cancelled: false,
+                    error_message: Some(format!("Command execution timed out after {}s", timeout_duration.as_secs())),
+                }
+            }
+        };
+
+        // Record in execution history
+        {
+            let mut hist = self.execution_history.lock().await;
+            hist.push(result.clone());
+        }
+
+        // Emit finished event
+        if let Some(handle) = app_handle {
+            let _ = handle.emit("exec:finished", &result);
+        }
+
+        Ok(result)
+    }
+}

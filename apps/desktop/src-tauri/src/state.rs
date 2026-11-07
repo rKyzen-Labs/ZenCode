@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 use zencode_core::PlanningContext;
 
 use crate::engine::EngineSupervisor;
+use crate::exec::ExecutionService;
 use crate::git::{ChangeInventory, WorktreeInfo};
 use crate::models::{ProjectState, TaskState};
 use crate::planner::CascadePlannerClient;
@@ -19,6 +20,7 @@ pub struct AppState {
     pub active_worktrees: Arc<Mutex<HashMap<String, WorktreeInfo>>>,
     pub active_task_inventories: Arc<Mutex<HashMap<String, ChangeInventory>>>,
     pub current_task_id: Arc<Mutex<Option<String>>>,
+    pub execution_service: Arc<ExecutionService>,
 }
 
 impl AppState {
@@ -33,6 +35,7 @@ impl AppState {
             active_worktrees: Arc::new(Mutex::new(HashMap::new())),
             active_task_inventories: Arc::new(Mutex::new(HashMap::new())),
             current_task_id: Arc::new(Mutex::new(None)),
+            execution_service: Arc::new(ExecutionService::new()),
         }
     }
 

@@ -12,6 +12,9 @@ import type {
   OrphanWorktree,
   UncommittedFile,
   MergeResult,
+  CommandRequest,
+  ProcessOutputEvent,
+  ExecutionResult,
 } from './types';
 import {
   openProject,
@@ -33,6 +36,12 @@ import {
   listActiveWorktrees,
   recoverOrphanedWorktree,
   subscribeToInventoryReady,
+  requestCommandApproval,
+  approveAndRunCommand,
+  cancelCommandExecution,
+  exportDiagnosticBundle,
+  subscribeToExecOutput,
+  subscribeToExecFinished,
 } from './lib/ipc';
 import { HeaderTabBar } from './components/HeaderTabBar';
 import { SideToolRail, type ActiveToolPane } from './components/SideToolRail';
@@ -44,6 +53,8 @@ import { QuotaDashboard } from './components/QuotaDashboard';
 import { DirtyTreeDialog } from './components/DirtyTreeDialog';
 import { OrphanRecoveryDialog } from './components/OrphanRecoveryDialog';
 import { ReviewPanel } from './features/review/ReviewPanel';
+import { CommandApprovalDialog } from './components/CommandApprovalDialog';
+import { ExecutionTerminal } from './components/ExecutionTerminal';
 import { StatusBar } from './components/StatusBar';
 
 export default function App() {
@@ -68,6 +79,19 @@ export default function App() {
   const [dirtyFiles, setDirtyFiles] = useState<UncommittedFile[] | null>(null);
   const [pendingPlanForDirty, setPendingPlanForDirty] = useState<ZencodePlan | null>(null);
   const [orphanedWorktrees, setOrphanedWorktrees] = useState<OrphanWorktree[]>([]);
+
+  // Milestone 3 Permissions, Execution, and Diagnostics State
+  const [pendingCommandApproval, setPendingCommandApproval] = useState<CommandRequest | null>(null);
+  const [isCommandModalOpen, setIsCommandModalOpen] = useState(false);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+  const [activeCommandId, setActiveCommandId] = useState<string | null>(null);
+  const [activeProgram, setActiveProgram] = useState<string>('');
+  const [activeArgs, setActiveArgs] = useState<string[]>([]);
+  const [activeCwd, setActiveCwd] = useState<string>('');
+  const [isCommandRunning, setIsCommandRunning] = useState(false);
+  const [commandOutputLines, setCommandOutputLines] = useState<ProcessOutputEvent[]>([]);
+  const [executionResult, setExecutionResult] = useState<ExecutionResult | null>(null);
+  const [diagnosticNotice, setDiagnosticNotice] = useState<string | null>(null);
 
   // Refresh status from Rust backend
   const refreshStatus = useCallback(async () => {
@@ -144,6 +168,8 @@ export default function App() {
     let unlistenEngineHealth: (() => void) | undefined;
     let unlistenQuotaUpdate: (() => void) | undefined;
     let unlistenInventoryReady: (() => void) | undefined;
+    let unlistenExecOutput: (() => void) | undefined;
+    let unlistenExecFinished: (() => void) | undefined;
 
     const setupListeners = async () => {
       try {
@@ -174,6 +200,15 @@ export default function App() {
           // Automatically open review pane when inventory is received
           setActiveToolPane('review');
         });
+
+        unlistenExecOutput = await subscribeToExecOutput((ev: ProcessOutputEvent) => {
+          setCommandOutputLines((prev) => [...prev, ev]);
+        });
+
+        unlistenExecFinished = await subscribeToExecFinished((res: ExecutionResult) => {
+          setExecutionResult(res);
+          setIsCommandRunning(false);
+        });
       } catch (err) {
         console.warn('Tauri event listeners could not be attached:', err);
       }
@@ -187,6 +222,8 @@ export default function App() {
       unlistenEngineHealth?.();
       unlistenQuotaUpdate?.();
       unlistenInventoryReady?.();
+      unlistenExecOutput?.();
+      unlistenExecFinished?.();
     };
   }, [refreshStatus]);
 
@@ -451,6 +488,73 @@ export default function App() {
     setError(null);
   };
 
+  // Milestone 3 Command Handlers
+  const handleTriggerCommand = async (
+    program: string,
+    args: string[],
+    cwd?: string,
+    description?: string
+  ) => {
+    try {
+      setError(null);
+      const req = await requestCommandApproval(program, args, cwd, description);
+      setPendingCommandApproval(req);
+      setIsCommandModalOpen(true);
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to request command approval');
+    }
+  };
+
+  const handleApproveCommand = async (req: CommandRequest) => {
+    setIsCommandModalOpen(false);
+    setPendingCommandApproval(null);
+    setActiveCommandId(req.id);
+    setActiveProgram(req.program);
+    setActiveArgs(req.args);
+    setActiveCwd(req.cwd);
+    setIsCommandRunning(true);
+    setCommandOutputLines([]);
+    setExecutionResult(null);
+    setIsTerminalOpen(true);
+
+    try {
+      const res = await approveAndRunCommand(req.id);
+      setExecutionResult(res);
+      setIsCommandRunning(false);
+    } catch (err: any) {
+      setIsCommandRunning(false);
+      setError(typeof err === 'string' ? err : err.message || 'Command execution failed');
+    }
+  };
+
+  const handleDenyCommand = (_req: CommandRequest) => {
+    setIsCommandModalOpen(false);
+    setPendingCommandApproval(null);
+  };
+
+  const handleCancelCommand = async () => {
+    if (activeCommandId) {
+      try {
+        await cancelCommandExecution(activeCommandId);
+        setIsCommandRunning(false);
+      } catch (err: any) {
+        console.error('Failed to cancel command:', err);
+      }
+    }
+  };
+
+  const handleExportDiagnostics = async () => {
+    try {
+      setError(null);
+      const bundle = await exportDiagnosticBundle(activeTaskId || undefined);
+      setDiagnosticNotice(
+        `[ok]: Diagnostic bundle exported to .zencode-diagnostics/ with zero credentials leaked. Files changed: ${bundle.files_changed}`
+      );
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to export diagnostics');
+    }
+  };
+
   // Switch Project
   const handleChangeProject = () => {
     setProject(null);
@@ -482,6 +586,16 @@ export default function App() {
           onReject={handleRejectOrphan}
           onIgnore={handleIgnoreOrphans}
           isLoading={isLoading}
+        />
+      )}
+
+      {/* Command Approval Modal (Milestone 3) */}
+      {pendingCommandApproval && (
+        <CommandApprovalDialog
+          request={pendingCommandApproval}
+          isOpen={isCommandModalOpen}
+          onApprove={handleApproveCommand}
+          onDeny={handleDenyCommand}
         />
       )}
 
@@ -529,6 +643,9 @@ export default function App() {
                 onRejectTask={handleRejectTask}
                 onResetTask={handleResetTask}
                 onOpenReviewPane={() => setActiveToolPane('review')}
+                onTriggerCommand={handleTriggerCommand}
+                onExportDiagnostics={handleExportDiagnostics}
+                diagnosticNotice={diagnosticNotice}
                 isLoading={isLoading}
                 error={error}
               />
@@ -541,6 +658,23 @@ export default function App() {
                 error={error}
               />
             )}
+
+            {/* Terminal Drawer for Process Execution */}
+            <div className="px-4 pb-4 max-w-4xl mx-auto w-full">
+              <ExecutionTerminal
+                isOpen={isTerminalOpen}
+                commandId={activeCommandId}
+                program={activeProgram}
+                args={activeArgs}
+                cwd={activeCwd}
+                isRunning={isCommandRunning}
+                outputLines={commandOutputLines}
+                result={executionResult}
+                onCancel={handleCancelCommand}
+                onClose={() => setIsTerminalOpen(false)}
+                onExportDiagnostics={handleExportDiagnostics}
+              />
+            </div>
           </div>
 
           {/* Floating Bottom Prompt Dock (Matching Example Image 2) */}

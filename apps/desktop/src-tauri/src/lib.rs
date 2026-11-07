@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod engine;
+pub mod exec;
 pub mod git;
 pub mod models;
 pub mod planner;
@@ -33,6 +34,11 @@ pub fn run() {
             commit_primary_changes,
             list_active_worktrees_command,
             recover_orphaned_worktree,
+            detect_project_commands,
+            request_command_approval,
+            approve_and_run_command,
+            cancel_command_execution,
+            export_diagnostic_bundle,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

@@ -26,6 +26,9 @@ interface TaskViewProps {
   onRejectTask?: (taskId: string) => Promise<void>;
   onResetTask?: () => void;
   onOpenReviewPane?: () => void;
+  onTriggerCommand?: (program: string, args: string[], cwd?: string, description?: string) => void;
+  onExportDiagnostics?: () => void;
+  diagnosticNotice?: string | null;
   isLoading: boolean;
   error: string | null;
 }
@@ -47,6 +50,9 @@ export const TaskView: FC<TaskViewProps> = ({
   onRejectTask: _onRejectTask,
   onResetTask: _onResetTask,
   onOpenReviewPane,
+  onTriggerCommand,
+  onExportDiagnostics,
+  diagnosticNotice,
   isLoading,
   error,
 }) => {
@@ -222,6 +228,58 @@ export const TaskView: FC<TaskViewProps> = ({
               >
                 [review]
               </button>
+            </div>
+          )}
+
+          {/* Verification & Build Commands Bar (Milestone 3) */}
+          {(inventory || isAwaitingReview || (workerEvents.length > 0 && !isWorkerRunning)) && (
+            <div className="bg-[#121214] border border-[#27272a] rounded p-3 space-y-2">
+              <div className="flex items-center justify-between text-zinc-400 text-[11px] border-b border-zinc-800 pb-1.5">
+                <span className="font-semibold text-zinc-300">[verification_and_checks]</span>
+                <span className="text-zinc-500">process isolation: windows job object</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() =>
+                    onTriggerCommand?.(
+                      'cargo',
+                      ['check', '-p', 'zencode-core'],
+                      inventory?.worktree_path,
+                      'Fast compile-check on crate'
+                    )
+                  }
+                  className="px-2.5 py-1 border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white rounded text-[11px] transition-colors"
+                >
+                  [cargo check]
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onTriggerCommand?.(
+                      'cargo',
+                      ['test', '--workspace'],
+                      inventory?.worktree_path,
+                      'Run workspace test suite'
+                    )
+                  }
+                  className="px-2.5 py-1 border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white rounded text-[11px] transition-colors"
+                >
+                  [cargo test --workspace]
+                </button>
+                <button
+                  type="button"
+                  onClick={onExportDiagnostics}
+                  className="px-2.5 py-1 border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 rounded text-[11px] transition-colors ml-auto"
+                >
+                  [export_diagnostic_bundle]
+                </button>
+              </div>
+              {diagnosticNotice && (
+                <div className="p-2 border border-emerald-900/60 bg-emerald-950/20 text-emerald-300 text-[11px] break-all">
+                  {diagnosticNotice}
+                </div>
+              )}
             </div>
           )}
         </div>

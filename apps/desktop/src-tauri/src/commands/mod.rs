@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
@@ -7,6 +7,10 @@ use zencode_core::{
 };
 
 use crate::engine::EngineSupervisor;
+use crate::exec::{
+    BuildCommandsInfo, BuildSystemType, CommandRequest, DiagnosticBundle, DiagnosticService,
+    ExecutionResult, ExecutionService, RecommendedCommand,
+};
 use crate::git::{
     clean_path_for_git, ChangeInventory, GitError, GitService, MergeResult, OrphanWorktree,
     PrimaryTreeStatus, WorktreeInfo,
@@ -976,6 +980,219 @@ pub async fn recover_orphaned_worktree(
     }
 }
 
+/// Detects the build system for the active project or worktree and returns recommended commands.
+#[tauri::command]
+pub async fn detect_project_commands(
+    state: State<'_, AppState>,
+) -> Result<BuildCommandsInfo, String> {
+    let target_dir = {
+        let current_tid = state.current_task_id.lock().await;
+        if let Some(ref tid) = *current_tid {
+            let worktrees = state.active_worktrees.lock().await;
+            if let Some(info) = worktrees.get(tid) {
+                Some(PathBuf::from(&info.worktree_path))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let dir = match target_dir {
+        Some(d) => d,
+        None => {
+            let active = state.active_project.lock().await;
+            let proj = active.as_ref().ok_or_else(|| "No active project open".to_string())?;
+            PathBuf::from(&proj.path)
+        }
+    };
+
+    let bs = ExecutionService::detect_build_system(&dir);
+    let name = bs.display_name().to_string();
+
+    let recommended = match bs {
+        BuildSystemType::Cargo => vec![
+            RecommendedCommand {
+                name: "Check".into(),
+                program: "cargo".into(),
+                args: vec!["check".into()],
+                description: "Fast compile-check without code generation".into(),
+            },
+            RecommendedCommand {
+                name: "Test".into(),
+                program: "cargo".into(),
+                args: vec!["test".into(), "--workspace".into()],
+                description: "Run workspace test suite".into(),
+            },
+            RecommendedCommand {
+                name: "Build".into(),
+                program: "cargo".into(),
+                args: vec!["build".into()],
+                description: "Compile project binaries".into(),
+            },
+        ],
+        BuildSystemType::Pnpm => vec![
+            RecommendedCommand {
+                name: "Test".into(),
+                program: "pnpm".into(),
+                args: vec!["test".into()],
+                description: "Run package tests".into(),
+            },
+            RecommendedCommand {
+                name: "Build".into(),
+                program: "pnpm".into(),
+                args: vec!["build".into()],
+                description: "Compile production bundles".into(),
+            },
+        ],
+        BuildSystemType::Npm => vec![
+            RecommendedCommand {
+                name: "Test".into(),
+                program: "npm".into(),
+                args: vec!["test".into()],
+                description: "Run npm test script".into(),
+            },
+            RecommendedCommand {
+                name: "Build".into(),
+                program: "npm".into(),
+                args: vec!["run".into(), "build".into()],
+                description: "Run build script".into(),
+            },
+        ],
+        BuildSystemType::Yarn => vec![
+            RecommendedCommand {
+                name: "Test".into(),
+                program: "yarn".into(),
+                args: vec!["test".into()],
+                description: "Run tests".into(),
+            },
+            RecommendedCommand {
+                name: "Build".into(),
+                program: "yarn".into(),
+                args: vec!["build".into()],
+                description: "Run build".into(),
+            },
+        ],
+        BuildSystemType::Go => vec![
+            RecommendedCommand {
+                name: "Test".into(),
+                program: "go".into(),
+                args: vec!["test".into(), "./...".into()],
+                description: "Run Go test suite".into(),
+            },
+            RecommendedCommand {
+                name: "Build".into(),
+                program: "go".into(),
+                args: vec!["build".into(), "./...".into()],
+                description: "Build Go packages".into(),
+            },
+        ],
+        BuildSystemType::Python => vec![
+            RecommendedCommand {
+                name: "Test".into(),
+                program: "pytest".into(),
+                args: vec![],
+                description: "Run pytest".into(),
+            },
+        ],
+        BuildSystemType::Unknown => vec![],
+    };
+
+    Ok(BuildCommandsInfo {
+        build_system: bs,
+        build_system_name: name,
+        recommended_commands: recommended,
+    })
+}
+
+/// Stages a command request for user approval. Does not execute the command.
+#[tauri::command]
+pub async fn request_command_approval(
+    program: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    description: String,
+    state: State<'_, AppState>,
+) -> Result<CommandRequest, String> {
+    let resolved_cwd = match cwd {
+        Some(c) if !c.trim().is_empty() => PathBuf::from(c),
+        _ => {
+            let current_tid = state.current_task_id.lock().await;
+            if let Some(ref tid) = *current_tid {
+                let worktrees = state.active_worktrees.lock().await;
+                if let Some(info) = worktrees.get(tid) {
+                    PathBuf::from(&info.worktree_path)
+                } else {
+                    let active = state.active_project.lock().await;
+                    let proj = active.as_ref().ok_or_else(|| "No active project open".to_string())?;
+                    PathBuf::from(&proj.path)
+                }
+            } else {
+                let active = state.active_project.lock().await;
+                let proj = active.as_ref().ok_or_else(|| "No active project open".to_string())?;
+                PathBuf::from(&proj.path)
+            }
+        }
+    };
+
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let req = state
+        .execution_service
+        .create_approval_request(&program, &arg_refs, &resolved_cwd, &description)
+        .await;
+
+    Ok(req)
+}
+
+/// Runs a previously approved command, streaming output line-by-line via Tauri events.
+#[tauri::command]
+pub async fn approve_and_run_command(
+    command_id: String,
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ExecutionResult, String> {
+    let key_opt = CredentialService::get_gemini_api_key().ok();
+    state
+        .execution_service
+        .execute_command(&command_id, Some(&app_handle), key_opt.as_deref())
+        .await
+}
+
+/// Cancels an in-flight command execution and cleanly kills its entire process tree.
+#[tauri::command]
+pub async fn cancel_command_execution(
+    command_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let cancelled = state.execution_service.cancel_execution(&command_id).await;
+    Ok(cancelled)
+}
+
+/// Exports a complete diagnostic bundle for the current or specified task with strict secret redaction.
+#[tauri::command]
+pub async fn export_diagnostic_bundle(
+    task_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<DiagnosticBundle, String> {
+    let tid = match task_id {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => {
+            let cur = state.current_task_id.lock().await;
+            cur.clone().unwrap_or_else(|| "diagnostic".to_string())
+        }
+    };
+
+    let repo_path = {
+        let active = state.active_project.lock().await;
+        let proj = active.as_ref().ok_or_else(|| "No active project open".to_string())?;
+        PathBuf::from(&proj.path)
+    };
+
+    let (_path, bundle) = DiagnosticService::export_bundle(&tid, &repo_path, &state).await?;
+    Ok(bundle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -996,5 +1213,140 @@ mod tests {
         // 2. Direct routing matrix assertion
         let routing_check = Operation::CreateInitialPlan.enforce_gemini_permission(false);
         assert!(routing_check.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_command_execution_requires_prior_approval() {
+        let app_state = AppState::new();
+        // Trying to execute an unapproved command must fail hard
+        let result = app_state
+            .execution_service
+            .execute_command("fake_cmd_9999", None, None)
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("has not been approved"), "Error was: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_command_approval_and_execution_lifecycle() {
+        let app_state = AppState::new();
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        // 1. Stage approval request
+        let req = app_state
+            .execution_service
+            .create_approval_request(
+                "cargo",
+                &["check", "-p", "zencode-core"],
+                repo_root,
+                "Check zencode-core crate",
+            )
+            .await;
+
+        assert_eq!(req.program, "cargo");
+        assert_eq!(req.args, vec!["check", "-p", "zencode-core"]);
+
+        // 2. Execute approved command
+        let result = app_state
+            .execution_service
+            .execute_command(&req.id, None, None)
+            .await;
+
+        assert!(result.is_ok(), "Execution failed: {:?}", result.err());
+        let exec = result.unwrap();
+        assert_eq!(exec.exit_code, Some(0));
+        assert!(exec.success);
+        assert!(!exec.cancelled);
+
+        // 3. Second execution attempt with same ID must fail (one-time approval)
+        let second_result = app_state
+            .execution_service
+            .execute_command(&req.id, None, None)
+            .await;
+        assert!(second_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_command_cancellation_cleans_job() {
+        let app_state = AppState::new();
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        // Stage a long running test command
+        let req = app_state
+            .execution_service
+            .create_approval_request(
+                "cargo",
+                &["test", "--workspace"],
+                repo_root,
+                "Run workspace tests",
+            )
+            .await;
+
+        let cmd_id = req.id.clone();
+        let exec_service = app_state.execution_service.clone();
+
+        let handle = tokio::spawn(async move {
+            exec_service.execute_command(&cmd_id, None, None).await
+        });
+
+        // Give it a brief moment to start up and spawn child processes
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Cancel mid-run
+        let was_cancelled = app_state.execution_service.cancel_execution(&req.id).await;
+        assert!(was_cancelled, "cancel_execution should return true for running process");
+
+        let result = handle.await.expect("task join failed");
+        assert!(result.is_ok());
+        let exec = result.unwrap();
+        assert!(exec.cancelled, "ExecutionResult should reflect cancelled state");
+        assert!(!exec.success);
+    }
+
+    #[tokio::test]
+    async fn test_diagnostic_bundle_export_and_secret_redaction() {
+        let app_state = AppState::new();
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+
+        // Store active project in app_state
+        {
+            let mut active = app_state.active_project.lock().await;
+            *active = Some(ProjectState {
+                path: repo_root.to_string_lossy().to_string(),
+                name: "ZenCode".into(),
+                project_type: "Rust".into(),
+                is_git_repo: true,
+                current_branch: Some("main".into()),
+                git_status_summary: "Clean".into(),
+                is_clean: true,
+            });
+        }
+
+        // Export bundle
+        let (bundle_path, bundle) = DiagnosticService::export_bundle("test-task-1", repo_root, &app_state)
+            .await
+            .expect("Diagnostic bundle export should succeed");
+
+        assert!(bundle_path.exists(), "Exported diagnostic JSON file must exist");
+        assert_eq!(bundle.task_id, "test-task-1");
+
+        // Verify zero secrets leaked
+        assert!(!bundle.raw_json.contains("AIzaSy"));
+
+        // Clean up test diagnostic file
+        let _ = std::fs::remove_file(bundle_path);
     }
 }

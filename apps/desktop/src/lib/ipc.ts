@@ -14,6 +14,11 @@ import type {
   MergeResult,
   PrimaryTreeStatus,
   OrphanWorktree,
+  BuildCommandsInfo,
+  CommandRequest,
+  ProcessOutputEvent,
+  ExecutionResult,
+  DiagnosticBundle,
 } from '../types';
 
 /**
@@ -239,6 +244,76 @@ function getMockResponse<T>(cmd: string, args: Record<string, unknown> = {}): T 
     } as unknown as T;
   }
 
+  if (cmd === 'detect_project_commands') {
+    return {
+      build_system: 'Cargo',
+      build_system_name: 'Cargo (Rust)',
+      recommended_commands: [
+        {
+          name: 'Check',
+          program: 'cargo',
+          args: ['check', '-p', 'zencode-core'],
+          description: 'Fast compile-check without code generation',
+        },
+        {
+          name: 'Test',
+          program: 'cargo',
+          args: ['test', '--workspace'],
+          description: 'Run workspace test suite',
+        },
+        {
+          name: 'Build',
+          program: 'cargo',
+          args: ['build'],
+          description: 'Compile project binaries',
+        },
+      ],
+    } as unknown as T;
+  }
+
+  if (cmd === 'request_command_approval') {
+    return {
+      id: `cmd_mock_${Date.now()}`,
+      program: (args.program as string) || 'cargo',
+      args: (args.args as string[]) || ['check'],
+      cwd: (args.cwd as string) || 'A:\\ZenCode\\.zencode-worktrees\\task-active',
+      description: (args.description as string) || 'Mock command',
+      timeout_seconds: 180,
+    } as unknown as T;
+  }
+
+  if (cmd === 'approve_and_run_command') {
+    return {
+      command_id: (args.commandId as string) || 'cmd_mock',
+      program: 'cargo',
+      args: ['check'],
+      cwd: 'A:\\ZenCode',
+      exit_code: 0,
+      success: true,
+      duration_ms: 120,
+      stdout_tail: ['    Checking zencode-core v0.1.0', '    Finished dev profile in 0.12s'],
+      stderr_tail: [],
+      cancelled: false,
+      error_message: null,
+    } as unknown as T;
+  }
+
+  if (cmd === 'cancel_command_execution') {
+    return true as unknown as T;
+  }
+
+  if (cmd === 'export_diagnostic_bundle') {
+    return {
+      task_id: (args.taskId as string) || 'task_mock',
+      exported_at: new Date().toISOString(),
+      is_clean: true,
+      files_changed: 1,
+      logs: ['Task initialized', 'Command executed', 'Clean'],
+      execution_history: [],
+      raw_json: '{}',
+    } as unknown as T;
+  }
+
   return {} as T;
 }
 
@@ -381,6 +456,52 @@ export async function subscribeToQuotaUpdates(
   callback: (payload: QuotaUpdateEvent) => void
 ): Promise<UnlistenFn> {
   return await safeListen<QuotaUpdateEvent>('planner:quota_update', (event) => {
+    callback(event.payload);
+  });
+}
+
+export async function detectProjectCommands(): Promise<BuildCommandsInfo> {
+  return await safeInvoke<BuildCommandsInfo>('detect_project_commands');
+}
+
+export async function requestCommandApproval(
+  program: string,
+  args: string[],
+  cwd?: string,
+  description?: string
+): Promise<CommandRequest> {
+  return await safeInvoke<CommandRequest>('request_command_approval', {
+    program,
+    args,
+    cwd: cwd ?? null,
+    description: description ?? `Run ${program} ${args.join(' ')}`,
+  });
+}
+
+export async function approveAndRunCommand(commandId: string): Promise<ExecutionResult> {
+  return await safeInvoke<ExecutionResult>('approve_and_run_command', { commandId });
+}
+
+export async function cancelCommandExecution(commandId: string): Promise<boolean> {
+  return await safeInvoke<boolean>('cancel_command_execution', { commandId });
+}
+
+export async function exportDiagnosticBundle(taskId?: string): Promise<DiagnosticBundle> {
+  return await safeInvoke<DiagnosticBundle>('export_diagnostic_bundle', { taskId: taskId ?? null });
+}
+
+export async function subscribeToExecOutput(
+  callback: (payload: ProcessOutputEvent) => void
+): Promise<UnlistenFn> {
+  return await safeListen<ProcessOutputEvent>('exec:output', (event) => {
+    callback(event.payload);
+  });
+}
+
+export async function subscribeToExecFinished(
+  callback: (result: ExecutionResult) => void
+): Promise<UnlistenFn> {
+  return await safeListen<ExecutionResult>('exec:finished', (event) => {
     callback(event.payload);
   });
 }

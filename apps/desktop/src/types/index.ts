@@ -239,3 +239,68 @@ export interface WorkerEventPayload {
   content: string;
   timestamp_ms: number;
 }
+
+export type BuildSystemType =
+  | 'Cargo'
+  | 'Pnpm'
+  | 'Npm'
+  | 'Yarn'
+  | 'Go'
+  | 'Python'
+  | 'Unknown';
+
+export interface RecommendedCommand {
+  name: string;
+  program: string;
+  args: string[];
+  description: string;
+}
+
+export interface BuildCommandsInfo {
+  build_system: BuildSystemType;
+  build_system_name: string;
+  recommended_commands: RecommendedCommand[];
+}
+
+export interface CommandRequest {
+  id: string;
+  program: string;
+  args: string[];
+  cwd: string;
+  description: string;
+  timeout_seconds?: number | null;
+}
+
+export interface ProcessOutputEvent {
+  command_id: string;
+  stream: 'stdout' | 'stderr';
+  line: string;
+  timestamp_ms: number;
+}
+
+export interface ExecutionResult {
+  command_id: string;
+  program: string;
+  args: string[];
+  cwd: string;
+  exit_code: number | null;
+  success: boolean;
+  duration_ms: number;
+  stdout_tail: string[];
+  stderr_tail: string[];
+  cancelled: boolean;
+  error_message?: string | null;
+}
+
+export interface DiagnosticBundle {
+  task_id: string;
+  exported_at: string;
+  is_clean: boolean;
+  primary_tree_status?: any;
+  worktree_branch?: string | null;
+  files_changed: number;
+  logs: string[];
+  execution_history: ExecutionResult[];
+  raw_json: string;
+}
+
