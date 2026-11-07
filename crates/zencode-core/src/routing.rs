@@ -35,6 +35,8 @@ pub enum Operation {
     ReplanAfterScopeChange,
     /// Screenshot / design analysis (post-V1 feature)
     ScreenshotDesignAnalysis,
+    /// Advisory consultation on repeated compiler / test failures (opt-in, user-triggered only)
+    AdvisoryErrorConsultation,
 }
 
 /// Who handles the operation.
@@ -63,6 +65,7 @@ impl Operation {
             Self::SummariseTaskResult => RouteTarget::LocalWorkerOrRust,
             Self::ReplanAfterScopeChange => RouteTarget::RustGeminiPlanner,
             Self::ScreenshotDesignAnalysis => RouteTarget::PostV1GeminiWithConsent,
+            Self::AdvisoryErrorConsultation => RouteTarget::RustGeminiPlanner,
         }
     }
 
@@ -72,6 +75,7 @@ impl Operation {
             Self::CreateInitialPlan => true,
             Self::ReplanAfterScopeChange => true,
             Self::ScreenshotDesignAnalysis => true,
+            Self::AdvisoryErrorConsultation => true,
             Self::InspectProjectTree
             | Self::SearchSourceFiles
             | Self::WriteOrEditCode
@@ -99,7 +103,9 @@ impl Operation {
                 }
                 Ok(())
             }
-            Self::ReplanAfterScopeChange | Self::ScreenshotDesignAnalysis => {
+            Self::ReplanAfterScopeChange
+            | Self::ScreenshotDesignAnalysis
+            | Self::AdvisoryErrorConsultation => {
                 if !consent_confirmed {
                     return Err(RoutingError::MissingUserConsent { operation: self });
                 }

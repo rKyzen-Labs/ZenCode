@@ -85,3 +85,12 @@ pub struct PlanSubmissionResult {
     pub active_model: String,
     pub switch_reason: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdvisoryPreview {
+    pub preview_id: String,
+    pub error_text: String,
+    pub file_path: Option<String>,
+    pub file_excerpt: String,
+    pub preview_payload: String,
+}

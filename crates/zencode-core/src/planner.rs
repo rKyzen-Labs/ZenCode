@@ -179,6 +179,13 @@ impl GeminiPlannerClient {
         }
     }
 
+    pub fn with_model(model: &str) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            model: model.to_string(),
+        }
+    }
+
     /// Request schema matching Zencode spec
     pub fn plan_json_schema() -> serde_json::Value {
         serde_json::json!({
@@ -309,5 +316,97 @@ impl GeminiPlannerClient {
         plan.validate()?;
 
         Ok((plan, usage))
+    }
+
+    /// Executes an advisory error consultation request (opt-in, user-confirmed).
+    /// Does not touch filesystem, execute code, or run tests. Returns suggested fix for the local worker.
+    pub async fn get_advisory_suggestion(
+        &self,
+        api_key: &str,
+        error_text: &str,
+        file_excerpt: &str,
+    ) -> Result<(String, UsageMetadata), PlannerError> {
+        let prompt_text = format!(
+            "You are an advisory compiler and code analysis assistant. A local worker encountered the following build or test failure:\n\n\
+            === ERROR SIGNATURE ===\n{}\n\n\
+            === RELEVANT SOURCE FILE EXCERPT ===\n{}\n\n\
+            Analyze this specific failure and provide a concise, actionable suggestion for how the local worker can fix the code. \
+            Do not assume filesystem access. Your response will be passed directly to the local worker to implement and test locally.",
+            error_text.trim(),
+            file_excerpt.trim()
+        );
+
+        let request_body = serde_json::json!({
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        { "text": prompt_text }
+                    ]
+                }
+            ]
+        });
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.model, api_key
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request_body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(PlannerError::QuotaExhausted(error_text));
+        }
+
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(PlannerError::ApiError {
+                status: status.as_u16(),
+                message: error_text,
+            });
+        }
+
+        let body_json: serde_json::Value = response.json().await?;
+
+        let mut usage = UsageMetadata::default();
+        if let Some(meta) = body_json.get("usageMetadata") {
+            usage.prompt_token_count = meta
+                .get("promptTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            usage.candidates_token_count = meta
+                .get("candidatesTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            usage.total_token_count = meta
+                .get("totalTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            usage.service_tier = meta
+                .get("serviceTier")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+        }
+
+        let candidate_text = body_json
+            .get("candidates")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("content"))
+            .and_then(|c| c.get("parts"))
+            .and_then(|p| p.get(0))
+            .and_then(|p| p.get("text"))
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| {
+                PlannerError::ValidationError("Missing candidate text part in Gemini response".into())
+            })?;
+
+        Ok((candidate_text.to_string(), usage))
     }
 }

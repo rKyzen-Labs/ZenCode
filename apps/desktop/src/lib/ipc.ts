@@ -19,6 +19,7 @@ import type {
   ProcessOutputEvent,
   ExecutionResult,
   DiagnosticBundle,
+  AdvisoryPreview,
 } from '../types';
 
 /**
@@ -49,24 +50,26 @@ function getMockResponse<T>(cmd: string, args: Record<string, unknown> = {}): T 
   }
 
   if (cmd === 'get_project_state') {
-    return [
-      {
+    return {
+      active_project: {
         path: 'A:\\ZenCode',
         name: 'ZenCode',
         is_git_repo: true,
         current_branch: 'main',
         git_status_summary: 'clean working tree',
       },
-      {
-        gemini_ready: true,
-        gemini_status_text: 'Gemini Planner ready (store=false)',
-        ollama_ready: true,
-        ollama_status_text: 'Ollama local worker ready (qwen3.5:9b)',
-        opencode_health: 'Ready',
-        task_state: 'Idle',
-        request_count: 0,
-      },
-    ] as unknown as T;
+      gemini_ready: true,
+      gemini_status: 'Configured (OS Storage)',
+      gemini_status_text: 'Gemini Planner ready (store=false)',
+      ollama_ready: true,
+      ollama_status: 'Available (127.0.0.1:11434)',
+      ollama_status_text: 'Ollama local worker ready (qwen3.5:9b)',
+      opencode_health: 'NotStarted',
+      task_state: 'Idle',
+      request_count: 0,
+      planner_model: 'gemini-3.5-flash-lite',
+      worker_model: 'qwen3.5:9b',
+    } as unknown as T;
   }
 
   if (cmd === 'preview_planning_context') {
@@ -272,13 +275,18 @@ function getMockResponse<T>(cmd: string, args: Record<string, unknown> = {}): T 
   }
 
   if (cmd === 'request_command_approval') {
+    const prog = (args.program as string) || 'cargo';
+    const argList = (args.args as string[]) || ['check'];
+    const isSafe = (prog === 'cargo' && argList[0] === 'check') || (prog === 'git' && argList[0] === 'status');
     return {
       id: `cmd_mock_${Date.now()}`,
-      program: (args.program as string) || 'cargo',
-      args: (args.args as string[]) || ['check'],
+      program: prog,
+      args: argList,
       cwd: (args.cwd as string) || 'A:\\ZenCode\\.zencode-worktrees\\task-active',
       description: (args.description as string) || 'Mock command',
       timeout_seconds: 180,
+      auto_approved: isSafe,
+      security_class: isSafe ? 'SafeAutoApproved' : 'SessionRememberable',
     } as unknown as T;
   }
 
@@ -314,6 +322,20 @@ function getMockResponse<T>(cmd: string, args: Record<string, unknown> = {}): T 
     } as unknown as T;
   }
 
+  if (cmd === 'preview_advisory_context') {
+    return {
+      preview_id: `adv_mock_${Date.now()}`,
+      error_text: (args.error_text as string) || 'error[E0425]: cannot find value in this scope',
+      file_path: (args.file_path as string) || 'crates/zencode-core/src/lib.rs',
+      file_excerpt: 'pub fn example() { missing_func(); }',
+      preview_payload: '=== ERROR SIGNATURE ===\nerror[E0425]: cannot find value\n\n=== RELEVANT FILE EXCERPT ===\npub fn example()',
+    } as unknown as T;
+  }
+
+  if (cmd === 'submit_advisory_request') {
+    return 'Advisory suggestion: Implement or import `missing_func` in `crates/zencode-core/src/lib.rs`. Ensure trait is in scope.' as unknown as T;
+  }
+
   return {} as T;
 }
 
@@ -338,8 +360,8 @@ export async function openProject(path: string): Promise<ProjectState> {
   return await safeInvoke<ProjectState>('open_project', { path });
 }
 
-export async function getProjectState(): Promise<[ProjectState | null, SystemStatus]> {
-  return await safeInvoke<[ProjectState | null, SystemStatus]>('get_project_state');
+export async function getProjectState(): Promise<SystemStatus> {
+  return await safeInvoke<SystemStatus>('get_project_state');
 }
 
 export async function previewPlanningContext(taskDescription: string): Promise<ContextPreview> {
@@ -503,5 +525,25 @@ export async function subscribeToExecFinished(
 ): Promise<UnlistenFn> {
   return await safeListen<ExecutionResult>('exec:finished', (event) => {
     callback(event.payload);
+  });
+}
+
+export async function previewAdvisoryContext(
+  errorText: string,
+  filePath?: string
+): Promise<AdvisoryPreview> {
+  return await safeInvoke<AdvisoryPreview>('preview_advisory_context', {
+    error_text: errorText,
+    file_path: filePath ?? null,
+  });
+}
+
+export async function submitAdvisoryRequest(
+  previewId: string,
+  confirmed: boolean
+): Promise<string> {
+  return await safeInvoke<string>('submit_advisory_request', {
+    preview_id: previewId,
+    confirmed,
   });
 }

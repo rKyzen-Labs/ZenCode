@@ -78,15 +78,6 @@ export const PromptDock: FC<PromptDockProps> = ({
         {/* Monochromatic Bottom Bar */}
         <div className="flex items-center justify-between pt-1 border-t border-[#1f1f23] text-xs">
           <div className="flex items-center gap-1.5">
-            {/* Monospaced context button [+] */}
-            <button
-              type="button"
-              className="px-1.5 py-0.5 text-zinc-500 hover:text-zinc-200 hover:bg-[#1f1f23] rounded transition-colors text-[11px]"
-              title="add context"
-            >
-              [+]
-            </button>
-
             {/* Mode Selector */}
             <div className="relative">
               <button

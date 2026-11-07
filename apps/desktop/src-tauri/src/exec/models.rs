@@ -48,6 +48,8 @@ pub struct CommandRequest {
     pub cwd: String,
     pub description: String,
     pub timeout_seconds: Option<u64>,
+    pub auto_approved: bool,
+    pub security_class: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

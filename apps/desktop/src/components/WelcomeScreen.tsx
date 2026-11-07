@@ -26,9 +26,14 @@ export const WelcomeScreen: FC<WelcomeScreenProps> = ({
     }
   };
 
-  const isGeminiReady = status?.gemini_ready ?? false;
-  const isOllamaReady = status?.ollama_ready ?? false;
+  const isGeminiReady =
+    status?.gemini_ready ?? Boolean(status?.gemini_status?.includes('Configured'));
+  const isOllamaReady =
+    status?.ollama_ready ??
+    Boolean(status?.ollama_status?.includes('Available') || status?.ollama_status?.includes('ready'));
   const isOpencodeReady = isEngineReady(status?.opencode_health);
+  const geminiStatusLabel = status?.gemini_status || status?.gemini_status_text || 'credentials check';
+  const ollamaStatusLabel = status?.ollama_status || status?.ollama_status_text || 'checking service';
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#0d0d0f] max-w-3xl mx-auto w-full font-mono text-xs select-none">
@@ -117,7 +122,7 @@ export const WelcomeScreen: FC<WelcomeScreenProps> = ({
                 </span>
               </div>
               <div className="text-[10px] text-zinc-500">
-                {status?.gemini_status_text || 'credentials check'}
+                {geminiStatusLabel}
               </div>
               <div className="text-[10px] text-zinc-600">
                 gemini-3.5-flash-lite
@@ -133,7 +138,7 @@ export const WelcomeScreen: FC<WelcomeScreenProps> = ({
                 </span>
               </div>
               <div className="text-[10px] text-zinc-500">
-                {status?.ollama_status_text || 'checking service'}
+                {ollamaStatusLabel}
               </div>
               <div className="text-[10px] text-zinc-600">
                 qwen3.5:9b (ollama)

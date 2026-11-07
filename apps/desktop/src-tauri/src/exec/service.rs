@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -14,6 +14,13 @@ use super::models::{
     BuildSystemType, CommandRequest, ExecutionResult, ProcessOutputEvent,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSecurityClass {
+    SafeAutoApproved,
+    SessionRememberable,
+    AlwaysRequireApproval,
+}
+
 pub struct ActiveProcess {
     pub command_id: String,
     pub program: String,
@@ -27,6 +34,7 @@ pub struct ExecutionService {
     pub pending_approvals: Mutex<HashMap<String, CommandRequest>>,
     pub active_processes: Mutex<HashMap<String, Arc<Mutex<ActiveProcess>>>>,
     pub execution_history: Mutex<Vec<ExecutionResult>>,
+    pub session_approved_commands: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl ExecutionService {
@@ -35,7 +43,72 @@ impl ExecutionService {
             pending_approvals: Mutex::new(HashMap::new()),
             active_processes: Mutex::new(HashMap::new()),
             execution_history: Mutex::new(Vec::new()),
+            session_approved_commands: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Classifies a command for safe execution according to security policy:
+    /// - Safe auto-approved: read-only status/diff and local build/check operations.
+    /// - Session rememberable: approved once per task, remembered thereafter.
+    /// - Always require approval: network-touching, publishing, package installation, or destructive commands.
+    pub fn classify_command(program: &str, args: &[&str]) -> CommandSecurityClass {
+        let prog_lower = program.to_lowercase();
+        let prog_base = Path::new(&prog_lower)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or(&prog_lower);
+
+        let full_cmd_lower = format!("{} {}", prog_base, args.join(" ")).to_lowercase();
+
+        // 1. Destructive, network-touching, or package-installing commands ALWAYS require approval
+        let dangerous_keywords = [
+            "install", "publish", "push", "pull", "fetch", "clone",
+            "remote", "checkout", "rebase", "reset", "clean -f",
+            "rm", "delete", "drop", "del", "curl", "wget", "nc",
+            "powershell", "cmd", "bash", "sh", "--release",
+        ];
+
+        for kw in dangerous_keywords {
+            if full_cmd_lower.contains(kw) {
+                return CommandSecurityClass::AlwaysRequireApproval;
+            }
+        }
+
+        // 2. Safe auto-approved allowlist: common read-only & local test/build operations
+        if (prog_base == "cargo" || prog_base == "cargo.exe") && !args.is_empty() {
+            let sub = args[0];
+            if sub == "check" || sub == "status" {
+                return CommandSecurityClass::SafeAutoApproved;
+            }
+            if sub == "build" && !full_cmd_lower.contains("--release") {
+                return CommandSecurityClass::SafeAutoApproved;
+            }
+            if sub == "test" {
+                return CommandSecurityClass::SafeAutoApproved;
+            }
+        }
+
+        if (prog_base == "git" || prog_base == "git.exe") && !args.is_empty() {
+            let sub = args[0];
+            if sub == "status" || sub == "diff" || sub == "log" || sub == "branch" {
+                return CommandSecurityClass::SafeAutoApproved;
+            }
+        }
+
+        if prog_base == "pytest" {
+            return CommandSecurityClass::SafeAutoApproved;
+        }
+
+        if (prog_base == "go" || prog_base == "go.exe") && !args.is_empty() && args[0] == "test" {
+            return CommandSecurityClass::SafeAutoApproved;
+        }
+
+        // 3. Otherwise: rememberable for this session once approved
+        CommandSecurityClass::SessionRememberable
+    }
+
+    pub fn command_signature(program: &str, args: &[&str]) -> String {
+        format!("{}:{}", program.to_lowercase(), args.join(" ").to_lowercase())
     }
 
     /// Detect the build system used by the project in the given directory.
@@ -60,13 +133,31 @@ impl ExecutionService {
     }
 
     /// Creates and stages a command request requiring user approval.
+    /// Automatically applies per-session memory and safe auto-approved allowlist.
     pub async fn create_approval_request(
         &self,
         program: &str,
         args: &[&str],
         cwd: &Path,
         description: &str,
+        session_id: Option<&str>,
     ) -> CommandRequest {
+        let sec_class = Self::classify_command(program, args);
+        let sig = Self::command_signature(program, args);
+
+        let auto_approved = match sec_class {
+            CommandSecurityClass::SafeAutoApproved => true,
+            CommandSecurityClass::SessionRememberable => {
+                if let Some(sid) = session_id {
+                    let map = self.session_approved_commands.lock().await;
+                    map.get(sid).map(|set| set.contains(&sig)).unwrap_or(false)
+                } else {
+                    false
+                }
+            }
+            CommandSecurityClass::AlwaysRequireApproval => false,
+        };
+
         let id = format!(
             "cmd_{}_{}",
             SystemTime::now()
@@ -83,12 +174,29 @@ impl ExecutionService {
             cwd: cwd.to_string_lossy().to_string(),
             description: description.to_string(),
             timeout_seconds: Some(180),
+            auto_approved,
+            security_class: match sec_class {
+                CommandSecurityClass::SafeAutoApproved => "SafeAutoApproved".into(),
+                CommandSecurityClass::SessionRememberable => "SessionRememberable".into(),
+                CommandSecurityClass::AlwaysRequireApproval => "AlwaysRequireApproval".into(),
+            },
         };
 
         let mut lock = self.pending_approvals.lock().await;
         lock.insert(id, req.clone());
 
         req
+    }
+
+    pub async fn remember_session_command(&self, session_id: &str, program: &str, args: &[&str]) {
+        let sec_class = Self::classify_command(program, args);
+        if sec_class != CommandSecurityClass::AlwaysRequireApproval {
+            let sig = Self::command_signature(program, args);
+            let mut map = self.session_approved_commands.lock().await;
+            map.entry(session_id.to_string())
+                .or_insert_with(HashSet::new)
+                .insert(sig);
+        }
     }
 
     /// Cancels a running command process and terminates its entire process tree.

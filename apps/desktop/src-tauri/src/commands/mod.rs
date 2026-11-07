@@ -16,8 +16,8 @@ use crate::git::{
     PrimaryTreeStatus, WorktreeInfo,
 };
 use crate::models::{
-    ContextPreview, EngineHealth, PlanSubmissionResult, ProjectState, SystemStatus, TaskState,
-    WorkerEventPayload, WorkerStartError,
+    AdvisoryPreview, ContextPreview, EngineHealth, PlanSubmissionResult, ProjectState, SystemStatus,
+    TaskState, WorkerEventPayload, WorkerStartError,
 };
 use crate::planner::{QuotaUpdateEvent, MODEL_PRIMARY};
 use crate::state::AppState;
@@ -1136,10 +1136,15 @@ pub async fn request_command_approval(
         }
     };
 
+    let tid_opt = {
+        let current_tid = state.current_task_id.lock().await;
+        current_tid.clone()
+    };
+
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let req = state
         .execution_service
-        .create_approval_request(&program, &arg_refs, &resolved_cwd, &description)
+        .create_approval_request(&program, &arg_refs, &resolved_cwd, &description, tid_opt.as_deref())
         .await;
 
     Ok(req)
@@ -1191,6 +1196,114 @@ pub async fn export_diagnostic_bundle(
 
     let (_path, bundle) = DiagnosticService::export_bundle(&tid, &repo_path, &state).await?;
     Ok(bundle)
+}
+
+/// Previews the minimal context (error signature + relevant file excerpt) before consulting Gemini.
+/// Does not call Gemini or any network endpoint.
+#[tauri::command]
+pub async fn preview_advisory_context(
+    error_text: String,
+    file_path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<AdvisoryPreview, String> {
+    if error_text.trim().is_empty() {
+        return Err("Error text cannot be empty".to_string());
+    }
+
+    let file_excerpt = if let Some(ref fp) = file_path {
+        let p = Path::new(fp);
+        if p.exists() {
+            std::fs::read_to_string(p).unwrap_or_else(|_| "(unreadable file)".into())
+        } else {
+            let current_tid = state.current_task_id.lock().await;
+            let resolved = if let Some(ref tid) = *current_tid {
+                let wt_map = state.active_worktrees.lock().await;
+                wt_map.get(tid).map(|w| Path::new(&w.worktree_path).join(fp))
+            } else {
+                let active = state.active_project.lock().await;
+                active.as_ref().map(|proj| Path::new(&proj.path).join(fp))
+            };
+
+            if let Some(target) = resolved {
+                if target.exists() {
+                    std::fs::read_to_string(target).unwrap_or_else(|_| "(unreadable file)".into())
+                } else {
+                    format!("(file not found: {fp})")
+                }
+            } else {
+                format!("(file path provided: {fp})")
+            }
+        }
+    } else {
+        "(no specific file excerpt provided)".to_string()
+    };
+
+    let key_opt = CredentialService::get_gemini_api_key().ok();
+    let sanitized_error = redact_secrets(&error_text, key_opt.as_deref());
+    let sanitized_excerpt = redact_secrets(&file_excerpt, key_opt.as_deref());
+
+    let preview_id = format!(
+        "adv_prev_{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+
+    let preview_payload = format!(
+        "=== ERROR SIGNATURE ===\n{}\n\n=== RELEVANT FILE EXCERPT ===\n{}",
+        sanitized_error, sanitized_excerpt
+    );
+
+    let preview = AdvisoryPreview {
+        preview_id: preview_id.clone(),
+        error_text: sanitized_error,
+        file_path,
+        file_excerpt: sanitized_excerpt,
+        preview_payload,
+    };
+
+    {
+        let mut previews = state.pending_advisory_previews.lock().await;
+        previews.insert(preview_id, preview.clone());
+    }
+
+    Ok(preview)
+}
+
+/// Submits an advisory consultation request to Gemini with confirmed user consent.
+/// Gemini returns an advisory suggestion only; it has zero filesystem/execution access.
+#[tauri::command]
+pub async fn submit_advisory_request(
+    preview_id: String,
+    confirmed: bool,
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    // 1. Enforce routing matrix permission
+    Operation::AdvisoryErrorConsultation
+        .enforce_gemini_permission(confirmed)
+        .map_err(|e| format!("Advisory routing error: {e}"))?;
+
+    // 2. Retrieve staged advisory preview
+    let preview = {
+        let mut previews = state.pending_advisory_previews.lock().await;
+        previews.remove(&preview_id).ok_or_else(|| {
+            format!("Advisory preview '{preview_id}' not found or already consumed.")
+        })?
+    };
+
+    // 3. Fetch Gemini API key
+    let api_key = CredentialService::get_gemini_api_key()
+        .map_err(|e| format!("Failed to retrieve Gemini API key: {e}"))?;
+
+    // 4. Dispatch through rate-limit manager and failover cascade
+    let (suggestion, _model_id, _usage) = state
+        .planner_client
+        .request_advisory_suggestion(&api_key, &preview.error_text, &preview.file_excerpt, Some(&app_handle))
+        .await?;
+
+    Ok(suggestion)
 }
 
 #[cfg(test)]
@@ -1245,6 +1358,7 @@ mod tests {
                 &["check", "-p", "zencode-core"],
                 repo_root,
                 "Check zencode-core crate",
+                None,
             )
             .await;
 
@@ -1288,6 +1402,7 @@ mod tests {
                 &["test", "--workspace"],
                 repo_root,
                 "Run workspace tests",
+                None,
             )
             .await;
 
@@ -1348,5 +1463,78 @@ mod tests {
 
         // Clean up test diagnostic file
         let _ = std::fs::remove_file(bundle_path);
+    }
+
+    #[tokio::test]
+    async fn test_safe_auto_approved_allowlist_and_dangerous_command_enforcement() {
+        let app_state = AppState::new();
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // 1. Safe command in allowlist: auto_approved = true
+        let safe_req = app_state
+            .execution_service
+            .create_approval_request("cargo", &["check"], repo_root, "Safe check", Some("task-1"))
+            .await;
+        assert!(safe_req.auto_approved, "cargo check must be auto-approved");
+        assert_eq!(safe_req.security_class, "SafeAutoApproved");
+
+        // 2. Dangerous command: auto_approved = false, always requires approval
+        let dangerous_req = app_state
+            .execution_service
+            .create_approval_request("cargo", &["install", "ripgrep"], repo_root, "Install pkg", Some("task-1"))
+            .await;
+        assert!(!dangerous_req.auto_approved, "Package installation must never be auto-approved");
+        assert_eq!(dangerous_req.security_class, "AlwaysRequireApproval");
+
+        // 3. Network touching git command: always requires approval
+        let git_push_req = app_state
+            .execution_service
+            .create_approval_request("git", &["push", "origin", "main"], repo_root, "Push to remote", Some("task-1"))
+            .await;
+        assert!(!git_push_req.auto_approved, "git push must never be auto-approved");
+        assert_eq!(git_push_req.security_class, "AlwaysRequireApproval");
+    }
+
+    #[tokio::test]
+    async fn test_per_session_command_memory() {
+        let app_state = AppState::new();
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let session = "task-test-session";
+
+        // Initial run of custom build command not in allowlist
+        let req1 = app_state
+            .execution_service
+            .create_approval_request("python", &["build_script.py"], repo_root, "Run script", Some(session))
+            .await;
+        assert!(!req1.auto_approved, "First execution of custom script must require approval");
+
+        // Simulate user approval & execution -> session remembers it
+        app_state
+            .execution_service
+            .remember_session_command(session, "python", &["build_script.py"])
+            .await;
+
+        // Subsequent identical command in same session -> auto-approved!
+        let req2 = app_state
+            .execution_service
+            .create_approval_request("python", &["build_script.py"], repo_root, "Run script again", Some(session))
+            .await;
+        assert!(req2.auto_approved, "Identical command in same session must be auto-approved");
+
+        // Different session -> still requires approval
+        let req_diff_session = app_state
+            .execution_service
+            .create_approval_request("python", &["build_script.py"], repo_root, "Run script in diff session", Some("other-session"))
+            .await;
+        assert!(!req_diff_session.auto_approved, "Different session must not inherit approval");
+    }
+
+    #[tokio::test]
+    async fn test_advisory_consultation_requires_explicit_consent() {
+        let check_unconfirmed = Operation::AdvisoryErrorConsultation.enforce_gemini_permission(false);
+        assert!(check_unconfirmed.is_err(), "Must reject unconfirmed advisory request");
+
+        let check_confirmed = Operation::AdvisoryErrorConsultation.enforce_gemini_permission(true);
+        assert!(check_confirmed.is_ok(), "Must allow confirmed advisory request");
     }
 }

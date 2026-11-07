@@ -111,16 +111,20 @@ export function formatEngineHealth(health?: EngineHealth | null): string {
   if (!health) return 'stopped';
   if (typeof health === 'string') return health.toLowerCase();
   if (typeof health === 'object') {
+    if ('status' in health && typeof (health as any).status === 'string') {
+      return (health as any).status.toLowerCase();
+    }
     const key = Object.keys(health)[0];
     if (key) return key.toLowerCase();
   }
-  return String(health).toLowerCase();
+  return String(health || '').toLowerCase();
 }
 
 export function isEngineReady(health?: EngineHealth | null): boolean {
   if (!health) return false;
   if (health === 'Ready') return true;
   if (typeof health === 'object' && 'Ready' in health) return true;
+  if (typeof health === 'object' && (health as any).status === 'Ready') return true;
   return false;
 }
 
@@ -128,30 +132,42 @@ export function formatTaskState(state?: TaskState | null): string {
   if (!state) return 'idle';
   if (typeof state === 'string') return state.toLowerCase();
   if (typeof state === 'object') {
+    if ('status' in state && typeof (state as any).status === 'string') {
+      return (state as any).status.toLowerCase();
+    }
     const key = Object.keys(state)[0];
     if (key) return key.toLowerCase();
   }
-  return String(state).toLowerCase();
+  return String(state || '').toLowerCase();
 }
 
 export function isTaskState(state: TaskState | undefined | null, target: string): boolean {
-  if (!state) return target.toLowerCase() === 'idle';
-  if (typeof state === 'string') return state.toLowerCase() === target.toLowerCase();
+  const targetLower = String(target || '').toLowerCase();
+  if (!state) return targetLower === 'idle';
+  if (typeof state === 'string') return state.toLowerCase() === targetLower;
   if (typeof state === 'object') {
+    if ('status' in state && typeof (state as any).status === 'string') {
+      return (state as any).status.toLowerCase() === targetLower;
+    }
     const key = Object.keys(state)[0];
-    return key ? key.toLowerCase() === target.toLowerCase() : false;
+    return key ? key.toLowerCase() === targetLower : false;
   }
   return false;
 }
 
 export interface SystemStatus {
-  gemini_ready: boolean;
-  gemini_status_text: string;
-  ollama_ready: boolean;
-  ollama_status_text: string;
+  active_project?: ProjectState | null;
+  gemini_ready?: boolean;
+  gemini_status_text?: string;
+  gemini_status?: string;
+  ollama_ready?: boolean;
+  ollama_status_text?: string;
+  ollama_status?: string;
   opencode_health: EngineHealth;
   task_state: TaskState;
   request_count: number;
+  planner_model?: string;
+  worker_model?: string;
 }
 
 export interface ContextPreview {
@@ -269,6 +285,16 @@ export interface CommandRequest {
   cwd: string;
   description: string;
   timeout_seconds?: number | null;
+  auto_approved: boolean;
+  security_class: string;
+}
+
+export interface AdvisoryPreview {
+  preview_id: string;
+  error_text: string;
+  file_path?: string | null;
+  file_excerpt: string;
+  preview_payload: string;
 }
 
 export interface ProcessOutputEvent {

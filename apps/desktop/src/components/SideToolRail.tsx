@@ -84,7 +84,7 @@ export const SideToolRail: FC<SideToolRailProps> = ({
           <span className="text-[9px] text-zinc-600">ctrl alt r</span>
         </button>
 
-        {/* 2. Browser / Quota */}
+        {/* 2. Quota & Rate Limits */}
         <button
           type="button"
           onClick={() => onTogglePane(activePane === 'quota' ? null : 'quota')}
@@ -96,7 +96,7 @@ export const SideToolRail: FC<SideToolRailProps> = ({
         >
           <div className="flex items-center gap-1.5">
             <span className="text-zinc-500">[~]</span>
-            <span>browser</span>
+            <span>rate limits</span>
           </div>
           <span className="text-[9px] text-zinc-600">ctrl alt b</span>
         </button>

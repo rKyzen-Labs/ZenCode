@@ -39,6 +39,8 @@ pub fn run() {
             approve_and_run_command,
             cancel_command_execution,
             export_diagnostic_bundle,
+            preview_advisory_context,
+            submit_advisory_request,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

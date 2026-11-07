@@ -7,7 +7,7 @@ use zencode_core::PlanningContext;
 use crate::engine::EngineSupervisor;
 use crate::exec::ExecutionService;
 use crate::git::{ChangeInventory, WorktreeInfo};
-use crate::models::{ProjectState, TaskState};
+use crate::models::{AdvisoryPreview, ProjectState, TaskState};
 use crate::planner::CascadePlannerClient;
 
 pub struct AppState {
@@ -17,6 +17,7 @@ pub struct AppState {
     pub task_state: Arc<Mutex<TaskState>>,
     pub request_count: Arc<AtomicU32>,
     pub pending_previews: Arc<Mutex<HashMap<String, PlanningContext>>>,
+    pub pending_advisory_previews: Arc<Mutex<HashMap<String, AdvisoryPreview>>>,
     pub active_worktrees: Arc<Mutex<HashMap<String, WorktreeInfo>>>,
     pub active_task_inventories: Arc<Mutex<HashMap<String, ChangeInventory>>>,
     pub current_task_id: Arc<Mutex<Option<String>>>,
@@ -32,6 +33,7 @@ impl AppState {
             task_state: Arc::new(Mutex::new(TaskState::Idle)),
             request_count: Arc::new(AtomicU32::new(0)),
             pending_previews: Arc::new(Mutex::new(HashMap::new())),
+            pending_advisory_previews: Arc::new(Mutex::new(HashMap::new())),
             active_worktrees: Arc::new(Mutex::new(HashMap::new())),
             active_task_inventories: Arc::new(Mutex::new(HashMap::new())),
             current_task_id: Arc::new(Mutex::new(None)),

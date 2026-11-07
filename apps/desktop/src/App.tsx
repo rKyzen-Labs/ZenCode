@@ -15,6 +15,7 @@ import type {
   CommandRequest,
   ProcessOutputEvent,
   ExecutionResult,
+  AdvisoryPreview,
 } from './types';
 import {
   openProject,
@@ -40,6 +41,8 @@ import {
   approveAndRunCommand,
   cancelCommandExecution,
   exportDiagnosticBundle,
+  previewAdvisoryContext,
+  submitAdvisoryRequest,
   subscribeToExecOutput,
   subscribeToExecFinished,
 } from './lib/ipc';
@@ -54,6 +57,7 @@ import { DirtyTreeDialog } from './components/DirtyTreeDialog';
 import { OrphanRecoveryDialog } from './components/OrphanRecoveryDialog';
 import { ReviewPanel } from './features/review/ReviewPanel';
 import { CommandApprovalDialog } from './components/CommandApprovalDialog';
+import { AdvisoryPreviewModal } from './components/AdvisoryPreviewModal';
 import { ExecutionTerminal } from './components/ExecutionTerminal';
 import { StatusBar } from './components/StatusBar';
 
@@ -91,16 +95,23 @@ export default function App() {
   const [isCommandRunning, setIsCommandRunning] = useState(false);
   const [commandOutputLines, setCommandOutputLines] = useState<ProcessOutputEvent[]>([]);
   const [executionResult, setExecutionResult] = useState<ExecutionResult | null>(null);
+  const [verificationHistory, setVerificationHistory] = useState<ExecutionResult[]>([]);
   const [diagnosticNotice, setDiagnosticNotice] = useState<string | null>(null);
 
   // Refresh status from Rust backend
   const refreshStatus = useCallback(async () => {
     try {
-      const [proj, status] = await getProjectState();
-      if (proj) {
-        setProject(proj);
+      const res: any = await getProjectState();
+      if (Array.isArray(res)) {
+        const [proj, status] = res;
+        if (proj) setProject(proj);
+        if (status) setSystemStatus(status);
+      } else if (res && typeof res === 'object') {
+        if (res.active_project) {
+          setProject(res.active_project);
+        }
+        setSystemStatus(res);
       }
-      setSystemStatus(status);
     } catch (err) {
       console.error('Failed to get project state:', err);
       // Fallback mock if running outside Tauri
@@ -109,7 +120,7 @@ export default function App() {
         gemini_status_text: 'Key present in Credential Manager',
         ollama_ready: true,
         ollama_status_text: 'Ollama ready with qwen3.5:9b',
-        opencode_health: 'Ready',
+        opencode_health: 'NotStarted',
         task_state: 'Idle',
         request_count: 0,
       });
@@ -207,6 +218,7 @@ export default function App() {
 
         unlistenExecFinished = await subscribeToExecFinished((res: ExecutionResult) => {
           setExecutionResult(res);
+          setVerificationHistory((prev) => [...prev.filter((r) => r.command_id !== res.command_id), res]);
           setIsCommandRunning(false);
         });
       } catch (err) {
@@ -485,10 +497,12 @@ export default function App() {
     setInventory(null);
     setActiveTaskId(null);
     setActiveToolPane(null);
+    setVerificationHistory([]);
+    setDiagnosticNotice(null);
     setError(null);
   };
 
-  // Milestone 3 Command Handlers
+  // Milestone 3 & Refinement Pass Command Handlers (Step 5 Allowlist + Session Memory)
   const handleTriggerCommand = async (
     program: string,
     args: string[],
@@ -498,11 +512,56 @@ export default function App() {
     try {
       setError(null);
       const req = await requestCommandApproval(program, args, cwd, description);
-      setPendingCommandApproval(req);
-      setIsCommandModalOpen(true);
+      if (req.auto_approved) {
+        // Step 5: Safe allowlisted or already approved in this session: execute immediately without re-prompt
+        await handleApproveCommand(req);
+      } else {
+        setPendingCommandApproval(req);
+        setIsCommandModalOpen(true);
+      }
     } catch (err: any) {
       setError(typeof err === 'string' ? err : err.message || 'Failed to request command approval');
     }
+  };
+
+  // Step 6: Advisory Error Consultation with Gemini (Opt-in only, capped at 5 local repairs)
+  const [advisoryPreview, setAdvisoryPreview] = useState<AdvisoryPreview | null>(null);
+  const [isAdvisoryModalOpen, setIsAdvisoryModalOpen] = useState(false);
+  const [isAdvisoryLoading, setIsAdvisoryLoading] = useState(false);
+  const [advisorySuggestion, setAdvisorySuggestion] = useState<string | null>(null);
+
+  const handleTriggerAdvisory = async (errorText: string, filePath?: string) => {
+    try {
+      setIsAdvisoryLoading(true);
+      setError(null);
+      const preview = await previewAdvisoryContext(errorText, filePath);
+      setAdvisoryPreview(preview);
+      setIsAdvisoryModalOpen(true);
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to generate advisory context preview');
+    } finally {
+      setIsAdvisoryLoading(false);
+    }
+  };
+
+  const handleConfirmAdvisory = async (previewId: string) => {
+    try {
+      setIsAdvisoryLoading(true);
+      setError(null);
+      const suggestion = await submitAdvisoryRequest(previewId, true);
+      setAdvisorySuggestion(suggestion);
+      setIsAdvisoryModalOpen(false);
+      setAdvisoryPreview(null);
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to obtain Gemini advisory suggestion');
+    } finally {
+      setIsAdvisoryLoading(false);
+    }
+  };
+
+  const handleCloseAdvisory = () => {
+    setIsAdvisoryModalOpen(false);
+    setAdvisoryPreview(null);
   };
 
   const handleApproveCommand = async (req: CommandRequest) => {
@@ -520,6 +579,7 @@ export default function App() {
     try {
       const res = await approveAndRunCommand(req.id);
       setExecutionResult(res);
+      setVerificationHistory((prev) => [...prev.filter((r) => r.command_id !== res.command_id), res]);
       setIsCommandRunning(false);
     } catch (err: any) {
       setIsCommandRunning(false);
@@ -599,6 +659,17 @@ export default function App() {
         />
       )}
 
+      {/* Advisory Context Preview Modal (Step 6 Opt-In Escalation) */}
+      {advisoryPreview && (
+        <AdvisoryPreviewModal
+          preview={advisoryPreview}
+          isOpen={isAdvisoryModalOpen}
+          isLoading={isAdvisoryLoading}
+          onConfirm={handleConfirmAdvisory}
+          onClose={handleCloseAdvisory}
+        />
+      )}
+
       {/* Top Window / Session Tab Header (Matching Example Image 2) */}
       <HeaderTabBar
         project={project}
@@ -642,9 +713,12 @@ export default function App() {
                 onAcceptTask={handleAcceptTask}
                 onRejectTask={handleRejectTask}
                 onResetTask={handleResetTask}
+                verificationHistory={verificationHistory}
                 onOpenReviewPane={() => setActiveToolPane('review')}
                 onTriggerCommand={handleTriggerCommand}
                 onExportDiagnostics={handleExportDiagnostics}
+                onTriggerAdvisory={handleTriggerAdvisory}
+                advisorySuggestion={advisorySuggestion}
                 diagnosticNotice={diagnosticNotice}
                 isLoading={isLoading}
                 error={error}

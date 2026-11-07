@@ -439,4 +439,47 @@ impl CascadePlannerClient {
             let _ = handle.emit("planner:quota_update", &event_payload);
         }
     }
+
+    /// Executes an advisory error consultation through the rate limiter cascade.
+    pub async fn request_advisory_suggestion(
+        &self,
+        api_key: &str,
+        error_text: &str,
+        file_excerpt: &str,
+        app_handle: Option<&AppHandle>,
+    ) -> Result<(String, String, UsageMetadata), String> {
+        let estimated_tokens = Self::estimate_tokens(error_text) + Self::estimate_tokens(file_excerpt) + 100;
+
+        let (model_id, reason) = {
+            let mut tracker = self.quota_tracker.lock().await;
+            tracker.select_model_for_request(estimated_tokens).map_err(|e| match e {
+                QuotaExhaustionAction::QueueAndRetry { reason, .. } => format!("Rate limit pause: {reason}"),
+                QuotaExhaustionAction::AllModelsAtCapacity { reason, .. } => format!("All free models at capacity: {reason}"),
+            })?
+        };
+
+        self.emit_quota_update(&model_id, app_handle).await;
+
+        let client = GeminiPlannerClient::with_model(&model_id);
+        let (suggestion, usage) = client
+            .get_advisory_suggestion(api_key, error_text, file_excerpt)
+            .await
+            .map_err(|e| format!("Advisory consultation failed: {e}"))?;
+
+        let actual_tokens = if usage.total_token_count > 0 {
+            usage.total_token_count
+        } else {
+            estimated_tokens
+        };
+
+        {
+            let mut tracker = self.quota_tracker.lock().await;
+            tracker.record_actual_usage(&model_id, actual_tokens);
+            tracker.last_switch_reason = Some(reason.clone());
+        }
+
+        self.emit_quota_update(&model_id, app_handle).await;
+
+        Ok((suggestion, model_id, usage))
+    }
 }
