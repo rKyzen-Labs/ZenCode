@@ -181,7 +181,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
             className="flex items-center gap-1.5 cursor-help group relative"
             title={
               isOllamaReady
-                ? 'Ollama Local Worker: Ready (qwen3.5:9b running at 127.0.0.1:11434)'
+                ? 'Ollama Local Worker: Ready (granite4.1:8b running at 127.0.0.1:11434)'
                 : 'Ollama: Offline (run ollama serve)'
             }
           >

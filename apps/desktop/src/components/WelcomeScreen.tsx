@@ -141,7 +141,7 @@ export const WelcomeScreen: FC<WelcomeScreenProps> = ({
                 {ollamaStatusLabel}
               </div>
               <div className="text-[10px] text-zinc-600">
-                qwen3.5:9b (ollama)
+                granite4.1:8b (ollama)
               </div>
             </div>
 

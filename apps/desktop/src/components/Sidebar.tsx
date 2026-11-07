@@ -322,7 +322,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
           <div
             className="flex items-center gap-1 cursor-help"
-            title={`Ollama: ${isOllamaReady ? 'Ready (qwen3.5:9b)' : 'Offline'}`}
+            title={`Ollama: ${isOllamaReady ? 'Ready (granite4.1:8b)' : 'Offline'}`}
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${

@@ -67,12 +67,12 @@ function getMockResponse<T>(cmd: string, args: Record<string, unknown> = {}): T 
       gemini_status_text: 'Gemini Planner ready (store=false)',
       ollama_ready: true,
       ollama_status: 'Available (127.0.0.1:11434)',
-      ollama_status_text: 'Ollama local worker ready (qwen3.5:9b)',
+      ollama_status_text: 'Ollama local worker ready (granite4.1:8b)',
       opencode_health: 'NotStarted',
       task_state: 'Idle',
       request_count: 0,
       planner_model: 'gemini-3.5-flash-lite',
-      worker_model: 'qwen3.5:9b',
+      worker_model: 'granite4.1:8b',
     } as unknown as T;
   }
 

@@ -69,7 +69,7 @@ export const StatusBar: FC<StatusBarProps> = ({
 
         {/* Worker Model */}
         <div className="flex items-center gap-1 text-zinc-400">
-          <span>[worker: qwen3.5:9b]</span>
+          <span>[worker: granite4.1:8b]</span>
         </div>
 
         <span className="text-zinc-700">|</span>

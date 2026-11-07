@@ -246,13 +246,16 @@ impl OpenCodeSupervisor {
             .arg("--port")
             .arg(port.to_string())
             .arg("--pure")
+            .current_dir(std::env::temp_dir())
             .env("OPENCODE_SERVER_PASSWORD", &password)
             .env("OPENCODE_SERVER_USERNAME", "opencode")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(500))
+            .build()?;
         let health_url = format!("http://127.0.0.1:{}/global/health", port);
         let auth_header = format!(
             "Basic {}",
@@ -260,7 +263,7 @@ impl OpenCodeSupervisor {
         );
 
         let mut ready = false;
-        for _ in 0..20 {
+        for _ in 0..30 {
             tokio::time::sleep(Duration::from_millis(250)).await;
 
             // Check if process crashed prematurely

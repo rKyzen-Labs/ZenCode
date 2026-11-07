@@ -3,5 +3,6 @@ resolver = "2"
 members = [
     "crates/zencode-core",
     "tests/engine-contract",
+    "tests/task-flow",
     "apps/desktop/src-tauri",
 ]

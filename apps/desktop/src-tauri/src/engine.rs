@@ -512,8 +512,8 @@ mod tests {
             "Ollama baseURL must point to loopback 11434 v1"
         );
         assert!(
-            ollama["models"]["qwen3.5:9b"].is_object(),
-            "qwen3.5:9b must be registered in ollama models"
+            ollama["models"]["granite4.1:8b"].is_object(),
+            "granite4.1:8b must be registered in ollama models"
         );
     }
 }

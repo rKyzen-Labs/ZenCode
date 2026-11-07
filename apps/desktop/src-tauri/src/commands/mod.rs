@@ -294,7 +294,7 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<SystemStatu
         ollama_status,
         opencode_health,
         planner_model: "gemini-3.5-flash-lite".to_string(),
-        worker_model: "qwen3.5:9b".to_string(),
+        worker_model: "granite4.1:8b".to_string(),
     })
 }
 
@@ -304,6 +304,13 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<SystemStatu
 pub async fn preview_planning_context(
     task_description: String,
     state: State<'_, AppState>,
+) -> Result<ContextPreview, String> {
+    execute_preview_planning_context(&task_description, &state).await
+}
+
+pub async fn execute_preview_planning_context(
+    task_description: &str,
+    state: &AppState,
 ) -> Result<ContextPreview, String> {
     if task_description.trim().is_empty() {
         return Err("Task description cannot be empty".into());
@@ -355,7 +362,7 @@ pub async fn preview_planning_context(
     );
 
     let context = PlanningContext {
-        task_description: task_description.clone(),
+        task_description: task_description.to_string(),
         project_type: active_project.project_type.clone(),
         shallow_tree: shallow_tree.clone(),
         manifest_summaries: manifest_summaries.clone(),
@@ -389,7 +396,7 @@ pub async fn preview_planning_context(
 
     Ok(ContextPreview {
         preview_id,
-        task_description,
+        task_description: task_description.to_string(),
         project_type: active_project.project_type,
         shallow_tree,
         manifest_summaries,
@@ -627,9 +634,9 @@ pub async fn start_worker_session(
         ));
     }
 
-    // 7. Send asynchronous prompt specifying Ollama worker model (Qwen 3.5 9B)
+    // 7. Send asynchronous prompt specifying Ollama worker model (Granite 4.1 8B)
     supervisor
-        .send_prompt(&session_id, &prompt, "qwen3.5:9b")
+        .send_prompt(&session_id, &prompt, "granite4.1:8b")
         .await
         .map_err(|e| WorkerStartError {
             error_type: "PROMPT_DISPATCH_FAILED".into(),

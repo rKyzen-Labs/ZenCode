@@ -131,7 +131,7 @@ export const PromptDock: FC<PromptDockProps> = ({
                 }}
                 className="px-2 py-0.5 text-[11px] text-zinc-400 hover:text-zinc-200 hover:bg-[#1f1f23] rounded transition-colors"
               >
-                [model: {mode === 'build' ? 'qwen3.5:9b' : activeModelName} v]
+                [model: {mode === 'build' ? 'granite4.1:8b' : activeModelName} v]
               </button>
 
               {showModelMenu && (
@@ -168,7 +168,7 @@ export const PromptDock: FC<PromptDockProps> = ({
                     worker (ollama local)
                   </div>
                   <div className="px-2 py-1 text-zinc-500 text-[10px]">
-                    qwen3.5:9b [offline inference]
+                    granite4.1:8b [offline inference]
                   </div>
                 </div>
               )}
