@@ -75,7 +75,7 @@ export const ChatHeader: React.FC<ChatHeaderProps> = ({
         >
           <span>Changes</span>
           {changesCount > 0 && (
-            <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-blue-900/60 text-blue-300 border border-blue-700/60">
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-zinc-800 text-zinc-200 border border-zinc-700">
               {changesCount}
             </span>
           )}

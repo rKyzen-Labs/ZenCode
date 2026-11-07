@@ -8,11 +8,20 @@ import type {
   MergeResult,
   ExecutionResult,
   CommandRequest,
+  ProjectState,
 } from '../types';
 import { isTaskState } from '../types';
 import { TaskSummary } from './TaskSummary';
 
 interface TaskViewProps {
+  project?: ProjectState | null;
+  onInitGitRepo?: () => Promise<void>;
+  onCreateGitignore?: () => Promise<void>;
+  gitignoreAddedNotice?: string | null;
+  isGitInitDeclined?: boolean;
+  onDeclineGitInit?: () => void;
+  isGitignoreDeclined?: boolean;
+  onDeclineGitignore?: () => void;
   contextPreview: ContextPreview | null;
   plan: ZencodePlan | null;
   taskState: TaskState;
@@ -43,6 +52,14 @@ interface TaskViewProps {
 }
 
 export const TaskView: FC<TaskViewProps> = ({
+  project,
+  onInitGitRepo,
+  onCreateGitignore,
+  gitignoreAddedNotice,
+  isGitInitDeclined = false,
+  onDeclineGitInit,
+  isGitignoreDeclined = false,
+  onDeclineGitignore,
   contextPreview,
   plan,
   taskState,
@@ -162,9 +179,88 @@ export const TaskView: FC<TaskViewProps> = ({
 
       {/* Global Error Banner */}
       {error && (
-        <div className="p-3 rounded-lg bg-red-950/40 border border-red-900/60 text-red-200 font-mono text-xs">
+        <div className="p-3 rounded-lg bg-[#181818] border border-danger/50 text-danger font-mono text-xs">
           [error]: {error}
         </div>
+      )}
+
+      {/* Step 3: Offer-Based Git Init (Non-Git Folder) */}
+      {project && !project.is_git_repo && (
+        !isGitInitDeclined ? (
+          <div className="w-full max-w-2xl rounded-xl border border-zinc-700 bg-surface-raised p-4 space-y-3 font-sans shadow-md">
+            <div className="flex items-center justify-between border-b border-border pb-2">
+              <span className="font-semibold text-zinc-100 text-xs">Git Repository Required</span>
+              <span className="text-[10px] font-mono text-text-muted border border-border px-2 py-0.5 rounded">isolation safety</span>
+            </div>
+            <p className="text-zinc-300 text-xs leading-relaxed">
+              This folder isn't a Git repository yet. Zencode needs Git to safely isolate and review AI changes on a unique worktree branch. Initialize Git here?
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-1 border-t border-border">
+              <button
+                type="button"
+                onClick={onDeclineGitInit}
+                className="px-3 py-1.5 rounded-lg border border-border hover:bg-surface-hover text-text-muted font-medium text-xs transition-colors"
+              >
+                No, Keep Read-Only
+              </button>
+              <button
+                type="button"
+                onClick={onInitGitRepo}
+                className="px-4 py-1.5 rounded-lg bg-zinc-100 hover:bg-white text-zinc-950 font-medium text-xs transition-colors shadow-sm"
+              >
+                Yes, Initialize Git
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="w-full max-w-2xl rounded-xl border border-border bg-surface p-3 space-y-1 font-sans text-xs">
+            <div className="flex items-center gap-1.5 text-text-muted font-semibold">
+              <span>[i]</span>
+              <span>Read-Only Exploration Mode</span>
+            </div>
+            <p className="text-text-muted text-[11px] leading-relaxed">
+              Git initialization was declined. Task creation and worker execution are blocked because Git worktree isolation is required to protect your primary files.
+            </p>
+          </div>
+        )
+      )}
+
+      {/* Step 3: Offer-Based .gitignore Suggestion */}
+      {project && project.is_git_repo && project.has_gitignore === false && (
+        gitignoreAddedNotice ? (
+          <div className="w-full max-w-2xl rounded-xl border border-border bg-surface p-3 font-sans text-xs flex items-center justify-between text-zinc-300">
+            <div className="flex items-center gap-2">
+              <span className="text-success font-bold">[ok]</span>
+              <span className="text-[11px] whitespace-pre-wrap">{gitignoreAddedNotice}</span>
+            </div>
+          </div>
+        ) : !isGitignoreDeclined ? (
+          <div className="w-full max-w-2xl rounded-xl border border-border bg-surface-raised p-3.5 space-y-2.5 font-sans">
+            <div className="flex items-center justify-between border-b border-border pb-1.5">
+              <span className="text-zinc-200 text-xs font-semibold">Suggestion: .gitignore</span>
+              <span className="text-[10px] font-mono text-text-muted">informational offer</span>
+            </div>
+            <p className="text-text-muted text-xs leading-relaxed">
+              No .gitignore found. Add a standard one for {project.project_type}?
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-1 border-t border-border">
+              <button
+                type="button"
+                onClick={onDeclineGitignore}
+                className="px-2.5 py-1 rounded border border-border hover:bg-surface-hover text-text-muted text-xs transition-colors"
+              >
+                No, Skip
+              </button>
+              <button
+                type="button"
+                onClick={onCreateGitignore}
+                className="px-3 py-1 rounded bg-zinc-200 hover:bg-white text-zinc-950 font-medium text-xs transition-colors"
+              >
+                Yes, Add .gitignore
+              </button>
+            </div>
+          </div>
+        ) : null
       )}
 
       {/* 1. USER MESSAGE BUBBLE */}
@@ -181,7 +277,7 @@ export const TaskView: FC<TaskViewProps> = ({
       {contextPreview && !plan && (
         <div className="flex flex-col items-start space-y-1">
           <div className="text-[10px] text-zinc-500 font-medium px-1 flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+            <span className="w-1.5 h-1.5 rounded-full bg-accent" />
             <span>Zencode Context Inspector</span>
           </div>
 
@@ -190,7 +286,7 @@ export const TaskView: FC<TaskViewProps> = ({
               <span className="font-semibold text-zinc-200">
                 Context Package Assembled
               </span>
-              <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/50 px-2 py-0.5 rounded border border-emerald-800/50">
+              <span className="text-[10px] font-mono text-zinc-300 bg-zinc-800/80 px-2 py-0.5 rounded border border-zinc-700">
                 0 network calls made
               </span>
             </div>
@@ -257,7 +353,7 @@ export const TaskView: FC<TaskViewProps> = ({
       {plan && (
         <div className="flex flex-col items-start space-y-1">
           <div className="text-[10px] text-zinc-500 font-medium px-1 flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+            <span className="w-1.5 h-1.5 rounded-full bg-accent" />
             <span>Implementation Plan</span>
           </div>
 
@@ -271,7 +367,7 @@ export const TaskView: FC<TaskViewProps> = ({
                   model: gemini-3.5-flash-lite | steps: {plan.steps.length}
                 </div>
               </div>
-              <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-800/40">
+              <span className="text-[10px] font-mono text-zinc-300 bg-zinc-800/80 px-2 py-0.5 rounded border border-zinc-700">
                 plan formulated
               </span>
             </div>
@@ -343,7 +439,7 @@ export const TaskView: FC<TaskViewProps> = ({
           <div className="text-[10px] text-zinc-500 font-medium px-1 flex items-center gap-1.5">
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                isWorkerRunning ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
+                isWorkerRunning ? 'bg-accent animate-pulse' : 'bg-success'
               }`}
             />
             <span>Local Worker Execution (Qwen 3.5 9B)</span>
@@ -358,8 +454,8 @@ export const TaskView: FC<TaskViewProps> = ({
               <span
                 className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
                   isWorkerRunning
-                    ? 'text-amber-400 bg-amber-950/40 border-amber-800/40'
-                    : 'text-emerald-400 bg-emerald-950/40 border-emerald-800/40'
+                    ? 'text-zinc-200 bg-zinc-800 border-zinc-700'
+                    : 'text-zinc-300 bg-zinc-900 border-zinc-800'
                 }`}
               >
                 {isWorkerRunning ? 'worktree active' : 'completed'}
@@ -420,17 +516,17 @@ export const TaskView: FC<TaskViewProps> = ({
       {/* 5. INLINE COMMAND APPROVAL CARD */}
       {pendingCommandApproval && onApproveCommand && onDenyCommand && (
         <div className="flex flex-col items-start space-y-1 w-full max-w-2xl">
-          <div className="text-[10px] text-amber-400 font-semibold px-1 flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
+          <div className="text-[10px] text-zinc-300 font-semibold px-1 flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
             <span>Command Approval Required</span>
           </div>
 
-          <div className="w-full rounded-xl border border-amber-600/60 bg-amber-950/20 p-4 space-y-3 shadow-lg font-sans">
-            <div className="flex items-center justify-between border-b border-amber-800/40 pb-2">
+          <div className="w-full rounded-xl border border-zinc-700 bg-[#121214] p-4 space-y-3 shadow-lg font-sans">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
               <span className="font-semibold text-zinc-100 text-xs">
                 Process Execution Gate
               </span>
-              <span className="text-[10px] font-mono text-amber-300 border border-amber-700/50 px-2 py-0.5 rounded">
+              <span className="text-[10px] font-mono text-zinc-400 border border-zinc-700 px-2 py-0.5 rounded">
                 security checkpoint
               </span>
             </div>
@@ -450,7 +546,7 @@ export const TaskView: FC<TaskViewProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-amber-800/30">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
               <button
                 type="button"
                 onClick={() => onDenyCommand(pendingCommandApproval)}
@@ -526,12 +622,12 @@ export const TaskView: FC<TaskViewProps> = ({
 
       {/* 7. ADVISORY 5TH-FAILURE CARD (Opt-In Escalation) */}
       {isCappedAt5Failures && onTriggerAdvisory && lastFailedRun && (
-        <div className="w-full max-w-2xl rounded-xl border border-amber-600/60 bg-amber-950/20 p-4 space-y-3 font-sans shadow-md">
-          <div className="flex items-center justify-between border-b border-amber-800/40 pb-2">
-            <span className="font-semibold text-amber-200 text-xs">
+        <div className="w-full max-w-2xl rounded-xl border border-zinc-700 bg-[#121214] p-4 space-y-3 font-sans shadow-md">
+          <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
+            <span className="font-semibold text-zinc-200 text-xs">
               Local Repair Loop Capped (5 Failures)
             </span>
-            <span className="text-[10px] font-mono text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-700/50">
+            <span className="text-[10px] font-mono text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-700">
               user opt-in required
             </span>
           </div>
@@ -540,7 +636,7 @@ export const TaskView: FC<TaskViewProps> = ({
             The local worker has attempted 5 consecutive automatic repairs on this build/test error and paused to prevent loop exhaustion.
           </p>
 
-          <pre className="p-2.5 bg-zinc-950 border border-zinc-800 text-red-300 font-mono text-[10px] rounded max-h-28 overflow-y-auto">
+          <pre className="p-2.5 bg-zinc-950 border border-zinc-800 text-danger font-mono text-[10px] rounded max-h-28 overflow-y-auto">
             {lastFailedRun.stderr_tail.join('\n') || lastFailedRun.stdout_tail.join('\n') || 'Command exit failure'}
           </pre>
 
@@ -556,7 +652,7 @@ export const TaskView: FC<TaskViewProps> = ({
                   lastFailedRun.cwd
                 )
               }
-              className="px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-zinc-950 font-semibold text-xs transition-colors shadow-sm"
+              className="px-3 py-1.5 rounded-lg bg-zinc-100 hover:bg-white text-zinc-950 font-semibold text-xs transition-colors shadow-sm"
             >
               Ask Gemini for Advice
             </button>

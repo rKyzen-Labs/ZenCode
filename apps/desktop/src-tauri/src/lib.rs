@@ -47,6 +47,8 @@ pub fn run() {
             save_chat,
             load_chat,
             delete_chat,
+            init_git_repo,
+            create_standard_gitignore,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

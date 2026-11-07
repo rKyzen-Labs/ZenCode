@@ -43,10 +43,10 @@ export const TaskSummary: React.FC<TaskSummaryProps> = ({
   }
 
   const statusBadgeStyle = {
-    Completed: 'border-emerald-600 bg-emerald-950/40 text-emerald-300',
-    'Completed with warnings': 'border-amber-600 bg-amber-950/40 text-amber-300',
-    Failed: 'border-red-600 bg-red-950/40 text-red-300',
-    'Stuck (needs attention)': 'border-red-600 bg-red-950/50 text-red-200 animate-pulse',
+    Completed: 'border-zinc-700 bg-zinc-800 text-zinc-100',
+    'Completed with warnings': 'border-zinc-700 bg-zinc-800 text-zinc-300',
+    Failed: 'border-danger/60 bg-zinc-900 text-danger',
+    'Stuck (needs attention)': 'border-danger/60 bg-zinc-900 text-danger animate-pulse',
   }[status];
 
   // Group files by category
@@ -115,7 +115,7 @@ export const TaskSummary: React.FC<TaskSummaryProps> = ({
             {/* Modified */}
             <div className="p-2 bg-[#09090b] border border-[#1f1f23] rounded space-y-1">
               <div className="flex items-center justify-between">
-                <span className="text-amber-400 font-semibold">[M] modified</span>
+                <span className="text-zinc-300 font-semibold">[M] modified</span>
                 <span className="text-zinc-400 font-bold">{modifiedFiles.length}</span>
               </div>
               <div className="text-[10px] text-zinc-500 space-y-0.5 max-h-16 overflow-y-auto">
@@ -134,7 +134,7 @@ export const TaskSummary: React.FC<TaskSummaryProps> = ({
             {/* Added */}
             <div className="p-2 bg-[#09090b] border border-[#1f1f23] rounded space-y-1">
               <div className="flex items-center justify-between">
-                <span className="text-emerald-400 font-semibold">[A] added</span>
+                <span className="text-zinc-300 font-semibold">[A] added</span>
                 <span className="text-zinc-400 font-bold">{addedFiles.length}</span>
               </div>
               <div className="text-[10px] text-zinc-500 space-y-0.5 max-h-16 overflow-y-auto">
@@ -153,7 +153,7 @@ export const TaskSummary: React.FC<TaskSummaryProps> = ({
             {/* Deleted */}
             <div className="p-2 bg-[#09090b] border border-[#1f1f23] rounded space-y-1">
               <div className="flex items-center justify-between">
-                <span className="text-rose-400 font-semibold">[D] deleted</span>
+                <span className="text-danger font-semibold">[D] deleted</span>
                 <span className="text-zinc-400 font-bold">{deletedFiles.length}</span>
               </div>
               <div className="text-[10px] text-zinc-500 space-y-0.5 max-h-16 overflow-y-auto">
@@ -237,11 +237,11 @@ export const TaskSummary: React.FC<TaskSummaryProps> = ({
                 </div>
                 <div>
                   {run.cancelled ? (
-                    <span className="text-amber-500 font-bold">[cancelled]</span>
+                    <span className="text-zinc-500 font-bold">[cancelled]</span>
                   ) : run.success || run.exit_code === 0 ? (
-                    <span className="text-emerald-400 font-bold">[exit: 0 ok]</span>
+                    <span className="text-zinc-200 font-bold">[exit: 0 ok]</span>
                   ) : (
-                    <span className="text-rose-400 font-bold">
+                    <span className="text-danger font-bold">
                       [exit: {run.exit_code ?? 'err'} fail]
                     </span>
                   )}

@@ -64,7 +64,7 @@ export const DirtyTreeDialog: FC<DirtyTreeDialogProps> = ({
         </div>
 
         {error && (
-          <div className="p-2.5 bg-[#18181b] border border-rose-900/60 text-rose-300 text-xs">
+          <div className="p-2.5 bg-[#18181b] border border-danger/50 text-danger text-xs">
             [error]: {error}
           </div>
         )}

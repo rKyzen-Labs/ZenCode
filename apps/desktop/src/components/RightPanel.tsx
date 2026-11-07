@@ -112,16 +112,38 @@ export const RightPanel: React.FC<RightPanelProps> = ({
                 </div>
                 <div className="text-zinc-400 text-[10px] pt-1 border-t border-zinc-900 flex justify-between">
                   <span>Branch:</span>
-                  <span className="text-blue-400">{project?.current_branch || 'none'}</span>
+                  <span className="text-zinc-200">{project?.current_branch || 'none'}</span>
                 </div>
                 <div className="text-zinc-400 text-[10px] flex justify-between">
                   <span>Worktree:</span>
-                  <span className={project?.is_clean ? 'text-emerald-400' : 'text-amber-400'}>
+                  <span className={project?.is_clean ? 'text-zinc-300' : 'text-zinc-500'}>
                     {project?.git_status_summary || 'unknown'}
+                  </span>
+                </div>
+                <div className="text-zinc-400 text-[10px] flex justify-between">
+                  <span>.gitignore:</span>
+                  <span className={project?.has_gitignore ? 'text-zinc-300' : 'text-zinc-500'}>
+                    {project?.has_gitignore ? 'present' : 'missing'}
                   </span>
                 </div>
               </div>
             </div>
+
+            {project?.detected_editor_configs && project.detected_editor_configs.length > 0 && (
+              <div className="space-y-1">
+                <div className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider font-sans">
+                  Detected Tool Configs
+                </div>
+                <div className="p-2.5 bg-zinc-950 border border-zinc-800 rounded text-[11px] text-zinc-300 space-y-1 font-mono">
+                  {project.detected_editor_configs.map((cfg) => (
+                    <div key={cfg} className="flex items-center gap-1.5 text-zinc-400">
+                      <span className="text-zinc-600">[cfg]</span>
+                      <span className="text-zinc-200">{cfg}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="space-y-1">
               <div className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider font-sans">

@@ -29,7 +29,14 @@ pub async fn open_project(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<ProjectState, String> {
-    let p = Path::new(&path);
+    execute_open_project(&path, &state).await
+}
+
+pub async fn execute_open_project(
+    path: &str,
+    state: &AppState,
+) -> Result<ProjectState, String> {
+    let p = Path::new(path);
     if !p.exists() || !p.is_dir() {
         return Err(format!("Invalid project path: '{path}' does not exist or is not a directory"));
     }
@@ -87,14 +94,44 @@ pub async fn open_project(
         (None, "Not a Git repository".to_string(), false)
     };
 
+    // Step 2: Safe read-only inspection for .gitignore presence (zero writes)
+    let has_gitignore = p.join(".gitignore").exists();
+
+    // Step 2: Safe read-only inspection for editor/format configs (informational display only)
+    let candidate_configs = [
+        ".editorconfig",
+        "rustfmt.toml",
+        ".rustfmt.toml",
+        ".prettierrc",
+        ".prettierrc.json",
+        ".prettierrc.js",
+        "prettier.config.js",
+        ".eslintrc",
+        ".eslintrc.json",
+        ".eslintrc.js",
+        "eslint.config.js",
+        "eslint.config.mjs",
+        "biome.json",
+        "ruff.toml",
+        ".clang-format",
+    ];
+    let mut detected_editor_configs = Vec::new();
+    for cfg in candidate_configs {
+        if p.join(cfg).exists() {
+            detected_editor_configs.push(cfg.to_string());
+        }
+    }
+
     let project_state = ProjectState {
-        path: path.clone(),
+        path: path.to_string(),
         name,
         project_type,
         is_git_repo,
         current_branch,
         git_status_summary,
         is_clean,
+        has_gitignore,
+        detected_editor_configs,
     };
 
     // Store in AppState
@@ -104,9 +141,109 @@ pub async fn open_project(
     }
 
     // Persist workspace in SQLite
-    let _ = state.db.record_workspace(&path, &project_state.name);
+    let _ = state.db.record_workspace(path, &project_state.name);
 
     Ok(project_state)
+}
+
+/// Step 3: Explicit user action to initialize a Git repository.
+/// Never run automatically. Only invoked upon per-action user confirmation.
+#[tauri::command]
+pub async fn init_git_repo(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectState, String> {
+    execute_init_git_repo(&path, &state).await
+}
+
+pub async fn execute_init_git_repo(
+    path: &str,
+    state: &AppState,
+) -> Result<ProjectState, String> {
+    let p = Path::new(path);
+    if !p.exists() || !p.is_dir() {
+        return Err(format!("Cannot initialize Git: '{path}' does not exist or is not a directory"));
+    }
+    let clean_p = clean_path_for_git(p);
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&clean_p)
+        .arg("init")
+        .output()
+        .map_err(|e| format!("Failed to execute 'git init': {e}"))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("'git init' failed: {err}"));
+    }
+
+    // Refresh ProjectState after git init
+    execute_open_project(path, state).await
+}
+
+/// Step 3: Explicit user action to create a standard .gitignore file for the detected project type.
+/// Never run automatically. Only invoked upon per-action user confirmation.
+#[tauri::command]
+pub async fn create_standard_gitignore(
+    path: String,
+    project_type: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    execute_create_standard_gitignore(&path, &project_type, &state).await
+}
+
+pub async fn execute_create_standard_gitignore(
+    path: &str,
+    project_type: &str,
+    state: &AppState,
+) -> Result<String, String> {
+    let p = Path::new(path);
+    if !p.exists() || !p.is_dir() {
+        return Err(format!("Invalid path: '{path}' does not exist or is not a directory"));
+    }
+    let gitignore_path = p.join(".gitignore");
+    if gitignore_path.exists() {
+        return Ok(".gitignore already exists".to_string());
+    }
+
+    let entries = match project_type.to_lowercase().as_str() {
+        s if s.contains("rust") => {
+            "/target\n**/*.rs.bk\nCargo.lock\n"
+        }
+        s if s.contains("node") || s.contains("typescript") || s.contains("javascript") => {
+            "node_modules/\ndist/\n.env\n.env.local\n*.log\n"
+        }
+        s if s.contains("python") => {
+            "__pycache__/\n*.py[cod]\n*$py.class\n.venv/\nvenv/\nenv/\n.env\ndist/\nbuild/\n*.egg-info/\n"
+        }
+        s if s.contains("go") => {
+            "bin/\ndist/\n*.exe\n*.exe~\n*.dll\n*.so\n*.dylib\n"
+        }
+        _ => {
+            ".DS_Store\nThumbs.db\n*.log\n.env\n"
+        }
+    };
+
+    tokio::fs::write(&gitignore_path, entries)
+        .await
+        .map_err(|e| format!("Failed to write .gitignore: {e}"))?;
+
+    // Update active project state in AppState
+    {
+        let mut active = state.active_project.lock().await;
+        if let Some(ref mut proj) = *active {
+            if proj.path == path {
+                proj.has_gitignore = true;
+            }
+        }
+    }
+
+    let summary = format!(
+        "Added standard .gitignore for {} with rules:\n{}",
+        project_type,
+        entries.trim()
+    );
+    Ok(summary)
 }
 
 /// Returns current project state and overall engine readiness indicators.
@@ -1494,6 +1631,8 @@ mod tests {
                 current_branch: Some("main".into()),
                 git_status_summary: "Clean".into(),
                 is_clean: true,
+                has_gitignore: true,
+                detected_editor_configs: vec!["rustfmt.toml".into()],
             });
         }
 
@@ -1583,5 +1722,69 @@ mod tests {
 
         let check_confirmed = Operation::AdvisoryErrorConsultation.enforce_gemini_permission(true);
         assert!(check_confirmed.is_ok(), "Must allow confirmed advisory request");
+    }
+
+    #[tokio::test]
+    async fn test_safe_project_detection_and_offer_based_actions() {
+        let temp_dir = std::env::temp_dir().join(format!("zencode_test_{}", rand::random::<u64>()));
+        let dir_path = temp_dir.as_path();
+        std::fs::create_dir_all(dir_path).expect("tempdir creation");
+
+        // 1. Setup mock Rust project with .editorconfig but NO .gitignore and NO git repo
+        std::fs::write(dir_path.join("Cargo.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(dir_path.join(".editorconfig"), "root = true\n").unwrap();
+
+        let state = AppState::new();
+
+        // 2. Test Safe read-only detection
+        let proj = execute_open_project(&dir_path.to_string_lossy(), &state)
+            .await
+            .expect("open_project should succeed");
+
+        assert_eq!(proj.project_type, "Rust");
+        assert!(!proj.is_git_repo, "Must detect it is not yet a Git repo");
+        assert!(!proj.has_gitignore, "Must detect absence of .gitignore without creating it");
+        assert!(
+            proj.detected_editor_configs.contains(&".editorconfig".to_string()),
+            "Must detect .editorconfig without modifying it"
+        );
+
+        // 3. Test Offer-based .gitignore creation (Rust rules)
+        let summary = execute_create_standard_gitignore(
+            &dir_path.to_string_lossy(),
+            &proj.project_type,
+            &state,
+        )
+        .await
+        .expect("create_standard_gitignore should succeed");
+
+        assert!(summary.contains("Rust"));
+        assert!(dir_path.join(".gitignore").exists());
+        let gitignore_content = std::fs::read_to_string(dir_path.join(".gitignore")).unwrap();
+        assert!(gitignore_content.contains("/target"));
+
+        // 4. Calling again when already exists should be idempotent
+        let second_call = execute_create_standard_gitignore(
+            &dir_path.to_string_lossy(),
+            &proj.project_type,
+            &state,
+        )
+        .await
+        .expect("second call should be ok");
+        assert!(second_call.contains("already exists"));
+
+        // 5. Test Offer-based Git Init
+        let initialized = execute_init_git_repo(
+            &dir_path.to_string_lossy(),
+            &state,
+        )
+        .await
+        .expect("init_git_repo should succeed");
+
+        assert!(initialized.is_git_repo, "Must now be a valid Git repository");
+        assert!(dir_path.join(".git").exists(), ".git directory must exist");
+        assert!(initialized.has_gitignore, ".gitignore must be detected as present now");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

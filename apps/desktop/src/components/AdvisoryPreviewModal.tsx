@@ -27,7 +27,7 @@ export const AdvisoryPreviewModal: React.FC<AdvisoryPreviewModalProps> = ({
         {/* Header */}
         <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
           <div className="flex items-center gap-2">
-            <span className="text-amber-400 font-bold">[?]</span>
+            <span className="text-zinc-300 font-bold">[?]</span>
             <span className="text-zinc-100 font-bold tracking-wider uppercase">
               Advisory Consultation Context Preview
             </span>
@@ -46,7 +46,7 @@ export const AdvisoryPreviewModal: React.FC<AdvisoryPreviewModalProps> = ({
           <div className="text-[10px] text-zinc-500 uppercase font-semibold">
             Error Signature:
           </div>
-          <pre className="p-2.5 bg-zinc-900/80 border border-zinc-800 text-rose-300 text-[11px] whitespace-pre-wrap max-h-32 overflow-y-auto rounded">
+          <pre className="p-2.5 bg-zinc-900/80 border border-zinc-800 text-danger text-[11px] whitespace-pre-wrap max-h-32 overflow-y-auto rounded">
             {preview.error_text}
           </pre>
         </div>
@@ -83,7 +83,7 @@ export const AdvisoryPreviewModal: React.FC<AdvisoryPreviewModalProps> = ({
             type="button"
             onClick={() => onConfirm(preview.preview_id)}
             disabled={isLoading}
-            className="px-3 py-1.5 border border-amber-500/60 bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 font-bold transition-colors disabled:opacity-40"
+            className="px-3 py-1.5 border border-zinc-200 bg-zinc-100 hover:bg-white text-zinc-950 font-bold transition-colors disabled:opacity-40"
           >
             {isLoading ? '[consulting_gemini...]' : '[confirm_and_request_advice]'}
           </button>

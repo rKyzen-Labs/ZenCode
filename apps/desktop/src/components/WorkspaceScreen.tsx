@@ -25,7 +25,7 @@ export const WorkspaceScreen: FC<WorkspaceScreenProps> = ({
   return (
     <div className="flex-1 flex flex-col justify-center items-center p-6 max-w-3xl mx-auto w-full space-y-6 font-mono text-xs select-none">
       {error && (
-        <div className="w-full p-2.5 bg-[#18181b] border border-rose-900/60 text-rose-300 text-xs">
+        <div className="w-full p-2.5 bg-[#18181b] border border-danger/50 text-danger text-xs">
           [error]: {error}
         </div>
       )}

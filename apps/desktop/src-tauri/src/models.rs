@@ -12,6 +12,10 @@ pub struct ProjectState {
     pub git_status_summary: String,
     #[serde(default)]
     pub is_clean: bool,
+    #[serde(default)]
+    pub has_gitignore: bool,
+    #[serde(default)]
+    pub detected_editor_configs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

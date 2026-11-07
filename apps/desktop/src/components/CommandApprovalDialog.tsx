@@ -22,7 +22,7 @@ export const CommandApprovalDialog: React.FC<CommandApprovalDialogProps> = ({
         {/* Header */}
         <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
           <div className="flex items-center gap-2">
-            <span className="text-amber-400 font-bold">[!]</span>
+            <span className="text-zinc-300 font-bold">[!]</span>
             <span className="text-zinc-100 font-bold tracking-wider uppercase">
               Command Execution Approval Required
             </span>
@@ -40,7 +40,7 @@ export const CommandApprovalDialog: React.FC<CommandApprovalDialogProps> = ({
         <div className="border border-zinc-800 bg-zinc-900/60 p-3 space-y-2">
           <div className="flex items-start gap-2">
             <span className="text-zinc-500 w-16 shrink-0">program:</span>
-            <span className="text-emerald-400 font-bold">{request.program}</span>
+            <span className="text-zinc-100 font-bold">{request.program}</span>
           </div>
           <div className="flex items-start gap-2">
             <span className="text-zinc-500 w-16 shrink-0">args:</span>
@@ -85,7 +85,7 @@ export const CommandApprovalDialog: React.FC<CommandApprovalDialogProps> = ({
           </button>
           <button
             onClick={() => onApprove(request)}
-            className="px-3 py-1.5 border border-emerald-500/60 bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 font-bold transition-colors"
+            className="px-3 py-1.5 border border-zinc-200 bg-zinc-100 hover:bg-white text-zinc-950 font-bold transition-colors"
           >
             [approve_and_run]
           </button>

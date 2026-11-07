@@ -8,10 +8,30 @@ export default {
     extend: {
       colors: {
         background: "var(--background)",
-        foreground: "var(--foreground)",
-        surface: "var(--surface)",
-        border: "var(--border)",
-        accent: "var(--accent)",
+        surface: {
+          DEFAULT: "var(--surface)",
+          raised: "var(--surface-raised)",
+          hover: "var(--surface-hover)",
+        },
+        border: {
+          DEFAULT: "var(--border)",
+          subtle: "var(--border-subtle)",
+        },
+        text: {
+          DEFAULT: "var(--text)",
+          muted: "var(--text-muted)",
+          subtle: "var(--text-subtle)",
+        },
+        accent: {
+          DEFAULT: "var(--accent)",
+          contrast: "var(--accent-contrast)",
+        },
+        success: "var(--success)",
+        danger: "var(--danger)",
+      },
+      fontFamily: {
+        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+        sans: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
       },
     },
   },

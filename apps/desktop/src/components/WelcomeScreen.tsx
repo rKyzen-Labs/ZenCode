@@ -93,7 +93,7 @@ export const WelcomeScreen: FC<WelcomeScreenProps> = ({
           </div>
 
           {error && (
-            <div className="p-2 bg-[#18181b] border border-rose-900/60 text-rose-300 text-[11px]">
+            <div className="p-2 bg-[#18181b] border border-danger/50 text-danger text-[11px]">
               [error]: {error}
             </div>
           )}

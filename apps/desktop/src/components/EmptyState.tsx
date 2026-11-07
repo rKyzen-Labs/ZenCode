@@ -114,7 +114,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
           )}
 
           {error && (
-            <div className="p-2.5 rounded-lg bg-red-950/40 border border-red-900/60 text-red-300 text-xs text-left font-mono">
+            <div className="p-2.5 rounded-lg bg-[#181818] border border-danger/50 text-danger text-xs text-left font-mono">
               [error]: {error}
             </div>
           )}
@@ -168,7 +168,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                isGeminiReady ? 'bg-emerald-400' : 'bg-zinc-600'
+                isGeminiReady ? 'bg-success' : 'bg-zinc-600'
               }`}
             />
             <span className="group-hover:text-zinc-300 transition-colors">
@@ -187,7 +187,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                isOllamaReady ? 'bg-emerald-400' : 'bg-amber-500'
+                isOllamaReady ? 'bg-success' : 'bg-zinc-600'
               }`}
             />
             <span className="group-hover:text-zinc-300 transition-colors">
@@ -202,7 +202,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                isOpencodeReady ? 'bg-emerald-400' : 'bg-zinc-600'
+                isOpencodeReady ? 'bg-success' : 'bg-zinc-600'
               }`}
             />
             <span className="group-hover:text-zinc-300 transition-colors">

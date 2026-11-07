@@ -75,7 +75,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {/* Quiet Status Dot */}
           <div
             className={`w-2 h-2 rounded-full ${
-              status?.ollama_ready ? 'bg-emerald-400' : 'bg-amber-500'
+              status?.ollama_ready ? 'bg-success' : 'bg-zinc-600'
             }`}
             title="Local Engine Status"
           />
@@ -95,15 +95,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const statusBadge = (s: StoredChatSummary['status']) => {
     switch (s) {
       case 'active':
-        return <span className="text-[9px] px-1 rounded bg-blue-950/80 text-blue-300 border border-blue-800/50">running</span>;
+        return <span className="text-[9px] px-1 rounded bg-zinc-800 text-zinc-200 border border-zinc-700">running</span>;
       case 'review':
-        return <span className="text-[9px] px-1 rounded bg-amber-950/80 text-amber-300 border border-amber-800/50">diff ready</span>;
+        return <span className="text-[9px] px-1 rounded bg-zinc-800 text-accent border border-zinc-700">diff ready</span>;
       case 'merged':
-        return <span className="text-[9px] px-1 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800/50">merged</span>;
+        return <span className="text-[9px] px-1 rounded bg-zinc-900 text-zinc-400 border border-zinc-800">merged</span>;
       case 'rejected':
-        return <span className="text-[9px] px-1 rounded bg-zinc-800 text-zinc-400 border border-zinc-700">rejected</span>;
+        return <span className="text-[9px] px-1 rounded bg-zinc-900 text-zinc-500 border border-zinc-800">rejected</span>;
       case 'failed':
-        return <span className="text-[9px] px-1 rounded bg-red-950/80 text-red-300 border border-red-800/50">failed</span>;
+        return <span className="text-[9px] px-1 rounded bg-zinc-900 text-danger border border-danger/40">failed</span>;
       default:
         return null;
     }
@@ -261,7 +261,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                               onDeleteChat(chat.id);
                             }}
                             title="Delete Chat"
-                            className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 text-zinc-500 transition-opacity font-mono text-xs"
+                            className="opacity-0 group-hover:opacity-100 p-1 hover:text-danger text-zinc-500 transition-opacity font-mono text-xs"
                           >
                             &times;
                           </button>
@@ -314,7 +314,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                isGeminiReady ? 'bg-emerald-400' : 'bg-zinc-600'
+                isGeminiReady ? 'bg-success' : 'bg-zinc-600'
               }`}
             />
             <span className="text-[10px]">Cloud</span>
@@ -326,7 +326,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                isOllamaReady ? 'bg-emerald-400' : 'bg-amber-500'
+                isOllamaReady ? 'bg-success' : 'bg-zinc-600'
               }`}
             />
             <span className="text-[10px]">Worker</span>
@@ -338,7 +338,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                isOpencodeReady ? 'bg-emerald-400' : 'bg-zinc-600'
+                isOpencodeReady ? 'bg-success' : 'bg-zinc-600'
               }`}
             />
             <span className="text-[10px]">Sidecar</span>

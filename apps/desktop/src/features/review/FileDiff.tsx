@@ -22,15 +22,15 @@ const headerDeco = Decoration.line({
 const diffTheme = EditorView.theme(
   {
     '&': {
-      backgroundColor: '#09090b',
-      color: '#e4e4e7',
+      backgroundColor: '#0a0a0a',
+      color: '#f5f5f5',
       fontSize: '11px',
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+      fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, monospace',
       height: '100%',
     },
     '.cm-scroller': {
       overflow: 'auto',
-      fontFamily: 'inherit',
+      fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, monospace',
     },
     '.cm-content': {
       padding: '4px 0',

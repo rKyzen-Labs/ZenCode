@@ -93,7 +93,7 @@ export const ReviewPanel: FC<ReviewPanelProps> = ({
       </div>
 
       {actionError && (
-        <div className="p-2 bg-[#18181b] border border-rose-900/60 text-rose-300 text-xs flex items-center justify-between shrink-0">
+        <div className="p-2 bg-[#18181b] border border-danger/50 text-danger text-xs flex items-center justify-between shrink-0">
           <span>[error]: {actionError}</span>
           <button
             type="button"

@@ -51,6 +51,8 @@ import {
   loadChat,
   deleteChat,
   getChangeInventory,
+  initGitRepo,
+  createStandardGitignore,
 } from './lib/ipc';
 import { Sidebar, type StoredChatSummary } from './components/Sidebar';
 import { EmptyState } from './components/EmptyState';
@@ -154,6 +156,11 @@ export default function App() {
   const [verificationHistory, setVerificationHistory] = useState<ExecutionResult[]>([]);
   const [diagnosticNotice, setDiagnosticNotice] = useState<string | null>(null);
 
+  // Step 3 Offer-Based Git and .gitignore State
+  const [isGitInitDeclined, setIsGitInitDeclined] = useState(false);
+  const [isGitignoreDeclined, setIsGitignoreDeclined] = useState(false);
+  const [gitignoreAddedNotice, setGitignoreAddedNotice] = useState<string | null>(null);
+
   // Refresh status from Rust backend
   const refreshStatus = useCallback(async () => {
     try {
@@ -227,11 +234,17 @@ export default function App() {
       })
       .catch((err) => console.warn('Could not check for orphaned worktrees on launch:', err));
 
-    // Load persisted workspaces from SQLite
+    // Step 4: Restore last opened workspace and its chat list automatically on launch
     listWorkspaces()
-      .then((records) => {
+      .then(async (records) => {
         if (records && records.length > 0) {
           setRecentWorkspaces(records.map((r) => r.path));
+          const lastWorkspace = records[0].path;
+          try {
+            await handleOpenProject(lastWorkspace);
+          } catch (e) {
+            console.warn('Could not restore last workspace on launch:', e);
+          }
         }
       })
       .catch((err) => console.warn('Could not list workspaces from SQLite:', err));
@@ -422,6 +435,9 @@ export default function App() {
       });
       await refreshStatus();
       await loadStoredChats(path);
+      setIsGitInitDeclined(false);
+      setIsGitignoreDeclined(false);
+      setGitignoreAddedNotice(null);
 
       // Check for orphaned worktrees in this newly opened repository
       const orphans = await listActiveWorktrees();
@@ -431,6 +447,39 @@ export default function App() {
     } catch (err: any) {
       console.error('Error opening project:', err);
       setError(typeof err === 'string' ? err : err.message || 'Failed to open project folder');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Step 3: Handle explicit per-action Git Init
+  const handleInitGitRepo = async () => {
+    if (!project) return;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const updated = await initGitRepo(project.path);
+      setProject(updated);
+      setIsGitInitDeclined(false);
+      await refreshStatus();
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to initialize Git repository');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Step 3: Handle explicit per-action .gitignore creation
+  const handleCreateGitignore = async () => {
+    if (!project) return;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const msg = await createStandardGitignore(project.path, project.project_type);
+      setGitignoreAddedNotice(msg);
+      setProject((prev) => (prev ? { ...prev, has_gitignore: true } : null));
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to create standard .gitignore');
     } finally {
       setIsLoading(false);
     }
@@ -946,6 +995,14 @@ export default function App() {
               {/* Chat Thread Container */}
               <div className="flex-1 overflow-y-auto">
                 <TaskView
+                  project={project}
+                  onInitGitRepo={handleInitGitRepo}
+                  onCreateGitignore={handleCreateGitignore}
+                  gitignoreAddedNotice={gitignoreAddedNotice}
+                  isGitInitDeclined={isGitInitDeclined}
+                  onDeclineGitInit={() => setIsGitInitDeclined(true)}
+                  isGitignoreDeclined={isGitignoreDeclined}
+                  onDeclineGitignore={() => setIsGitignoreDeclined(true)}
                   contextPreview={contextPreview}
                   plan={plan}
                   taskState={systemStatus?.task_state || 'Idle'}
@@ -998,6 +1055,10 @@ export default function App() {
               {/* Center Bottom Chat Input Dock */}
               <ChatInputDock
                 onSubmit={(text) => {
+                  if (project && !project.is_git_repo) {
+                    setError('Task creation is blocked: initialize a Git repository to enable safe worktree branch isolation.');
+                    return;
+                  }
                   if (!plan) {
                     setActiveChatTitle(text.slice(0, 32));
                     handlePreviewContext(text);
@@ -1005,6 +1066,12 @@ export default function App() {
                     handleStartWorkerSession(plan);
                   }
                 }}
+                disabled={Boolean(project && !project.is_git_repo)}
+                placeholder={
+                  project && !project.is_git_repo
+                    ? 'Task creation blocked: Git is required to safely isolate and review AI changes.'
+                    : undefined
+                }
                 isLoading={isLoading}
                 activeModelName={quotaState?.pinned_model ? '3.8 Flash' : lastActiveModel}
                 isPinned={Boolean(quotaState?.pinned_model)}

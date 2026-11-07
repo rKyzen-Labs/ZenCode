@@ -44,20 +44,20 @@ export const ExecutionTerminal: React.FC<ExecutionTerminalProps> = ({
   const renderStatus = () => {
     if (isRunning) {
       return (
-        <span className="text-amber-400 font-bold animate-pulse">
+        <span className="text-zinc-200 font-bold animate-pulse">
           [running...]
         </span>
       );
     }
     if (!result) return null;
     if (result.cancelled) {
-      return <span className="text-amber-500 font-bold">[cancelled]</span>;
+      return <span className="text-zinc-500 font-bold">[cancelled]</span>;
     }
     if (result.success || result.exit_code === 0) {
-      return <span className="text-emerald-400 font-bold">[exit: 0 ok]</span>;
+      return <span className="text-zinc-200 font-bold">[exit: 0 ok]</span>;
     }
     return (
-      <span className="text-red-400 font-bold">
+      <span className="text-danger font-bold">
         [exit: {result.exit_code ?? 'err'} failed]
       </span>
     );
@@ -83,7 +83,7 @@ export const ExecutionTerminal: React.FC<ExecutionTerminalProps> = ({
           {isRunning && (
             <button
               onClick={onCancel}
-              className="px-2 py-0.5 border border-red-500/40 bg-red-950/30 hover:bg-red-900/50 text-red-300 text-[11px] transition-colors"
+              className="px-2 py-0.5 border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] transition-colors"
             >
               [cancel_execution]
             </button>
@@ -124,14 +124,14 @@ export const ExecutionTerminal: React.FC<ExecutionTerminalProps> = ({
               </span>
               <span
                 className={`w-14 shrink-0 text-[10px] select-none ${
-                  ev.stream === 'stderr' ? 'text-amber-500/70' : 'text-zinc-600'
+                  ev.stream === 'stderr' ? 'text-zinc-400' : 'text-zinc-600'
                 }`}
               >
                 [{ev.stream}]
               </span>
               <pre
                 className={`flex-1 whitespace-pre-wrap break-all ${
-                  ev.stream === 'stderr' ? 'text-amber-300/90' : 'text-zinc-300'
+                  ev.stream === 'stderr' ? 'text-zinc-100 font-medium' : 'text-zinc-300'
                 }`}
               >
                 {ev.line}
@@ -144,7 +144,7 @@ export const ExecutionTerminal: React.FC<ExecutionTerminalProps> = ({
 
       {/* Footer info */}
       {result && result.error_message && (
-        <div className="border-t border-red-900/50 bg-red-950/20 px-4 py-1.5 text-[11px] text-red-300">
+        <div className="border-t border-danger/40 bg-zinc-900 px-4 py-1.5 text-[11px] text-danger">
           [error]: {result.error_message}
         </div>
       )}

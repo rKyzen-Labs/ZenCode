@@ -9,12 +9,14 @@ export type ProjectType =
 export interface ProjectState {
   path: string;
   name: string;
-  project_type: ProjectType;
+  project_type: ProjectType | string;
   has_git?: boolean;
   is_git_repo?: boolean;
   current_branch: string | null;
   git_status_summary: string;
   is_clean?: boolean;
+  has_gitignore?: boolean;
+  detected_editor_configs?: string[];
 }
 
 export type ChangeCategory =

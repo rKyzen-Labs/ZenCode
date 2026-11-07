@@ -3,6 +3,7 @@ import React, { useState, useRef, useEffect } from 'react';
 interface ChatInputDockProps {
   onSubmit: (prompt: string) => void;
   isLoading: boolean;
+  disabled?: boolean;
   activeModelName: string;
   isPinned: boolean;
   onSelectModel?: (modelId: string | null) => void;
@@ -12,6 +13,7 @@ interface ChatInputDockProps {
 export const ChatInputDock: React.FC<ChatInputDockProps> = ({
   onSubmit,
   isLoading,
+  disabled = false,
   activeModelName,
   isPinned,
   onSelectModel,
@@ -54,8 +56,8 @@ export const ChatInputDock: React.FC<ChatInputDockProps> = ({
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
           rows={1}
-          disabled={isLoading}
-          className="w-full bg-transparent text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none resize-none font-sans leading-relaxed selection:bg-zinc-700 max-h-40 overflow-y-auto"
+          disabled={isLoading || disabled}
+          className="w-full bg-transparent text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none resize-none font-sans leading-relaxed selection:bg-zinc-700 max-h-40 overflow-y-auto disabled:opacity-50"
         />
 
         <div className="flex items-center justify-between pt-1 border-t border-zinc-800/60">
@@ -66,7 +68,7 @@ export const ChatInputDock: React.FC<ChatInputDockProps> = ({
             title="Toggle between 3.5 Flash-Lite and 3.8 Flash"
             className="flex items-center gap-1.5 text-[11px] text-zinc-400 font-mono hover:text-zinc-200 transition-colors"
           >
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            <span className="w-1.5 h-1.5 rounded-full bg-accent" />
             <span>{isPinned ? 'pinned: 3.8-flash' : activeModelName}</span>
           </button>
 
@@ -75,7 +77,7 @@ export const ChatInputDock: React.FC<ChatInputDockProps> = ({
             <button
               type="button"
               onClick={handleSubmit}
-              disabled={isLoading || !prompt.trim()}
+              disabled={isLoading || disabled || !prompt.trim()}
               className="px-3 py-1.5 rounded-lg bg-zinc-100 hover:bg-white text-zinc-950 font-medium text-xs flex items-center gap-1 transition-colors disabled:opacity-30 shadow-sm"
             >
               <span>Send</span>
