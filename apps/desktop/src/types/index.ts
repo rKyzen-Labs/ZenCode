@@ -90,14 +90,59 @@ export type TaskState =
   | 'WorkerRunning'
   | 'AwaitingReview'
   | 'Complete'
-  | 'Failed';
+  | 'Failed'
+  | { WorkerRunning: { session_id: string } }
+  | { Failed: string }
+  | Record<string, any>;
 
 export type EngineHealth =
+  | 'NotStarted'
   | 'Stopped'
   | 'Starting'
   | 'Ready'
+  | 'Busy'
   | 'Degraded'
-  | 'Failed';
+  | 'Failed'
+  | { Ready: { port: number; version: string } }
+  | { Failed: string }
+  | Record<string, any>;
+
+export function formatEngineHealth(health?: EngineHealth | null): string {
+  if (!health) return 'stopped';
+  if (typeof health === 'string') return health.toLowerCase();
+  if (typeof health === 'object') {
+    const key = Object.keys(health)[0];
+    if (key) return key.toLowerCase();
+  }
+  return String(health).toLowerCase();
+}
+
+export function isEngineReady(health?: EngineHealth | null): boolean {
+  if (!health) return false;
+  if (health === 'Ready') return true;
+  if (typeof health === 'object' && 'Ready' in health) return true;
+  return false;
+}
+
+export function formatTaskState(state?: TaskState | null): string {
+  if (!state) return 'idle';
+  if (typeof state === 'string') return state.toLowerCase();
+  if (typeof state === 'object') {
+    const key = Object.keys(state)[0];
+    if (key) return key.toLowerCase();
+  }
+  return String(state).toLowerCase();
+}
+
+export function isTaskState(state: TaskState | undefined | null, target: string): boolean {
+  if (!state) return target.toLowerCase() === 'idle';
+  if (typeof state === 'string') return state.toLowerCase() === target.toLowerCase();
+  if (typeof state === 'object') {
+    const key = Object.keys(state)[0];
+    return key ? key.toLowerCase() === target.toLowerCase() : false;
+  }
+  return false;
+}
 
 export interface SystemStatus {
   gemini_ready: boolean;

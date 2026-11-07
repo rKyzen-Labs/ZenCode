@@ -1,5 +1,6 @@
 import type { FC } from 'react';
 import type { SystemStatus, ProjectState, QuotaUpdateEvent } from '../types';
+import { formatEngineHealth, formatTaskState } from '../types';
 
 interface StatusBarProps {
   project: ProjectState | null;
@@ -14,8 +15,8 @@ export const StatusBar: FC<StatusBarProps> = ({
   quotaState,
   onOpenQuotaDashboard,
 }) => {
-  const taskState = status?.task_state || 'Idle';
-  const opencodeHealth = status?.opencode_health || 'Stopped';
+  const formattedTaskState = formatTaskState(status?.task_state);
+  const formattedOpencodeHealth = formatEngineHealth(status?.opencode_health);
 
   return (
     <footer className="h-6 w-full border-t border-[#27272a] bg-[#09090b] px-3 text-[10px] text-zinc-500 font-mono flex items-center justify-between select-none">
@@ -75,14 +76,14 @@ export const StatusBar: FC<StatusBarProps> = ({
 
         {/* OpenCode health */}
         <div className="flex items-center gap-1 text-zinc-400">
-          <span>[opencode: {opencodeHealth.toLowerCase()}]</span>
+          <span>[opencode: {formattedOpencodeHealth}]</span>
         </div>
 
         <span className="text-zinc-700">|</span>
 
         {/* Task state badge */}
         <div className="text-zinc-300">
-          <span>[state: {taskState.toLowerCase()}]</span>
+          <span>[state: {formattedTaskState}]</span>
         </div>
       </div>
     </footer>

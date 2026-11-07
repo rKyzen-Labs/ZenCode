@@ -1,5 +1,6 @@
 import { type FC } from 'react';
 import type { ProjectState, TaskState } from '../types';
+import { isTaskState, formatTaskState } from '../types';
 
 interface HeaderTabBarProps {
   project: ProjectState | null;
@@ -23,14 +24,19 @@ export const HeaderTabBar: FC<HeaderTabBarProps> = ({
   onChangeProject,
   tokenCount = '8k',
 }) => {
-  const statusLabel =
-    taskState === 'WorkerRunning'
-      ? 'running'
-      : taskState === 'Planning'
-      ? 'planning'
-      : taskState === 'AwaitingReview'
-      ? 'review_ready'
-      : 'idle';
+  const isRunning = isTaskState(taskState, 'WorkerRunning');
+  const isPlanning = isTaskState(taskState, 'Planning');
+  const isAwaitingReview = isTaskState(taskState, 'AwaitingReview');
+
+  const statusLabel = isRunning
+    ? 'running'
+    : isPlanning
+    ? 'planning'
+    : isAwaitingReview
+    ? 'review_ready'
+    : formatTaskState(taskState);
+
+  const projectName = project ? String(project.name || '').toLowerCase() : '';
 
   return (
     <header className="w-full bg-[#09090b] border-b border-[#27272a] select-none shrink-0 z-20 font-mono text-xs">
@@ -42,7 +48,7 @@ export const HeaderTabBar: FC<HeaderTabBarProps> = ({
 
           {project && (
             <div className="flex items-center gap-2 px-3 py-1 bg-[#18181b] border-t border-x border-[#27272a] text-zinc-200 text-xs shrink-0 rounded-t">
-              <span>worker: {project.name.toLowerCase()}</span>
+              <span>worker: {projectName}</span>
               <button
                 type="button"
                 onClick={onNewSession}
@@ -90,11 +96,11 @@ export const HeaderTabBar: FC<HeaderTabBarProps> = ({
       <div className="h-7 px-3 flex items-center justify-between text-[11px] text-zinc-400 bg-[#0d0d0f]">
         <div className="flex items-center gap-2 truncate">
           <span className="text-zinc-300">
-            {project ? project.name.toLowerCase() : 'zencode'}
+            {projectName || 'zencode'}
           </span>
           <span className="text-zinc-600">/</span>
           <span className="text-zinc-400">
-            {project ? `worker: ${project.name.toLowerCase()}` : 'no_project'}
+            {project ? `worker: ${projectName}` : 'no_project'}
           </span>
           <span className="text-zinc-600">::</span>
           <span className="text-zinc-400 font-semibold">[{statusLabel}]</span>

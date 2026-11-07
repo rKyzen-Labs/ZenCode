@@ -96,7 +96,7 @@ export default function App() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.altKey) {
-        const k = e.key.toLowerCase();
+        const k = (e.key || '').toLowerCase();
         if (k === 'r') {
           e.preventDefault();
           setActiveToolPane((prev) => (prev === 'review' ? null : 'review'));

@@ -7,6 +7,7 @@ import type {
   ChangeInventory as ChangeInventoryType,
   MergeResult,
 } from '../types';
+import { isTaskState } from '../types';
 
 interface TaskViewProps {
   contextPreview: ContextPreview | null;
@@ -59,9 +60,9 @@ export const TaskView: FC<TaskViewProps> = ({
     }
   }, [workerEvents]);
 
-  const isPlanning = taskState === 'Planning' || isLoading;
-  const isWorkerRunning = taskState === 'WorkerRunning';
-  const isAwaitingReview = taskState === 'AwaitingReview';
+  const isPlanning = isTaskState(taskState, 'Planning') || isLoading;
+  const isWorkerRunning = isTaskState(taskState, 'WorkerRunning');
+  const isAwaitingReview = isTaskState(taskState, 'AwaitingReview');
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-y-auto p-4 max-w-4xl mx-auto w-full space-y-4 font-mono text-xs">

@@ -74,7 +74,8 @@ export const ChangeInventory: FC<ChangeInventoryProps> = ({
           const files = groups[category];
           if (!files || files.length === 0) return null;
 
-          const meta = CATEGORY_META[category] || { label: category.toLowerCase(), badge: '?' };
+          const safeLabel = typeof category === 'string' ? category.toLowerCase() : String(category);
+          const meta = CATEGORY_META[category] || { label: safeLabel, badge: '?' };
           const isCollapsed = collapsedGroups[category];
 
           return (

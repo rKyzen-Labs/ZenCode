@@ -1,5 +1,6 @@
 import { useState, type FC, type FormEvent } from 'react';
 import type { SystemStatus } from '../types';
+import { formatEngineHealth, isEngineReady } from '../types';
 
 interface WelcomeScreenProps {
   status: SystemStatus | null;
@@ -27,7 +28,7 @@ export const WelcomeScreen: FC<WelcomeScreenProps> = ({
 
   const isGeminiReady = status?.gemini_ready ?? false;
   const isOllamaReady = status?.ollama_ready ?? false;
-  const isOpencodeReady = status?.opencode_health === 'Ready';
+  const isOpencodeReady = isEngineReady(status?.opencode_health);
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-8 bg-[#0d0d0f] max-w-3xl mx-auto w-full font-mono text-xs select-none">
@@ -144,7 +145,7 @@ export const WelcomeScreen: FC<WelcomeScreenProps> = ({
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-zinc-200">sidecar</span>
                 <span className={isOpencodeReady ? 'text-zinc-200' : 'text-zinc-500'}>
-                  [{status?.opencode_health?.toLowerCase() || 'standby'}]
+                  [{formatEngineHealth(status?.opencode_health)}]
                 </span>
               </div>
               <div className="text-[10px] text-zinc-500">
