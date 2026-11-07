@@ -45,30 +45,47 @@ import {
   submitAdvisoryRequest,
   subscribeToExecOutput,
   subscribeToExecFinished,
+  listWorkspaces,
+  listChats,
+  saveChat,
+  loadChat,
+  deleteChat,
+  getChangeInventory,
 } from './lib/ipc';
-import { HeaderTabBar } from './components/HeaderTabBar';
-import { SideToolRail, type ActiveToolPane } from './components/SideToolRail';
-import { PromptDock } from './components/PromptDock';
-import { WelcomeScreen } from './components/WelcomeScreen';
-import { WorkspaceScreen } from './components/WorkspaceScreen';
-import { TaskView } from './components/TaskView';
+import { Sidebar, type StoredChatSummary } from './components/Sidebar';
+import { EmptyState } from './components/EmptyState';
+import { ChatHeader } from './components/ChatHeader';
+import { ChatInputDock } from './components/ChatInputDock';
+import { RightPanel } from './components/RightPanel';
 import { QuotaDashboard } from './components/QuotaDashboard';
 import { DirtyTreeDialog } from './components/DirtyTreeDialog';
 import { OrphanRecoveryDialog } from './components/OrphanRecoveryDialog';
-import { ReviewPanel } from './features/review/ReviewPanel';
-import { CommandApprovalDialog } from './components/CommandApprovalDialog';
 import { AdvisoryPreviewModal } from './components/AdvisoryPreviewModal';
 import { ExecutionTerminal } from './components/ExecutionTerminal';
 import { StatusBar } from './components/StatusBar';
+import { TaskView } from './components/TaskView';
 
 export default function App() {
   const [project, setProject] = useState<ProjectState | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [quotaState, setQuotaState] = useState<QuotaUpdateEvent | null>(null);
-  const [activeToolPane, setActiveToolPane] = useState<ActiveToolPane>(null);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isRightPanelOpen, setIsRightPanelOpen] = useState(false);
+  const [isQuotaModalOpen, setIsQuotaModalOpen] = useState(false);
   const [isPinnedLoading, setIsPinnedLoading] = useState(false);
   const [lastActiveModel, setLastActiveModel] = useState<string>('gemini-3.5-flash-lite');
   const [lastSwitchReason, setLastSwitchReason] = useState<string | null>(null);
+
+  const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('zencode_recent_workspaces');
+      return saved ? JSON.parse(saved) : ['A:\\ZenCode'];
+    } catch {
+      return ['A:\\ZenCode'];
+    }
+  });
+  const [storedChats, setStoredChats] = useState<StoredChatSummary[]>([]);
+  const [activeChatTitle, setActiveChatTitle] = useState<string>('New Task');
 
   const [contextPreview, setContextPreview] = useState<ContextPreview | null>(null);
   const [plan, setPlan] = useState<ZencodePlan | null>(null);
@@ -84,9 +101,48 @@ export default function App() {
   const [pendingPlanForDirty, setPendingPlanForDirty] = useState<ZencodePlan | null>(null);
   const [orphanedWorktrees, setOrphanedWorktrees] = useState<OrphanWorktree[]>([]);
 
+  // Automatically open right panel when inventory is ready with file changes
+  useEffect(() => {
+    if (inventory && inventory.files.length > 0) {
+      setIsRightPanelOpen(true);
+    }
+  }, [inventory]);
+
+  // Sync active task into storedChats summary list
+  useEffect(() => {
+    if (activeTaskId && project) {
+      setStoredChats((prev) => {
+        const title = activeChatTitle || 'Task Session';
+        const status: StoredChatSummary['status'] = inventory
+          ? 'review'
+          : systemStatus?.task_state === 'WorkerRunning'
+          ? 'active'
+          : 'idle';
+        const existing = prev.find((c) => c.id === activeTaskId);
+        if (existing) {
+          return prev.map((c) =>
+            c.id === activeTaskId
+              ? { ...c, title, status, files_count: inventory?.files.length }
+              : c
+          );
+        }
+        return [
+          {
+            id: activeTaskId,
+            workspace_path: project.path,
+            title,
+            created_at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            status,
+            files_count: inventory?.files.length,
+          },
+          ...prev,
+        ];
+      });
+    }
+  }, [activeTaskId, project, activeChatTitle, inventory, systemStatus?.task_state]);
+
   // Milestone 3 Permissions, Execution, and Diagnostics State
   const [pendingCommandApproval, setPendingCommandApproval] = useState<CommandRequest | null>(null);
-  const [isCommandModalOpen, setIsCommandModalOpen] = useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
   const [activeCommandId, setActiveCommandId] = useState<string | null>(null);
   const [activeProgram, setActiveProgram] = useState<string>('');
@@ -127,23 +183,20 @@ export default function App() {
     }
   }, []);
 
-  // Global Keyboard Shortcuts (matching Example Image 2)
+  // Global Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.altKey) {
         const k = (e.key || '').toLowerCase();
         if (k === 'r') {
           e.preventDefault();
-          setActiveToolPane((prev) => (prev === 'review' ? null : 'review'));
+          setIsRightPanelOpen((prev) => !prev);
         } else if (k === 'b') {
           e.preventDefault();
-          setActiveToolPane((prev) => (prev === 'quota' ? null : 'quota'));
-        } else if (k === 't') {
+          setIsSidebarCollapsed((prev) => !prev);
+        } else if (k === 'q') {
           e.preventDefault();
-          setActiveToolPane((prev) => (prev === 'terminal' ? null : 'terminal'));
-        } else if (k === 'p') {
-          e.preventDefault();
-          setActiveToolPane((prev) => (prev === 'files' ? null : 'files'));
+          setIsQuotaModalOpen((prev) => !prev);
         }
       }
     };
@@ -173,6 +226,15 @@ export default function App() {
         }
       })
       .catch((err) => console.warn('Could not check for orphaned worktrees on launch:', err));
+
+    // Load persisted workspaces from SQLite
+    listWorkspaces()
+      .then((records) => {
+        if (records && records.length > 0) {
+          setRecentWorkspaces(records.map((r) => r.path));
+        }
+      })
+      .catch((err) => console.warn('Could not list workspaces from SQLite:', err));
 
     let unlistenWorkerMsg: (() => void) | undefined;
     let unlistenWorkerStatus: (() => void) | undefined;
@@ -208,8 +270,8 @@ export default function App() {
 
         unlistenInventoryReady = await subscribeToInventoryReady((inv: ChangeInventory) => {
           setInventory(inv);
-          // Automatically open review pane when inventory is received
-          setActiveToolPane('review');
+          // Automatically open right panel when inventory is received
+          setIsRightPanelOpen(true);
         });
 
         unlistenExecOutput = await subscribeToExecOutput((ev: ProcessOutputEvent) => {
@@ -256,6 +318,94 @@ export default function App() {
     }
   };
 
+  // Load stored chats from SQLite for current workspace
+  const loadStoredChats = useCallback(async (workspacePath: string) => {
+    try {
+      const records = await listChats(workspacePath);
+      const summaries: StoredChatSummary[] = records.map((r) => ({
+        id: r.id,
+        workspace_path: r.workspace_path,
+        title: r.title,
+        created_at: new Date(r.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        status: r.status as StoredChatSummary['status'],
+        files_count: r.files_count,
+      }));
+      setStoredChats(summaries);
+    } catch (err) {
+      console.warn('Could not load stored chats from SQLite:', err);
+    }
+  }, []);
+
+  // Handler: Select and restore a previous chat
+  const handleSelectChat = async (taskId: string) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const detail = await loadChat(taskId);
+      if (!detail) return;
+
+      setActiveTaskId(detail.id);
+      setActiveChatTitle(detail.title);
+
+      // Restore plan if present
+      if (detail.plan_json) {
+        try {
+          const parsedPlan = JSON.parse(detail.plan_json);
+          setPlan(parsedPlan);
+        } catch {
+          setPlan(null);
+        }
+      } else {
+        setPlan(null);
+      }
+
+      // Restore worker events scrollback
+      if (detail.events_json) {
+        try {
+          const parsedEvents = JSON.parse(detail.events_json);
+          setWorkerEvents(parsedEvents);
+        } catch {
+          setWorkerEvents([]);
+        }
+      } else {
+        setWorkerEvents([]);
+      }
+
+      // Restore verification runs
+      if (detail.verification_json) {
+        try {
+          const parsedVer = JSON.parse(detail.verification_json);
+          setVerificationHistory(parsedVer);
+        } catch {
+          setVerificationHistory([]);
+        }
+      } else {
+        setVerificationHistory([]);
+      }
+
+      // Restore exact diff state from authoritative Git worktree
+      if (detail.status === 'review' || detail.status === 'active' || detail.worktree_path) {
+        try {
+          const inv = await getChangeInventory(detail.id);
+          if (inv && inv.files.length > 0) {
+            setInventory(inv);
+            setIsRightPanelOpen(true);
+          } else {
+            setInventory(null);
+          }
+        } catch {
+          setInventory(null);
+        }
+      } else {
+        setInventory(null);
+      }
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to restore chat');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // Handler: Open Project
   const handleOpenProject = async (path: string) => {
     setIsLoading(true);
@@ -263,7 +413,15 @@ export default function App() {
     try {
       const proj = await openProject(path);
       setProject(proj);
+      setRecentWorkspaces((prev) => {
+        const updated = [path, ...prev.filter((p) => p !== path)].slice(0, 8);
+        try {
+          localStorage.setItem('zencode_recent_workspaces', JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
       await refreshStatus();
+      await loadStoredChats(path);
 
       // Check for orphaned worktrees in this newly opened repository
       const orphans = await listActiveWorktrees();
@@ -339,6 +497,21 @@ export default function App() {
     try {
       const tid = taskId || `task_${Date.now()}`;
       setActiveTaskId(tid);
+      if (project) {
+        await saveChat({
+          id: tid,
+          workspace_path: project.path,
+          title: activeChatTitle,
+          status: 'active',
+          branch_name: `zencode/task-${tid}`,
+          worktree_path: null,
+          plan_json: JSON.stringify(planToExecute),
+          worker_summary: null,
+          events_json: null,
+          verification_json: null,
+        });
+        await loadStoredChats(project.path);
+      }
       const sessionId = await startWorkerSession(planToExecute, tid, acknowledgeDirty);
       setWorkerSessionId(sessionId);
       setSystemStatus((prev) =>
@@ -416,9 +589,24 @@ export default function App() {
     try {
       const res = await acceptTask(tid);
       if ('Success' in res || (res as any).status === 'Success') {
+        if (project) {
+          await saveChat({
+            id: tid,
+            workspace_path: project.path,
+            title: activeChatTitle,
+            status: 'merged',
+            branch_name: null,
+            worktree_path: null,
+            plan_json: plan ? JSON.stringify(plan) : null,
+            worker_summary: null,
+            events_json: workerEvents.length > 0 ? JSON.stringify(workerEvents) : null,
+            verification_json: verificationHistory.length > 0 ? JSON.stringify(verificationHistory) : null,
+          });
+          await loadStoredChats(project.path);
+        }
         setInventory(null);
         setActiveTaskId(null);
-        setActiveToolPane(null);
+        setIsRightPanelOpen(false);
         await refreshStatus();
       }
       return res;
@@ -432,12 +620,42 @@ export default function App() {
     setIsLoading(true);
     try {
       await rejectTask(tid);
+      if (project) {
+        await saveChat({
+          id: tid,
+          workspace_path: project.path,
+          title: activeChatTitle,
+          status: 'rejected',
+          branch_name: null,
+          worktree_path: null,
+          plan_json: plan ? JSON.stringify(plan) : null,
+          worker_summary: null,
+          events_json: workerEvents.length > 0 ? JSON.stringify(workerEvents) : null,
+          verification_json: verificationHistory.length > 0 ? JSON.stringify(verificationHistory) : null,
+        });
+        await loadStoredChats(project.path);
+      }
       setInventory(null);
       setActiveTaskId(null);
-      setActiveToolPane(null);
+      setIsRightPanelOpen(false);
       await refreshStatus();
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Handler: Delete Stored Chat
+  const handleDeleteChat = async (tid: string) => {
+    try {
+      await deleteChat(tid);
+      if (activeTaskId === tid) {
+        handleNewChat();
+      }
+      if (project) {
+        await loadStoredChats(project.path);
+      }
+    } catch (err) {
+      console.warn('Failed to delete chat:', err);
     }
   };
 
@@ -449,7 +667,7 @@ export default function App() {
       if (inv) {
         setInventory(inv);
         setActiveTaskId(tid);
-        setActiveToolPane('review');
+        setIsRightPanelOpen(true);
         setOrphanedWorktrees((prev) => prev.filter((o) => o.task_id !== tid));
       }
     } catch (err: any) {
@@ -488,19 +706,7 @@ export default function App() {
     }
   };
 
-  // Handler: Reset Task State / New Session
-  const handleResetTask = () => {
-    setContextPreview(null);
-    setPlan(null);
-    setWorkerEvents([]);
-    setWorkerSessionId(null);
-    setInventory(null);
-    setActiveTaskId(null);
-    setActiveToolPane(null);
-    setVerificationHistory([]);
-    setDiagnosticNotice(null);
-    setError(null);
-  };
+
 
   // Milestone 3 & Refinement Pass Command Handlers (Step 5 Allowlist + Session Memory)
   const handleTriggerCommand = async (
@@ -517,7 +723,6 @@ export default function App() {
         await handleApproveCommand(req);
       } else {
         setPendingCommandApproval(req);
-        setIsCommandModalOpen(true);
       }
     } catch (err: any) {
       setError(typeof err === 'string' ? err : err.message || 'Failed to request command approval');
@@ -565,7 +770,6 @@ export default function App() {
   };
 
   const handleApproveCommand = async (req: CommandRequest) => {
-    setIsCommandModalOpen(false);
     setPendingCommandApproval(null);
     setActiveCommandId(req.id);
     setActiveProgram(req.program);
@@ -588,7 +792,6 @@ export default function App() {
   };
 
   const handleDenyCommand = (_req: CommandRequest) => {
-    setIsCommandModalOpen(false);
     setPendingCommandApproval(null);
   };
 
@@ -615,16 +818,22 @@ export default function App() {
     }
   };
 
-  // Switch Project
-  const handleChangeProject = () => {
-    setProject(null);
-    handleResetTask();
+  // New Chat / Task reset
+  const handleNewChat = () => {
+    setActiveTaskId(null);
+    setActiveChatTitle('New Task');
+    setContextPreview(null);
+    setPlan(null);
+    setWorkerEvents([]);
+    setWorkerSessionId(null);
+    setInventory(null);
+    setVerificationHistory([]);
+    setDiagnosticNotice(null);
+    setError(null);
   };
 
-  const isTaskActive = Boolean(contextPreview || plan || workerEvents.length > 0 || inventory);
-
   return (
-    <div className="flex h-screen w-screen flex-col bg-[#0d0d0f] text-[#e4e4e7] overflow-hidden font-sans select-none">
+    <div className="flex h-screen w-screen flex-col bg-[#09090b] text-[#e4e4e7] overflow-hidden font-sans select-none">
       {/* Dirty Tree Modal (Step 4 Policy) */}
       {dirtyFiles && dirtyFiles.length > 0 && (
         <DirtyTreeDialog
@@ -649,16 +858,6 @@ export default function App() {
         />
       )}
 
-      {/* Command Approval Modal (Milestone 3) */}
-      {pendingCommandApproval && (
-        <CommandApprovalDialog
-          request={pendingCommandApproval}
-          isOpen={isCommandModalOpen}
-          onApprove={handleApproveCommand}
-          onDeny={handleDenyCommand}
-        />
-      )}
-
       {/* Advisory Context Preview Modal (Step 6 Opt-In Escalation) */}
       {advisoryPreview && (
         <AdvisoryPreviewModal
@@ -670,169 +869,170 @@ export default function App() {
         />
       )}
 
-      {/* Top Window / Session Tab Header (Matching Example Image 2) */}
-      <HeaderTabBar
-        project={project}
-        taskState={systemStatus?.task_state || 'Idle'}
-        activeTab="Worker: ZenCode"
-        activePlannerModel={lastActiveModel}
-        isPinned={Boolean(quotaState?.pinned_model)}
-        onNewSession={handleResetTask}
-        onOpenQuota={() => setActiveToolPane(activeToolPane === 'quota' ? null : 'quota')}
-        onChangeProject={handleChangeProject}
-        tokenCount="8k"
-      />
-
-      {/* Main Split Layout: Center Chat/Canvas + Right Action Rail/Pane */}
-      <div className="flex-1 flex overflow-hidden relative">
-        {/* Center Workspace & Chat Area */}
-        <div className="flex-1 flex flex-col h-full overflow-hidden relative bg-[#0d0d0f]">
-          <div className="flex-1 overflow-y-auto">
-            {!project ? (
-              <WelcomeScreen
-                status={systemStatus}
-                onOpenProject={handleOpenProject}
-                onRefreshStatus={refreshStatus}
-                isLoading={isLoading}
-                error={error}
-              />
-            ) : isTaskActive ? (
-              <TaskView
-                contextPreview={contextPreview}
-                plan={plan}
-                taskState={systemStatus?.task_state || 'Idle'}
-                workerEvents={workerEvents}
-                workerSessionId={workerSessionId}
-                activePlannerModel={lastActiveModel}
-                switchReason={lastSwitchReason}
-                inventory={inventory}
-                activeTaskId={activeTaskId}
-                onConfirmPlanRequest={handleConfirmPlanRequest}
-                onStartWorkerSession={handleStartWorkerSession}
-                onStopWorkerSession={handleStopWorkerSession}
-                onAcceptTask={handleAcceptTask}
-                onRejectTask={handleRejectTask}
-                onResetTask={handleResetTask}
-                verificationHistory={verificationHistory}
-                onOpenReviewPane={() => setActiveToolPane('review')}
-                onTriggerCommand={handleTriggerCommand}
-                onExportDiagnostics={handleExportDiagnostics}
-                onTriggerAdvisory={handleTriggerAdvisory}
-                advisorySuggestion={advisorySuggestion}
-                diagnosticNotice={diagnosticNotice}
-                isLoading={isLoading}
-                error={error}
-              />
-            ) : (
-              <WorkspaceScreen
-                project={project}
-                onPreviewContext={handlePreviewContext}
-                onChangeProject={handleChangeProject}
-                isLoading={isLoading}
-                error={error}
-              />
-            )}
-
-            {/* Terminal Drawer for Process Execution */}
-            <div className="px-4 pb-4 max-w-4xl mx-auto w-full">
-              <ExecutionTerminal
-                isOpen={isTerminalOpen}
-                commandId={activeCommandId}
-                program={activeProgram}
-                args={activeArgs}
-                cwd={activeCwd}
-                isRunning={isCommandRunning}
-                outputLines={commandOutputLines}
-                result={executionResult}
-                onCancel={handleCancelCommand}
-                onClose={() => setIsTerminalOpen(false)}
-                onExportDiagnostics={handleExportDiagnostics}
-              />
+      {/* Quota Dashboard Modal */}
+      {isQuotaModalOpen && quotaState && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="max-w-2xl w-full h-[80vh] bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden shadow-2xl flex flex-col font-mono text-xs">
+            <div className="h-10 px-4 border-b border-zinc-800 flex items-center justify-between bg-zinc-900 shrink-0">
+              <span className="font-semibold text-zinc-100">Rate Limits &amp; Waterfall Cascade</span>
+              <button
+                type="button"
+                onClick={() => setIsQuotaModalOpen(false)}
+                className="text-zinc-400 hover:text-white"
+              >
+                [close]
+              </button>
             </div>
-          </div>
-
-          {/* Floating Bottom Prompt Dock (Matching Example Image 2) */}
-          {project && (
-            <PromptDock
-              onSubmit={(text, mode) => {
-                if (mode === 'plan' || !plan) {
-                  handlePreviewContext(text);
-                } else {
-                  handleStartWorkerSession(plan);
-                }
-              }}
-              isLoading={isLoading}
-              activeModelName={quotaState?.pinned_model ? '3.8 Flash' : lastActiveModel}
-              isPinned={Boolean(quotaState?.pinned_model)}
-              onSelectModel={handlePinModel}
-            />
-          )}
-        </div>
-
-        {/* Right Tool Rail & Side Pane (Matching Example Image 2) */}
-        <SideToolRail
-          activePane={activeToolPane}
-          onTogglePane={setActiveToolPane}
-          inventory={inventory}
-          workerEventCount={workerEvents.length}
-        >
-          {activeToolPane === 'review' && inventory && (
-            <ReviewPanel
-              inventory={inventory}
-              taskId={activeTaskId || 'active-task'}
-              onAccept={handleAcceptTask}
-              onReject={handleRejectTask}
-              isLoading={isLoading}
-            />
-          )}
-
-          {activeToolPane === 'quota' && quotaState && (
-            <div className="h-full overflow-y-auto">
+            <div className="flex-1 overflow-y-auto">
               <QuotaDashboard
                 quotaState={quotaState}
-                onClose={() => setActiveToolPane(null)}
+                onClose={() => setIsQuotaModalOpen(false)}
                 onPinModel={handlePinModel}
                 isPinnedActionLoading={isPinnedLoading}
               />
             </div>
-          )}
+          </div>
+        </div>
+      )}
 
-          {activeToolPane === 'terminal' && (
-            <div className="h-full flex flex-col font-mono text-xs bg-zinc-950 p-3 rounded-lg border border-zinc-800 space-y-2 overflow-y-auto">
-              <div className="text-zinc-500 text-[10px] uppercase font-bold border-b border-zinc-800 pb-1">
-                SSE Worker Stream Output ({workerEvents.length} events)
-              </div>
-              {workerEvents.map((e, idx) => (
-                <div key={idx} className="space-y-0.5">
-                  <span className="text-[10px] text-zinc-500">[{e.event_type}]</span>
-                  <pre className="text-zinc-300 text-[11px] whitespace-pre-wrap">{e.content}</pre>
-                </div>
-              ))}
-            </div>
-          )}
+      {/* Main Persistent Three-Pane Shell */}
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* Left Sidebar: Workspace switcher + Projects / Chats tree + Engine status */}
+        <Sidebar
+          currentWorkspace={project}
+          workspaces={recentWorkspaces}
+          chats={storedChats}
+          activeChatId={activeTaskId}
+          onSelectChat={handleSelectChat}
+          onNewChat={handleNewChat}
+          onSwitchWorkspace={handleOpenProject}
+          onOpenProjectDialog={() => {
+            const p = prompt('Enter project path:', 'A:\\ZenCode');
+            if (p) handleOpenProject(p);
+          }}
+          status={systemStatus}
+          quotaState={quotaState}
+          onOpenQuota={() => setIsQuotaModalOpen(true)}
+          onDeleteChat={handleDeleteChat}
+          isCollapsed={isSidebarCollapsed}
+          onToggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+        />
 
-          {activeToolPane === 'files' && project && (
-            <div className="h-full flex flex-col font-mono text-xs bg-zinc-950 p-3 rounded-lg border border-zinc-800 space-y-2 overflow-y-auto">
-              <div className="text-zinc-500 text-[10px] uppercase font-bold border-b border-zinc-800 pb-1">
-                Project Root: {project.path}
+        {/* Center Panel: Primary Chat/Agent Thread */}
+        <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#09090b] relative">
+          {!project ? (
+            <EmptyState
+              status={systemStatus}
+              recentWorkspaces={recentWorkspaces}
+              onOpenProject={handleOpenProject}
+              isLoading={isLoading}
+              error={error}
+            />
+          ) : (
+            <>
+              {/* Center Panel Top Header */}
+              <ChatHeader
+                project={project}
+                taskState={systemStatus?.task_state || 'Idle'}
+                activeChatTitle={activeChatTitle}
+                activePlannerModel={quotaState?.pinned_model ? '3.8 Flash' : lastActiveModel}
+                isPinned={Boolean(quotaState?.pinned_model)}
+                onOpenQuota={() => setIsQuotaModalOpen(true)}
+                isRightPanelOpen={isRightPanelOpen}
+                onToggleRightPanel={() => setIsRightPanelOpen(!isRightPanelOpen)}
+                changesCount={inventory?.files.length ?? 0}
+              />
+
+              {/* Chat Thread Container */}
+              <div className="flex-1 overflow-y-auto">
+                <TaskView
+                  contextPreview={contextPreview}
+                  plan={plan}
+                  taskState={systemStatus?.task_state || 'Idle'}
+                  workerEvents={workerEvents}
+                  workerSessionId={workerSessionId}
+                  activePlannerModel={lastActiveModel}
+                  switchReason={lastSwitchReason}
+                  inventory={inventory}
+                  activeTaskId={activeTaskId}
+                  pendingCommandApproval={pendingCommandApproval}
+                  onApproveCommand={handleApproveCommand}
+                  onDenyCommand={handleDenyCommand}
+                  onConfirmPlanRequest={handleConfirmPlanRequest}
+                  onStartWorkerSession={handleStartWorkerSession}
+                  onStopWorkerSession={handleStopWorkerSession}
+                  onAcceptTask={handleAcceptTask}
+                  onRejectTask={handleRejectTask}
+                  onResetTask={handleNewChat}
+                  verificationHistory={verificationHistory}
+                  onOpenReviewPane={() => setIsRightPanelOpen(true)}
+                  onTriggerCommand={handleTriggerCommand}
+                  onExportDiagnostics={handleExportDiagnostics}
+                  onTriggerAdvisory={handleTriggerAdvisory}
+                  advisorySuggestion={advisorySuggestion}
+                  diagnosticNotice={diagnosticNotice}
+                  isLoading={isLoading}
+                  error={error}
+                />
+
+                {/* Inline Process Execution Terminal if running */}
+                {isTerminalOpen && (
+                  <div className="px-4 pb-4 max-w-4xl mx-auto w-full">
+                    <ExecutionTerminal
+                      isOpen={isTerminalOpen}
+                      commandId={activeCommandId}
+                      program={activeProgram}
+                      args={activeArgs}
+                      cwd={activeCwd}
+                      isRunning={isCommandRunning}
+                      outputLines={commandOutputLines}
+                      result={executionResult}
+                      onCancel={handleCancelCommand}
+                      onClose={() => setIsTerminalOpen(false)}
+                      onExportDiagnostics={handleExportDiagnostics}
+                    />
+                  </div>
+                )}
               </div>
-              <p className="text-zinc-400 text-xs">
-                Active Branch: <span className="text-blue-400">{project.current_branch || 'none'}</span>
-              </p>
-              <p className="text-zinc-400 text-xs">
-                Status: <span className="text-emerald-400">{project.git_status_summary}</span>
-              </p>
-            </div>
+
+              {/* Center Bottom Chat Input Dock */}
+              <ChatInputDock
+                onSubmit={(text) => {
+                  if (!plan) {
+                    setActiveChatTitle(text.slice(0, 32));
+                    handlePreviewContext(text);
+                  } else {
+                    handleStartWorkerSession(plan);
+                  }
+                }}
+                isLoading={isLoading}
+                activeModelName={quotaState?.pinned_model ? '3.8 Flash' : lastActiveModel}
+                isPinned={Boolean(quotaState?.pinned_model)}
+                onSelectModel={handlePinModel}
+              />
+            </>
           )}
-        </SideToolRail>
+        </div>
+
+        {/* Right Panel: Context-Sensitive Diff & Changes Viewer / Explorer */}
+        <RightPanel
+          inventory={inventory}
+          taskId={activeTaskId}
+          onAccept={handleAcceptTask}
+          onReject={handleRejectTask}
+          isLoading={isLoading}
+          isOpen={isRightPanelOpen}
+          onClose={() => setIsRightPanelOpen(false)}
+          project={project}
+        />
       </div>
 
-      {/* Sticky Bottom Status Bar */}
+      {/* Sticky Bottom Status Bar (M3 Invariants Preserved) */}
       <StatusBar
         project={project}
         status={systemStatus}
         quotaState={quotaState}
-        onOpenQuotaDashboard={() => setActiveToolPane(activeToolPane === 'quota' ? null : 'quota')}
+        onOpenQuotaDashboard={() => setIsQuotaModalOpen(true)}
       />
     </div>
   );

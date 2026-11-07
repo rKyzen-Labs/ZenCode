@@ -20,6 +20,10 @@ import type {
   ExecutionResult,
   DiagnosticBundle,
   AdvisoryPreview,
+  WorkspaceRecord,
+  ChatSummaryRecord,
+  SaveChatRequest,
+  ChatDetailRecord,
 } from '../types';
 
 /**
@@ -336,6 +340,32 @@ function getMockResponse<T>(cmd: string, args: Record<string, unknown> = {}): T 
     return 'Advisory suggestion: Implement or import `missing_func` in `crates/zencode-core/src/lib.rs`. Ensure trait is in scope.' as unknown as T;
   }
 
+  if (cmd === 'list_workspaces') {
+    return [
+      {
+        path: 'A:\\ZenCode',
+        name: 'ZenCode',
+        last_opened_at: new Date().toISOString(),
+      },
+    ] as unknown as T;
+  }
+
+  if (cmd === 'list_chats') {
+    return [] as unknown as T;
+  }
+
+  if (cmd === 'save_chat') {
+    return undefined as unknown as T;
+  }
+
+  if (cmd === 'load_chat') {
+    return null as unknown as T;
+  }
+
+  if (cmd === 'delete_chat') {
+    return undefined as unknown as T;
+  }
+
   return {} as T;
 }
 
@@ -546,4 +576,24 @@ export async function submitAdvisoryRequest(
     preview_id: previewId,
     confirmed,
   });
+}
+
+export async function listWorkspaces(): Promise<WorkspaceRecord[]> {
+  return await safeInvoke<WorkspaceRecord[]>('list_workspaces');
+}
+
+export async function listChats(workspacePath: string): Promise<ChatSummaryRecord[]> {
+  return await safeInvoke<ChatSummaryRecord[]>('list_chats', { workspacePath });
+}
+
+export async function saveChat(chat: SaveChatRequest): Promise<void> {
+  return await safeInvoke<void>('save_chat', { chat });
+}
+
+export async function loadChat(taskId: string): Promise<ChatDetailRecord | null> {
+  return await safeInvoke<ChatDetailRecord | null>('load_chat', { taskId });
+}
+
+export async function deleteChat(taskId: string): Promise<void> {
+  return await safeInvoke<void>('delete_chat', { taskId });
 }

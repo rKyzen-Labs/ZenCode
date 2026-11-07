@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use zencode_core::PlanningContext;
 
+use crate::db::DatabaseService;
 use crate::engine::EngineSupervisor;
 use crate::exec::ExecutionService;
 use crate::git::{ChangeInventory, WorktreeInfo};
@@ -22,10 +23,20 @@ pub struct AppState {
     pub active_task_inventories: Arc<Mutex<HashMap<String, ChangeInventory>>>,
     pub current_task_id: Arc<Mutex<Option<String>>>,
     pub execution_service: Arc<ExecutionService>,
+    pub db: Arc<DatabaseService>,
 }
 
 impl AppState {
     pub fn new() -> Self {
+        let db_path = std::env::var("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join("Zencode")
+            .join("zencode.db");
+
+        let db = DatabaseService::new(db_path)
+            .unwrap_or_else(|_| DatabaseService::in_memory().expect("in memory sqlite"));
+
         Self {
             active_project: Arc::new(Mutex::new(None)),
             engine_supervisor: Arc::new(Mutex::new(None)),
@@ -38,6 +49,7 @@ impl AppState {
             active_task_inventories: Arc::new(Mutex::new(HashMap::new())),
             current_task_id: Arc::new(Mutex::new(None)),
             execution_service: Arc::new(ExecutionService::new()),
+            db: Arc::new(db),
         }
     }
 

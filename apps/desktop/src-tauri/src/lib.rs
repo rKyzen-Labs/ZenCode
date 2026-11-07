@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod db;
 pub mod engine;
 pub mod exec;
 pub mod git;
@@ -41,6 +42,11 @@ pub fn run() {
             export_diagnostic_bundle,
             preview_advisory_context,
             submit_advisory_request,
+            list_workspaces,
+            list_chats,
+            save_chat,
+            load_chat,
+            delete_chat,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

@@ -103,6 +103,9 @@ pub async fn open_project(
         *active = Some(project_state.clone());
     }
 
+    // Persist workspace in SQLite
+    let _ = state.db.record_workspace(&path, &project_state.name);
+
     Ok(project_state)
 }
 
@@ -1304,6 +1307,50 @@ pub async fn submit_advisory_request(
         .await?;
 
     Ok(suggestion)
+}
+
+/// List recently opened workspaces from the local SQLite layer.
+#[tauri::command]
+pub async fn list_workspaces(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::WorkspaceRecord>, String> {
+    state.db.get_recent_workspaces(20).map_err(|e| e.to_string())
+}
+
+/// Retrieve stored chats/tasks for a specific workspace.
+#[tauri::command]
+pub async fn list_chats(
+    workspace_path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::ChatSummaryRecord>, String> {
+    state.db.list_chats_for_workspace(&workspace_path).map_err(|e| e.to_string())
+}
+
+/// Persist task/chat metadata and Git reference in SQLite (never store full file diffs).
+#[tauri::command]
+pub async fn save_chat(
+    chat: crate::db::SaveChatRequest,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.db.save_chat(&chat).map_err(|e| e.to_string())
+}
+
+/// Load full scrollback, plan, and Git reference for a stored chat.
+#[tauri::command]
+pub async fn load_chat(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::db::ChatDetailRecord>, String> {
+    state.db.get_chat(&task_id).map_err(|e| e.to_string())
+}
+
+/// Delete a stored chat record.
+#[tauri::command]
+pub async fn delete_chat(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.db.delete_chat(&task_id).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

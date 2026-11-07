@@ -330,3 +330,49 @@ export interface DiagnosticBundle {
   raw_json: string;
 }
 
+export interface WorkspaceRecord {
+  path: string;
+  name: string;
+  last_opened_at: string;
+}
+
+export interface ChatSummaryRecord {
+  id: string; // task_id
+  workspace_path: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  status: 'idle' | 'active' | 'review' | 'merged' | 'rejected' | 'failed';
+  branch_name?: string | null;
+  worktree_path?: string | null;
+  files_count?: number;
+}
+
+export interface SaveChatRequest {
+  id: string;
+  workspace_path: string;
+  title: string;
+  status: string;
+  branch_name?: string | null;
+  worktree_path?: string | null;
+  plan_json?: string | null;
+  worker_summary?: string | null;
+  events_json?: string | null;
+  verification_json?: string | null;
+}
+
+export interface ChatDetailRecord {
+  id: string;
+  workspace_path: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  status: 'idle' | 'active' | 'review' | 'merged' | 'rejected' | 'failed';
+  branch_name?: string | null;
+  worktree_path?: string | null;
+  plan_json?: string | null;
+  worker_summary?: string | null;
+  events_json?: string | null;
+  verification_json?: string | null;
+}
+
