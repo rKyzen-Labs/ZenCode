@@ -110,51 +110,80 @@ export type EngineHealth =
   | Record<string, any>;
 
 export function formatEngineHealth(health?: EngineHealth | null): string {
-  if (!health) return 'stopped';
-  if (typeof health === 'string') return health.toLowerCase();
-  if (typeof health === 'object') {
-    if ('status' in health && typeof (health as any).status === 'string') {
-      return (health as any).status.toLowerCase();
+  try {
+    if (!health) return 'stopped';
+    if (typeof health === 'string') return health.toLowerCase();
+    if (typeof health === 'object' && health !== null) {
+      if ('status' in health && typeof (health as any).status === 'string') {
+        return (health as any).status.toLowerCase();
+      }
+      const keys = Object.keys(health);
+      if (keys.length > 0 && typeof keys[0] === 'string') {
+        return keys[0].toLowerCase();
+      }
     }
-    const key = Object.keys(health)[0];
-    if (key) return key.toLowerCase();
+    const str = String(health || '');
+    return typeof str.toLowerCase === 'function' ? str.toLowerCase() : 'stopped';
+  } catch {
+    return 'stopped';
   }
-  return String(health || '').toLowerCase();
 }
 
 export function isEngineReady(health?: EngineHealth | null): boolean {
-  if (!health) return false;
-  if (health === 'Ready') return true;
-  if (typeof health === 'object' && 'Ready' in health) return true;
-  if (typeof health === 'object' && (health as any).status === 'Ready') return true;
-  return false;
+  try {
+    if (!health) return false;
+    if (health === 'Ready') return true;
+    if (typeof health === 'object' && health !== null) {
+      if ('Ready' in health) return true;
+      if ((health as any).status === 'Ready') return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 export function formatTaskState(state?: TaskState | null): string {
-  if (!state) return 'idle';
-  if (typeof state === 'string') return state.toLowerCase();
-  if (typeof state === 'object') {
-    if ('status' in state && typeof (state as any).status === 'string') {
-      return (state as any).status.toLowerCase();
+  try {
+    if (!state) return 'idle';
+    if (typeof state === 'string') return state.toLowerCase();
+    if (typeof state === 'object' && state !== null) {
+      if ('status' in state && typeof (state as any).status === 'string') {
+        return (state as any).status.toLowerCase();
+      }
+      const keys = Object.keys(state);
+      if (keys.length > 0 && typeof keys[0] === 'string') {
+        return keys[0].toLowerCase();
+      }
     }
-    const key = Object.keys(state)[0];
-    if (key) return key.toLowerCase();
+    const str = String(state || '');
+    return typeof str.toLowerCase === 'function' ? str.toLowerCase() : 'idle';
+  } catch {
+    return 'idle';
   }
-  return String(state || '').toLowerCase();
 }
 
 export function isTaskState(state: TaskState | undefined | null, target: string): boolean {
-  const targetLower = String(target || '').toLowerCase();
-  if (!state) return targetLower === 'idle';
-  if (typeof state === 'string') return state.toLowerCase() === targetLower;
-  if (typeof state === 'object') {
-    if ('status' in state && typeof (state as any).status === 'string') {
-      return (state as any).status.toLowerCase() === targetLower;
+  try {
+    const targetStr = typeof target === 'string' ? target : String(target || '');
+    const targetLower = typeof targetStr.toLowerCase === 'function' ? targetStr.toLowerCase() : '';
+    if (!state) return targetLower === 'idle';
+    if (typeof state === 'string') {
+      return state.toLowerCase() === targetLower;
     }
-    const key = Object.keys(state)[0];
-    return key ? key.toLowerCase() === targetLower : false;
+    if (typeof state === 'object' && state !== null) {
+      if ('status' in state && typeof (state as any).status === 'string') {
+        return (state as any).status.toLowerCase() === targetLower;
+      }
+      const keys = Object.keys(state);
+      if (keys.length > 0 && typeof keys[0] === 'string') {
+        return keys[0].toLowerCase() === targetLower;
+      }
+    }
+    return false;
+  } catch {
+    return false;
   }
-  return false;
 }
 
 export interface SystemStatus {

@@ -33,7 +33,7 @@ export const WorkspaceScreen: FC<WorkspaceScreenProps> = ({
       {/* Hero Welcome in Workspace */}
       <div className="text-center space-y-2">
         <div className="text-zinc-500 text-[10px] uppercase tracking-wider">
-          project workspace :: {String(project?.name || '').toLowerCase()}
+          project workspace :: {project && typeof project.name === 'string' ? project.name.toLowerCase() : ''}
         </div>
         <h2 className="text-base font-semibold text-zinc-100">
           [new_task_session]

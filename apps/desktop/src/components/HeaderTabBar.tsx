@@ -36,7 +36,7 @@ export const HeaderTabBar: FC<HeaderTabBarProps> = ({
     ? 'review_ready'
     : formatTaskState(taskState);
 
-  const projectName = project ? String(project.name || '').toLowerCase() : '';
+  const projectName = project && typeof project.name === 'string' ? project.name.toLowerCase() : '';
 
   return (
     <header className="w-full bg-[#09090b] border-b border-[#27272a] select-none shrink-0 z-20 font-mono text-xs">

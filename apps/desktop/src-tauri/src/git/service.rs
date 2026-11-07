@@ -201,9 +201,17 @@ impl GitService {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        let base_commit = Self::run_cmd(repo_path, &["rev-parse", "HEAD"])?
-            .trim()
-            .to_string();
+        // Check if HEAD exists in primary repository (empty / 0-commit repos have unborn HEAD)
+        let (has_head, head_sha, _) = Self::run_cmd_allow_err(
+            repo_path,
+            &["rev-parse", "--verify", "HEAD"],
+        )?;
+
+        let (base_commit, is_empty_repo) = if has_head && !head_sha.trim().is_empty() {
+            (head_sha.trim().to_string(), false)
+        } else {
+            ("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string(), true)
+        };
 
         let branch_name = format!("zencode/task-{}", task_id);
 
@@ -220,7 +228,7 @@ impl GitService {
                 repo_path,
                 &["worktree", "add", &worktree_path_str, &branch_name],
             )?;
-        } else {
+        } else if !is_empty_repo {
             Self::run_cmd(
                 repo_path,
                 &[
@@ -230,6 +238,18 @@ impl GitService {
                     &branch_name,
                     &worktree_path_str,
                     &base_commit,
+                ],
+            )?;
+        } else {
+            // Freshly initialized 0-commit repository: git infers --orphan automatically
+            Self::run_cmd(
+                repo_path,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &branch_name,
+                    &worktree_path_str,
                 ],
             )?;
         }
@@ -513,12 +533,16 @@ impl GitService {
         }
 
         // Checkout target branch in main repository if not already on it
-        let current_branch = Self::run_cmd(&repo_path, &["rev-parse", "--abbrev-ref", "HEAD"])?
-            .trim()
-            .to_string();
+        let current_branch = match Self::run_cmd_allow_err(&repo_path, &["branch", "--show-current"])? {
+            (true, b, _) if !b.trim().is_empty() => b.trim().to_string(),
+            _ => match Self::run_cmd_allow_err(&repo_path, &["rev-parse", "--abbrev-ref", "HEAD"])? {
+                (true, b, _) if !b.trim().is_empty() => b.trim().to_string(),
+                _ => target_branch.to_string(),
+            },
+        };
 
         if current_branch != target_branch {
-            Self::run_cmd(&repo_path, &["checkout", target_branch])?;
+            let _ = Self::run_cmd_allow_err(&repo_path, &["checkout", target_branch]);
         }
 
         // Attempt merge
@@ -543,21 +567,22 @@ impl GitService {
                 .collect::<Vec<String>>();
 
             // Always abort merge so primary repository is untouched and clean
-            let _ = Self::run_cmd(&repo_path, &["merge", "--abort"]);
+            let _ = Self::run_cmd_allow_err(&repo_path, &["merge", "--abort"]);
 
             return Ok(MergeResult::Conflict {
                 conflicting_files: conflict_files,
             });
         }
 
-        let new_head = Self::run_cmd(&repo_path, &["rev-parse", "HEAD"])?
-            .trim()
-            .to_string();
+        let new_head = match Self::run_cmd_allow_err(&repo_path, &["rev-parse", "HEAD"])? {
+            (true, sha, _) if !sha.trim().is_empty() => sha.trim().to_string(),
+            _ => "HEAD".to_string(),
+        };
 
         // Clean up worktree and task branch after successful merge
         let worktree_path_str = clean_wt.to_string_lossy().to_string();
-        let _ = Self::run_cmd(&repo_path, &["worktree", "remove", "--force", &worktree_path_str]);
-        let _ = Self::run_cmd(&repo_path, &["branch", "-D", &task_branch]);
+        let _ = Self::run_cmd_allow_err(&repo_path, &["worktree", "remove", "--force", &worktree_path_str]);
+        let _ = Self::run_cmd_allow_err(&repo_path, &["branch", "-D", &task_branch]);
         let _ = std::fs::remove_dir_all(&clean_wt);
 
         Ok(MergeResult::Success {
@@ -721,10 +746,13 @@ impl GitService {
             }
         }
 
-        let head = Self::run_cmd(worktree_path, &["rev-parse", "HEAD"])?
-            .trim()
-            .to_string();
-        Ok(head)
+        // In an empty repo or root commit, fallback safely to empty tree SHA
+        let (head_ok, head_out, _) = Self::run_cmd_allow_err(worktree_path, &["rev-parse", "--verify", "HEAD"])?;
+        if head_ok && !head_out.trim().is_empty() {
+            Ok(head_out.trim().to_string())
+        } else {
+            Ok("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string())
+        }
     }
 
     /// Tests if a file is binary by inspecting initial bytes for null characters.
@@ -1107,5 +1135,53 @@ mod tests {
 
         // Clean up
         let _ = GitService::reject_task_changes(&wt_path, "conflict1");
+    }
+
+    #[test]
+    fn test_worktree_creation_diff_and_accept_on_empty_0_commit_repo() {
+        let repo = TestRepo::new();
+        // Do NOT make any commit in repo: it is a 0-commit / empty repo with unborn HEAD!
+
+        let wt = GitService::create_task_worktree(&repo.path, "empty0", false)
+            .expect("create_task_worktree should succeed on 0-commit empty repository");
+        let wt_path = PathBuf::from(&wt.worktree_path);
+
+        // Add a new file in the worktree
+        std::fs::write(wt_path.join("calculator.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+        let _ = Command::new("git").arg("-C").arg(&wt_path).args(["add", "."]).output();
+
+        // Check diff
+        let diff = GitService::get_worktree_diff(&wt_path).expect("get_worktree_diff should succeed on 0-commit repo");
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].path, "calculator.rs");
+        assert_eq!(diff.files[0].category, ChangeCategory::Added);
+
+        // Commit in worktree
+        let _ = Command::new("git").arg("-C").arg(&wt_path).args(["commit", "-m", "add calculator"]).output();
+
+        // Accept task changes into default unborn branch
+        let branch = Command::new("git")
+            .arg("-C")
+            .arg(&repo.path)
+            .args(["branch", "--show-current"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            })
+            .unwrap_or_else(|| "main".to_string());
+
+        let res = GitService::accept_task_changes(&wt_path, &branch)
+            .expect("accept_task_changes should succeed into unborn branch");
+        match res {
+            MergeResult::Success { commit_sha } => {
+                assert!(!commit_sha.is_empty());
+            }
+            MergeResult::Conflict { .. } => panic!("Expected clean merge into empty branch"),
+        }
+
+        // Verify file is now present in primary repo
+        assert!(repo.path.join("calculator.rs").exists());
     }
 }
