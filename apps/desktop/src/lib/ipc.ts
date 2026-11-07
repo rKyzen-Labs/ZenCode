@@ -381,7 +381,8 @@ function getMockResponse<T>(cmd: string, args: Record<string, unknown> = {}): T 
   }
 
   if (cmd === 'create_standard_gitignore') {
-    return `Added standard .gitignore for ${(args.project_type as string) || 'Rust'}` as unknown as T;
+    const pt = (args.projectType as string) || (args.project_type as string) || 'Rust';
+    return `Added standard .gitignore for ${pt}` as unknown as T;
   }
 
   return {} as T;
@@ -581,7 +582,9 @@ export async function previewAdvisoryContext(
   filePath?: string
 ): Promise<AdvisoryPreview> {
   return await safeInvoke<AdvisoryPreview>('preview_advisory_context', {
+    errorText,
     error_text: errorText,
+    filePath: filePath ?? null,
     file_path: filePath ?? null,
   });
 }
@@ -591,6 +594,7 @@ export async function submitAdvisoryRequest(
   confirmed: boolean
 ): Promise<string> {
   return await safeInvoke<string>('submit_advisory_request', {
+    previewId,
     preview_id: previewId,
     confirmed,
   });
@@ -601,7 +605,10 @@ export async function listWorkspaces(): Promise<WorkspaceRecord[]> {
 }
 
 export async function listChats(workspacePath: string): Promise<ChatSummaryRecord[]> {
-  return await safeInvoke<ChatSummaryRecord[]>('list_chats', { workspacePath });
+  return await safeInvoke<ChatSummaryRecord[]>('list_chats', {
+    workspacePath,
+    workspace_path: workspacePath,
+  });
 }
 
 export async function saveChat(chat: SaveChatRequest): Promise<void> {
@@ -609,11 +616,17 @@ export async function saveChat(chat: SaveChatRequest): Promise<void> {
 }
 
 export async function loadChat(taskId: string): Promise<ChatDetailRecord | null> {
-  return await safeInvoke<ChatDetailRecord | null>('load_chat', { taskId });
+  return await safeInvoke<ChatDetailRecord | null>('load_chat', {
+    taskId,
+    task_id: taskId,
+  });
 }
 
 export async function deleteChat(taskId: string): Promise<void> {
-  return await safeInvoke<void>('delete_chat', { taskId });
+  return await safeInvoke<void>('delete_chat', {
+    taskId,
+    task_id: taskId,
+  });
 }
 
 export async function initGitRepo(path: string): Promise<ProjectState> {
@@ -626,6 +639,7 @@ export async function createStandardGitignore(
 ): Promise<string> {
   return await safeInvoke<string>('create_standard_gitignore', {
     path,
+    projectType,
     project_type: projectType,
   });
 }
