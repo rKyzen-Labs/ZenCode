@@ -620,6 +620,17 @@ export async function submitAdvisoryRequest(
   });
 }
 
+export async function sendAdvisoryToWorker(
+  sessionId: string,
+  suggestion: string
+): Promise<void> {
+  return await safeInvoke<void>('send_advisory_to_worker', {
+    sessionId,
+    session_id: sessionId,
+    suggestion,
+  });
+}
+
 export async function listWorkspaces(): Promise<WorkspaceRecord[]> {
   return await safeInvoke<WorkspaceRecord[]>('list_workspaces');
 }

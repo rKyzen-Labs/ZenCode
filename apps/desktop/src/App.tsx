@@ -43,6 +43,7 @@ import {
   exportDiagnosticBundle,
   previewAdvisoryContext,
   submitAdvisoryRequest,
+  sendAdvisoryToWorker,
   subscribeToExecOutput,
   subscribeToExecFinished,
   listWorkspaces,
@@ -831,6 +832,20 @@ export default function App() {
   const [advisorySuggestion, setAdvisorySuggestion] = useState<string | null>(null);
 
   const handleTriggerAdvisory = async (errorText: string, filePath?: string) => {
+    // Check quota availability before attempting to generate preview or request advice
+    const isPinned = Boolean(quotaState?.pinned_model);
+    const relevantModels = isPinned
+      ? quotaState?.models.filter(m => m.model_id === quotaState.pinned_model)
+      : quotaState?.models;
+    const isQuotaExhausted = Boolean(
+      relevantModels && relevantModels.length > 0 && relevantModels.every(m => !m.is_available)
+    );
+    if (isQuotaExhausted) {
+      const reason = relevantModels?.find(m => !m.is_available)?.unavailability_reason || 'Rate limit capacity reached';
+      setError(`Cannot request Gemini advisory: Free-tier quota is currently exhausted (${reason}). Please wait for the quota window to reset.`);
+      return;
+    }
+
     try {
       setIsAdvisoryLoading(true);
       setError(null);
@@ -852,10 +867,27 @@ export default function App() {
       setAdvisorySuggestion(suggestion);
       setIsAdvisoryModalOpen(false);
       setAdvisoryPreview(null);
+
+      // Forward advisory guidance to the running local worker session
+      if (workerSessionId) {
+        await sendAdvisoryToWorker(workerSessionId, suggestion);
+      }
     } catch (err: any) {
       setError(typeof err === 'string' ? err : err.message || 'Failed to obtain Gemini advisory suggestion');
     } finally {
       setIsAdvisoryLoading(false);
+    }
+  };
+
+  const handleApplyAdvisoryToWorker = async (suggestionText: string) => {
+    if (!workerSessionId) return;
+    setIsLoading(true);
+    try {
+      await sendAdvisoryToWorker(workerSessionId, suggestionText);
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to dispatch advisory advice to worker');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -954,15 +986,28 @@ export default function App() {
       )}
 
       {/* Advisory Context Preview Modal (Step 6 Opt-In Escalation) */}
-      {advisoryPreview && (
-        <AdvisoryPreviewModal
-          preview={advisoryPreview}
-          isOpen={isAdvisoryModalOpen}
-          isLoading={isAdvisoryLoading}
-          onConfirm={handleConfirmAdvisory}
-          onClose={handleCloseAdvisory}
-        />
-      )}
+      {advisoryPreview && (() => {
+        const isPinned = Boolean(quotaState?.pinned_model);
+        const relevantModels = isPinned
+          ? quotaState?.models.filter(m => m.model_id === quotaState.pinned_model)
+          : quotaState?.models;
+        const isQuotaExhausted = Boolean(
+          relevantModels && relevantModels.length > 0 && relevantModels.every(m => !m.is_available)
+        );
+        const exhaustionReason = relevantModels?.find(m => !m.is_available)?.unavailability_reason || undefined;
+
+        return (
+          <AdvisoryPreviewModal
+            preview={advisoryPreview}
+            isOpen={isAdvisoryModalOpen}
+            isLoading={isAdvisoryLoading}
+            onConfirm={handleConfirmAdvisory}
+            onClose={handleCloseAdvisory}
+            isQuotaExhausted={isQuotaExhausted}
+            exhaustionReason={exhaustionReason}
+          />
+        );
+      })()}
 
       {/* Quota Dashboard Modal */}
       {isQuotaModalOpen && quotaState && (
@@ -1077,6 +1122,8 @@ export default function App() {
                   onExportDiagnostics={handleExportDiagnostics}
                   onTriggerAdvisory={handleTriggerAdvisory}
                   advisorySuggestion={advisorySuggestion}
+                  onApplyAdvisoryToWorker={handleApplyAdvisoryToWorker}
+                  quotaState={quotaState}
                   diagnosticNotice={diagnosticNotice}
                   isLoading={isLoading}
                   error={error}

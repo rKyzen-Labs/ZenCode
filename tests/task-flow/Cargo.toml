@@ -43,8 +43,13 @@ path = "src/bin/item7_orphan_recovery.rs"
 name = "test_qwen25_coder"
 path = "src/bin/test_qwen25_coder.rs"
 
+[[bin]]
+name = "test_advisory_e2e"
+path = "src/bin/test_advisory_e2e.rs"
+
 [dependencies]
 zencode-core = { path = "../../crates/zencode-core" }
+zencode-desktop = { path = "../../apps/desktop/src-tauri" }
 tokio = { version = "1.43", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

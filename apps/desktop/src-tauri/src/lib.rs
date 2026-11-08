@@ -42,6 +42,7 @@ pub fn run() {
             export_diagnostic_bundle,
             preview_advisory_context,
             submit_advisory_request,
+            send_advisory_to_worker,
             list_workspaces,
             list_chats,
             save_chat,

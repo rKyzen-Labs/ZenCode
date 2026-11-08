@@ -1524,6 +1524,32 @@ pub async fn submit_advisory_request(
     Ok(suggestion)
 }
 
+/// Forwards an approved Gemini advisory recommendation to the active local OpenCode worker session,
+/// prompting the local model (granite4.1:8b) to make a subsequent repair attempt.
+#[tauri::command]
+pub async fn send_advisory_to_worker(
+    session_id: String,
+    suggestion: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let supervisor_guard = state.engine_supervisor.lock().await;
+    let supervisor = supervisor_guard
+        .as_ref()
+        .ok_or_else(|| "OpenCode sidecar supervisor is not running.".to_string())?;
+
+    let prompt = format!(
+        "Gemini Advisory Advice received:\n\n{}\n\nPlease incorporate this advice, make the necessary corrections using local tools, and run verification again.",
+        suggestion
+    );
+
+    supervisor
+        .send_prompt(&session_id, &prompt, "granite4.1:8b")
+        .await
+        .map_err(|e| format!("Failed to dispatch advisory advice to worker: {e}"))?;
+
+    Ok(())
+}
+
 /// List recently opened workspaces from the local SQLite layer.
 #[tauri::command]
 pub async fn list_workspaces(

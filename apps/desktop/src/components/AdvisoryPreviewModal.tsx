@@ -8,6 +8,8 @@ interface AdvisoryPreviewModalProps {
   onConfirm: (previewId: string) => void;
   onCancel?: () => void;
   onClose?: () => void;
+  isQuotaExhausted?: boolean;
+  exhaustionReason?: string;
 }
 
 export const AdvisoryPreviewModal: React.FC<AdvisoryPreviewModalProps> = ({
@@ -17,6 +19,8 @@ export const AdvisoryPreviewModal: React.FC<AdvisoryPreviewModalProps> = ({
   onConfirm,
   onCancel,
   onClose,
+  isQuotaExhausted = false,
+  exhaustionReason,
 }) => {
   if (!isOpen || !preview) return null;
   const handleCancel = onCancel || onClose || (() => {});
@@ -69,6 +73,13 @@ export const AdvisoryPreviewModal: React.FC<AdvisoryPreviewModalProps> = ({
           <div>* Consumes free-tier quota (monitored by rate-limiter cascade).</div>
         </div>
 
+        {/* Quota Exhaustion Warning */}
+        {isQuotaExhausted && (
+          <div className="p-2.5 border border-danger/40 bg-danger/10 text-danger text-[11px] rounded">
+            Cannot submit: Gemini quota is currently exhausted ({exhaustionReason || 'rate limit reached'}). Please wait for the quota window to reset.
+          </div>
+        )}
+
         {/* Actions */}
         <div className="flex items-center justify-end gap-3 pt-2 border-t border-zinc-800">
           <button
@@ -82,10 +93,10 @@ export const AdvisoryPreviewModal: React.FC<AdvisoryPreviewModalProps> = ({
           <button
             type="button"
             onClick={() => onConfirm(preview.preview_id)}
-            disabled={isLoading}
+            disabled={isLoading || isQuotaExhausted}
             className="px-3 py-1.5 border border-zinc-200 bg-zinc-100 hover:bg-white text-zinc-950 font-bold transition-colors disabled:opacity-40"
           >
-            {isLoading ? '[consulting_gemini...]' : '[confirm_and_request_advice]'}
+            {isLoading ? '[consulting_gemini...]' : isQuotaExhausted ? '[quota_exhausted]' : '[confirm_and_request_advice]'}
           </button>
         </div>
       </div>

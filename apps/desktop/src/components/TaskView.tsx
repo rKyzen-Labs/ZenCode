@@ -9,6 +9,7 @@ import type {
   ExecutionResult,
   CommandRequest,
   ProjectState,
+  QuotaUpdateEvent,
 } from '../types';
 import { isTaskState } from '../types';
 import { TaskSummary } from './TaskSummary';
@@ -50,6 +51,8 @@ interface TaskViewProps {
   onExportDiagnostics?: () => void;
   onTriggerAdvisory?: (errorText: string, filePath?: string) => void;
   advisorySuggestion?: string | null;
+  onApplyAdvisoryToWorker?: (suggestion: string) => Promise<void> | void;
+  quotaState?: QuotaUpdateEvent | null;
   diagnosticNotice?: string | null;
   isLoading: boolean;
   error: string | null;
@@ -92,6 +95,8 @@ export const TaskView: FC<TaskViewProps> = ({
   onExportDiagnostics: _onExportDiagnostics,
   onTriggerAdvisory,
   advisorySuggestion,
+  onApplyAdvisoryToWorker,
+  quotaState,
   diagnosticNotice,
   isLoading,
   error,
@@ -677,53 +682,92 @@ export const TaskView: FC<TaskViewProps> = ({
       )}
 
       {/* 7. ADVISORY 5TH-FAILURE CARD (Opt-In Escalation) */}
-      {isCappedAt5Failures && onTriggerAdvisory && lastFailedRun && (
-        <div className="w-full max-w-2xl rounded-xl border border-zinc-700 bg-[#121214] p-4 space-y-3 font-sans shadow-md">
-          <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
-            <span className="font-semibold text-zinc-200 text-xs">
-              Local Repair Loop Capped (5 Failures)
-            </span>
-            <span className="text-[10px] font-mono text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-700">
-              user opt-in required
-            </span>
-          </div>
+      {isCappedAt5Failures && onTriggerAdvisory && lastFailedRun && (() => {
+        const isPinned = Boolean(quotaState?.pinned_model);
+        const relevantModels = isPinned
+          ? quotaState?.models.filter(m => m.model_id === quotaState.pinned_model)
+          : quotaState?.models;
+        const isQuotaExhausted = Boolean(
+          relevantModels && relevantModels.length > 0 && relevantModels.every(m => !m.is_available)
+        );
+        const exhaustionReason = relevantModels?.find(m => !m.is_available)?.unavailability_reason || 'Rate limit capacity reached';
 
-          <p className="text-zinc-300 text-xs leading-relaxed">
-            The local worker has attempted 5 consecutive automatic repairs on this build/test error and paused to prevent loop exhaustion.
-          </p>
-
-          <pre className="p-2.5 bg-zinc-950 border border-zinc-800 text-danger font-mono text-[10px] rounded max-h-28 overflow-y-auto">
-            {lastFailedRun.stderr_tail.join('\n') || lastFailedRun.stdout_tail.join('\n') || 'Command exit failure'}
-          </pre>
-
-          <div className="flex items-center justify-between pt-1">
-            <span className="text-[10px] text-zinc-400">
-              Advisory only &bull; counts against Gemini quota
-            </span>
-            <button
-              type="button"
-              onClick={() =>
-                onTriggerAdvisory(
-                  lastFailedRun.stderr_tail.join('\n') || lastFailedRun.stdout_tail.join('\n') || 'Build error',
-                  lastFailedRun.cwd
-                )
-              }
-              className="px-3 py-1.5 rounded-lg bg-zinc-100 hover:bg-white text-zinc-950 font-semibold text-xs transition-colors shadow-sm"
-            >
-              Ask Gemini for Advice
-            </button>
-          </div>
-
-          {advisorySuggestion && (
-            <div className="mt-3 p-3 bg-zinc-900 border border-zinc-800 rounded text-zinc-200 text-xs leading-relaxed font-sans space-y-1">
-              <div className="text-[10px] text-zinc-400 uppercase font-semibold font-mono">
-                Gemini Advisory Suggestion:
-              </div>
-              <div className="whitespace-pre-wrap">{advisorySuggestion}</div>
+        return (
+          <div className="w-full max-w-2xl rounded-xl border border-zinc-700 bg-[#121214] p-4 space-y-3 font-sans shadow-md">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
+              <span className="font-semibold text-zinc-200 text-xs">
+                Local Repair Loop Capped (5 Failures)
+              </span>
+              <span className="text-[10px] font-mono text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-700">
+                user opt-in required
+              </span>
             </div>
-          )}
-        </div>
-      )}
+
+            <p className="text-zinc-300 text-xs leading-relaxed">
+              The local worker has attempted 5 consecutive automatic repairs on this build/test error and paused to prevent loop exhaustion.
+            </p>
+
+            <pre className="p-2.5 bg-zinc-950 border border-zinc-800 text-danger font-mono text-[10px] rounded max-h-28 overflow-y-auto">
+              {lastFailedRun.stderr_tail.join('\n') || lastFailedRun.stdout_tail.join('\n') || 'Command exit failure'}
+            </pre>
+
+            <div className="flex items-center justify-between pt-1">
+              <span className="text-[10px] text-zinc-400">
+                Advisory only &bull; counts against Gemini quota
+              </span>
+              {isQuotaExhausted ? (
+                <div className="flex flex-col items-end gap-1">
+                  <button
+                    type="button"
+                    disabled
+                    className="px-3 py-1.5 rounded-lg border border-border bg-surface text-text-muted font-medium text-xs cursor-not-allowed opacity-50"
+                  >
+                    Ask Gemini for Advice (Quota Exhausted)
+                  </button>
+                  <span className="text-[10px] text-danger font-mono">
+                    Gemini quota exhausted ({exhaustionReason}). Advisory consultation unavailable until reset.
+                  </span>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onTriggerAdvisory(
+                      lastFailedRun.stderr_tail.join('\n') || lastFailedRun.stdout_tail.join('\n') || 'Build error',
+                      lastFailedRun.cwd
+                    )
+                  }
+                  disabled={isLoading}
+                  className="px-3 py-1.5 rounded-lg bg-zinc-100 hover:bg-white text-zinc-950 font-semibold text-xs transition-colors shadow-sm disabled:opacity-40"
+                >
+                  Ask Gemini for Advice
+                </button>
+              )}
+            </div>
+
+            {advisorySuggestion && (
+              <div className="mt-3 p-3 bg-zinc-900 border border-zinc-800 rounded text-zinc-200 text-xs leading-relaxed font-sans space-y-3">
+                <div className="text-[10px] text-zinc-400 uppercase font-semibold font-mono">
+                  Gemini Advisory Suggestion:
+                </div>
+                <div className="whitespace-pre-wrap">{advisorySuggestion}</div>
+                {onApplyAdvisoryToWorker && (
+                  <div className="flex justify-end pt-2 border-t border-zinc-800">
+                    <button
+                      type="button"
+                      onClick={() => onApplyAdvisoryToWorker(advisorySuggestion)}
+                      disabled={isLoading}
+                      className="px-3 py-1.5 rounded-lg bg-zinc-100 hover:bg-white text-zinc-950 font-medium text-xs transition-colors shadow-sm disabled:opacity-40"
+                    >
+                      Apply Advice & Retry Attempt
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Bottom padding anchor for auto-scroll */}
       <div ref={scrollEndRef} className="h-4" />
