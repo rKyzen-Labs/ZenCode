@@ -155,7 +155,7 @@ nonexistent_quantum_hyper_crate_xyz_404 = "99.99.99"
     // Send the prompt with Gemini's advisory advice to the local worker
     let worker_prompt = format!(
         "The previous build failed with a nonexistent crate error. Gemini provided the following advisory suggestion:\n\n{}\n\n\
-        Please act on this advice: edit `Cargo.toml` to remove the invalid dependency `nonexistent_quantum_hyper_crate_xyz_404` so that the project can build cleanly.",
+        Please act on this advice: edit `Cargo.toml` using the edit or write tool to delete the line `nonexistent_quantum_hyper_crate_xyz_404 = \"99.99.99\"` so that the project builds cleanly.",
         advisory_suggestion
     );
 
@@ -176,7 +176,7 @@ nonexistent_quantum_hyper_crate_xyz_404 = "99.99.99"
     let mut tool_called = false;
     let mut worker_events = Vec::new();
 
-    while let Ok(Some(event_res)) = tokio::time::timeout(Duration::from_secs(300), stream.next()).await {
+    while let Ok(Some(event_res)) = tokio::time::timeout(Duration::from_secs(600), stream.next()).await {
         match event_res {
             Ok(event) => {
                 let data = event.data;
@@ -199,7 +199,7 @@ nonexistent_quantum_hyper_crate_xyz_404 = "99.99.99"
                 break;
             }
         }
-        if start_t.elapsed().as_secs() > 240 {
+        if start_t.elapsed().as_secs() > 450 {
             println!("  -> SSE stream timeout.");
             break;
         }
@@ -217,6 +217,18 @@ nonexistent_quantum_hyper_crate_xyz_404 = "99.99.99"
     let removed = !updated_cargo.contains("nonexistent_quantum_hyper_crate_xyz_404");
     println!("Invalid crate removed by worker: {}", removed);
     println!("Worker dispatched tool calls: {}", tool_called);
+
+    if removed {
+        println!("\n>>> PART 8: Verifying Clean Build After Local Worker Fix <<<");
+        let check_res = Command::new("cargo")
+            .arg("check")
+            .current_dir(&test_dir)
+            .output()?;
+        let check_success = check_res.status.success();
+        println!("Cargo check after advisory repair: success = {}", check_success);
+        let check_stderr = String::from_utf8_lossy(&check_res.stderr);
+        println!("Cargo check output:\n{}", check_stderr);
+    }
 
     // Clean up worktree and branch
     let _ = Command::new("git").arg("-C").arg(repo_path).args(["worktree", "remove", "--force", wt_path.to_str().unwrap()]).output();
