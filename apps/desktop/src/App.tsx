@@ -792,7 +792,10 @@ export default function App() {
   // Handler: Stop Worker Session
   const handleStopWorkerSession = async (sessionId: string) => {
     try {
-      await stopWorkerSession(sessionId);
+      const sid = workerSessionId || sessionId;
+      if (sid) {
+        await stopWorkerSession(sid);
+      }
       setSystemStatus((prev) =>
         prev ? { ...prev, task_state: 'Idle' } : null
       );

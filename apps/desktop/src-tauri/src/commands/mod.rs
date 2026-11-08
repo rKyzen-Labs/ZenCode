@@ -542,6 +542,66 @@ pub async fn set_pinned_model(
     Ok(event)
 }
 
+/// Determines if an OpenCode SSE event represents a completion signal for the active session.
+pub fn parse_worker_sse_event(data: &str, current_session_id: &str) -> (String, bool) {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+        let event_type = val.get("type").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
+        let mut completed = false;
+
+        // Check if this event targets the current session
+        let event_session_id = val.get("properties")
+            .and_then(|p| p.get("sessionID").or_else(|| p.get("sessionId")))
+            .and_then(|s| s.as_str());
+        let matches_session = event_session_id.map(|sid| sid == current_session_id).unwrap_or(true);
+
+        if matches_session {
+            // 1. Session status transitions
+            if event_type == "session.status" {
+                if let Some(status_type) = val.get("properties")
+                    .and_then(|p| p.get("status"))
+                    .and_then(|s| s.get("type"))
+                    .and_then(|st| st.as_str())
+                {
+                    if status_type == "idle" {
+                        completed = true;
+                    }
+                }
+            } else if event_type == "session.idle" {
+                completed = true;
+            }
+
+            // 2. OpenCode message part step-finish with stop/end_turn/complete
+            if let Some(part) = val.get("properties").and_then(|p| p.get("part")) {
+                let part_type = part.get("type").and_then(|s| s.as_str()).unwrap_or_default();
+                let reason = part.get("reason").and_then(|s| s.as_str()).unwrap_or_default();
+                if part_type == "step-finish" && (reason == "stop" || reason == "end_turn" || reason == "complete") {
+                    completed = true;
+                }
+            }
+
+            // 3. OpenCode message.updated info.finish with stop/end_turn/complete
+            if let Some(info) = val.get("properties").and_then(|p| p.get("info")) {
+                if let Some(finish) = info.get("finish").and_then(|s| s.as_str()) {
+                    if finish == "stop" || finish == "end_turn" || finish == "complete" {
+                        completed = true;
+                    }
+                }
+            }
+
+            // 4. Fallback raw string markers
+            if !completed && (data.contains("\"reason\":\"stop\"") || data.contains("\"finish\":\"stop\"") || data.contains("session.idle")) {
+                completed = true;
+            }
+        }
+
+        (event_type, completed)
+    } else {
+        let completed = (data.contains("\"reason\":\"stop\"") || data.contains("\"finish\":\"stop\"") || data.contains("session.idle"))
+            && data.contains(current_session_id);
+        ("unknown".to_string(), completed)
+    }
+}
+
 /// Starts an OpenCode worker session restricted strictly to local Ollama.
 #[tauri::command]
 pub async fn start_worker_session(
@@ -717,8 +777,6 @@ pub async fn start_worker_session(
             .await
         {
             let mut stream = response.bytes_stream().eventsource();
-            let mut was_busy = false;
-
             while let Some(event_result) = stream.next().await {
                 if let Ok(event) = event_result {
                     let now = SystemTime::now()
@@ -726,25 +784,8 @@ pub async fn start_worker_session(
                         .unwrap_or_default()
                         .as_millis() as u64;
 
-                    // Extract the event type from the JSON payload if present
-                    let (event_type, is_idle_transition) = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                        let t = val.get("type").and_then(|s| s.as_str()).unwrap_or(&event.event).to_string();
-                        let mut idle = false;
-                        if t == "session.status" {
-                            if let Some(status_type) = val.get("properties").and_then(|p| p.get("status")).and_then(|s| s.get("type")).and_then(|st| st.as_str()) {
-                                if status_type == "busy" {
-                                    was_busy = true;
-                                } else if status_type == "idle" && was_busy {
-                                    idle = true;
-                                }
-                            }
-                        } else if t == "session.idle" && was_busy {
-                            idle = true;
-                        }
-                        (t, idle)
-                    } else {
-                        (event.event.clone(), false)
-                    };
+                    // Extract the event type and evaluate completion signals
+                    let (event_type, is_idle_transition) = parse_worker_sse_event(&event.data, &ses_id_clone);
 
                     let payload = WorkerEventPayload {
                         session_id: ses_id_clone.clone(),
@@ -755,31 +796,49 @@ pub async fn start_worker_session(
                     let _ = app_handle_clone.emit("worker:message", &payload);
 
                     if is_idle_transition {
-                        // Worker execution finished: compute complete Git diff inventory
-                        match GitService::get_worktree_diff(Path::new(&wt_path_clone)) {
-                            Ok(inventory) => {
-                                {
-                                    let mut inv_map = inventories_arc.lock().await;
-                                    inv_map.insert(task_id_clone.clone(), inventory.clone());
-                                }
-                                // Emit review:inventory_ready event with full change inventory
-                                let _ = app_handle_clone.emit("review:inventory_ready", &inventory);
+                        let mut task = task_state_arc.lock().await;
+                        if matches!(*task, TaskState::WorkerRunning { .. }) {
+                            // Worker execution finished: compute complete Git diff inventory
+                            match GitService::get_worktree_diff(Path::new(&wt_path_clone)) {
+                                Ok(inventory) => {
+                                    {
+                                        let mut inv_map = inventories_arc.lock().await;
+                                        inv_map.insert(task_id_clone.clone(), inventory.clone());
+                                    }
+                                    // Emit review:inventory_ready event with full change inventory
+                                    let _ = app_handle_clone.emit("review:inventory_ready", &inventory);
 
-                                {
-                                    let mut task = task_state_arc.lock().await;
                                     *task = TaskState::AwaitingReview;
+                                    let _ = app_handle_clone.emit("worker:status", &TaskState::AwaitingReview);
                                 }
-                                let _ = app_handle_clone.emit("worker:status", &TaskState::AwaitingReview);
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to generate diff inventory: {e}");
-                                {
-                                    let mut task = task_state_arc.lock().await;
+                                Err(e) => {
+                                    eprintln!("Failed to generate diff inventory: {e}");
                                     *task = TaskState::Complete;
+                                    let _ = app_handle_clone.emit("worker:status", &TaskState::Complete);
                                 }
-                                let _ = app_handle_clone.emit("worker:status", &TaskState::Complete);
                             }
                         }
+                    }
+                }
+            }
+
+            // Stream closed safety net: if still WorkerRunning when stream ends, transition cleanly
+            let mut task = task_state_arc.lock().await;
+            if matches!(*task, TaskState::WorkerRunning { .. }) {
+                match GitService::get_worktree_diff(Path::new(&wt_path_clone)) {
+                    Ok(inventory) => {
+                        {
+                            let mut inv_map = inventories_arc.lock().await;
+                            inv_map.insert(task_id_clone.clone(), inventory.clone());
+                        }
+                        let _ = app_handle_clone.emit("review:inventory_ready", &inventory);
+                        *task = TaskState::AwaitingReview;
+                        let _ = app_handle_clone.emit("worker:status", &TaskState::AwaitingReview);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to generate diff inventory on stream end: {e}");
+                        *task = TaskState::Complete;
+                        let _ = app_handle_clone.emit("worker:status", &TaskState::Complete);
                     }
                 }
             }
@@ -1530,12 +1589,27 @@ pub async fn submit_advisory_request(
 pub async fn send_advisory_to_worker(
     session_id: String,
     suggestion: String,
+    app_handle: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let supervisor_guard = state.engine_supervisor.lock().await;
     let supervisor = supervisor_guard
         .as_ref()
         .ok_or_else(|| "OpenCode sidecar supervisor is not running.".to_string())?;
+
+    // Update state to WorkerRunning so UI and backend reflect the new attempt
+    {
+        let mut task = state.task_state.lock().await;
+        *task = TaskState::WorkerRunning {
+            session_id: session_id.clone(),
+        };
+    }
+    let _ = app_handle.emit(
+        "worker:status",
+        &TaskState::WorkerRunning {
+            session_id: session_id.clone(),
+        },
+    );
 
     let prompt = format!(
         "Gemini Advisory Advice received:\n\n{}\n\nPlease incorporate this advice, make the necessary corrections using local tools, and run verification again.",
@@ -1891,5 +1965,40 @@ mod tests {
         assert!(initialized.has_gitignore, ".gitignore must be detected as present now");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_parse_worker_sse_event_completion_detection() {
+        let sid = "ses_test_123";
+
+        // 1. Tool call turn must NOT signal completion
+        let tool_call_data = r#"{"id":"evt_1","type":"message.part.updated","properties":{"sessionID":"ses_test_123","part":{"id":"p1","reason":"tool-calls","type":"step-finish"}}}"#;
+        let (t1, c1) = parse_worker_sse_event(tool_call_data, sid);
+        assert_eq!(t1, "message.part.updated");
+        assert!(!c1, "Tool call turn must NOT trigger completion");
+
+        // 2. Final response turn with reason stop MUST signal completion
+        let stop_data = r#"{"id":"evt_2","type":"message.part.updated","properties":{"sessionID":"ses_test_123","part":{"id":"p2","reason":"stop","type":"step-finish"}}}"#;
+        let (t2, c2) = parse_worker_sse_event(stop_data, sid);
+        assert_eq!(t2, "message.part.updated");
+        assert!(c2, "step-finish with reason: stop MUST trigger completion");
+
+        // 3. message.updated with finish stop MUST signal completion
+        let finish_data = r#"{"id":"evt_3","type":"message.updated","properties":{"sessionID":"ses_test_123","info":{"finish":"stop"}}}"#;
+        let (t3, c3) = parse_worker_sse_event(finish_data, sid);
+        assert_eq!(t3, "message.updated");
+        assert!(c3, "info.finish: stop MUST trigger completion");
+
+        // 4. Session status idle MUST signal completion
+        let idle_data = r#"{"id":"evt_4","type":"session.status","properties":{"sessionID":"ses_test_123","status":{"type":"idle"}}}"#;
+        let (t4, c4) = parse_worker_sse_event(idle_data, sid);
+        assert_eq!(t4, "session.status");
+        assert!(c4, "session.status idle MUST trigger completion");
+
+        // 5. Different session stop event must NOT complete this session
+        let other_session_data = r#"{"id":"evt_5","type":"message.part.updated","properties":{"sessionID":"other_session_999","part":{"reason":"stop","type":"step-finish"}}}"#;
+        let (t5, c5) = parse_worker_sse_event(other_session_data, sid);
+        assert_eq!(t5, "message.part.updated");
+        assert!(!c5, "Different session stop event must NOT complete active session");
     }
 }

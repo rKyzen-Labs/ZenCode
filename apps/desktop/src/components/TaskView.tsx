@@ -86,7 +86,7 @@ export const TaskView: FC<TaskViewProps> = ({
   onDenyCommand,
   onConfirmPlanRequest,
   onStartWorkerSession,
-  onStopWorkerSession: _onStopWorkerSession,
+  onStopWorkerSession,
   onAcceptTask,
   onRejectTask,
   onResetTask: _onResetTask,
@@ -512,15 +512,26 @@ export const TaskView: FC<TaskViewProps> = ({
               <span className="font-semibold text-zinc-200">
                 {isWorkerRunning ? 'Worker is executing tasks...' : 'Worker execution finished'}
               </span>
-              <span
-                className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
-                  isWorkerRunning
-                    ? 'text-zinc-200 bg-zinc-800 border-zinc-700'
-                    : 'text-zinc-300 bg-zinc-900 border-zinc-800'
-                }`}
-              >
-                {isWorkerRunning ? 'worktree active' : 'completed'}
-              </span>
+              <div className="flex items-center gap-2">
+                {isWorkerRunning && onStopWorkerSession && (
+                  <button
+                    type="button"
+                    onClick={() => onStopWorkerSession(activeTaskId || '')}
+                    className="px-2 py-0.5 rounded border border-danger/60 hover:bg-danger/20 text-danger text-[10px] font-mono transition-colors"
+                  >
+                    Stop
+                  </button>
+                )}
+                <span
+                  className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                    isWorkerRunning
+                      ? 'text-zinc-200 bg-zinc-800 border-zinc-700'
+                      : 'text-zinc-300 bg-zinc-900 border-zinc-800'
+                  }`}
+                >
+                  {isWorkerRunning ? 'worktree active' : 'completed'}
+                </span>
+              </div>
             </div>
 
             {/* Collapsible Agent Notes */}
