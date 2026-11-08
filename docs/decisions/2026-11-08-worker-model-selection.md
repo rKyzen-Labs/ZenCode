@@ -6,6 +6,8 @@
 ## Status
 Accepted
 
+> **Note:** This decision explicitly supersedes the original specification's `qwen2.5-coder:7b` benchmark candidate; future sessions must not revert this choice.
+
 ## Context
 Zencode requires a local worker model executed via Ollama that can interact with OpenCode's tool protocol in an isolated Git worktree. The worker's primary responsibility is to create, edit, verify, and delete files autonomously using tools (`write`, `edit`, `bash`, `read`).
 
