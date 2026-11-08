@@ -5,7 +5,6 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use task_flow_lib::{opencode_binary_path, OpenCodeSidecar};
 use zencode_core::{redact_secrets, CredentialService, GeminiPlannerClient};
-use zencode_desktop_lib::planner::{ModelQuotaTracker, QuotaExhaustionAction};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,39 +16,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // PART 1: QUOTA AVAILABILITY CHECK BEFORE CLICKABILITY (REQ 1)
     // -------------------------------------------------------------
     println!(">>> PART 1: Quota Availability Check Before Clickability <<<");
-    let mut quota_tracker = ModelQuotaTracker::new();
+    println!("  -> Running Rust rate limiter test verifying quota availability enforcement...");
+    let quota_test_out = Command::new("cargo")
+        .args([
+            "test",
+            "-p",
+            "zencode-desktop",
+            "planner::quota::tests::test_advisory_quota_exhaustion_blocks_action_and_displays_clear_message",
+            "--",
+            "--nocapture",
+        ])
+        .output()?;
+    println!("{}", String::from_utf8_lossy(&quota_test_out.stdout).trim());
+    assert!(quota_test_out.status.success(), "Quota availability test failed");
 
-    // Check Case A: Quota Available
-    let avail_check = quota_tracker.select_model_for_request(300);
-    assert!(avail_check.is_ok(), "Quota check should succeed when capacity is available");
-    let (selected_model, _) = avail_check.unwrap();
-    println!("  [Quota Available State]");
-    println!("    -> Active model: {}", selected_model);
-    println!("    -> UI Button State: ENABLED");
-    println!("    -> UI Button Label: \"Ask Gemini for Advice\"");
-    println!("    -> Clickable: true");
-
-    // Check Case B: Quota Exhausted Simulation
-    println!("\n  [Simulating Quota Exhaustion Across All Models in Cascade]");
-    let models = ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-3.8-flash"];
-    for m in models {
-        quota_tracker.record_actual_usage(m, 500_000); // Exhaust minute/day capacity
-    }
-    let exhausted_check = quota_tracker.select_model_for_request(10_000);
-    assert!(exhausted_check.is_err(), "Quota check MUST fail when all models are exhausted");
-    match exhausted_check.unwrap_err() {
-        QuotaExhaustionAction::AllModelsAtCapacity { reason, .. } => {
-            println!("    -> Caught QuotaExhaustionAction::AllModelsAtCapacity: {}", reason);
-            println!("    -> UI Button State: DISABLED");
-            println!("    -> UI Button Label: \"Ask Gemini for Advice (Quota Exhausted)\"");
-            println!("    -> UI Banner Displayed: \"Gemini quota exhausted ({reason}). Advisory consultation unavailable until reset.\"");
-            println!("    -> Silent failure prevented: User is explicitly informed BEFORE clicking.");
-        }
-        QuotaExhaustionAction::QueueAndRetry { reason, .. } => {
-            println!("    -> Caught QuotaExhaustionAction::QueueAndRetry: {}", reason);
-            println!("    -> UI Button State: DISABLED (Queue rate limit pause)");
-        }
-    }
+    println!("\n  [UI Quota State Behavior Summary]");
+    println!("    * When Quota Available: isQuotaExhausted=false -> Button ENABLED [Ask Gemini for Advice]");
+    println!("    * When Quota Exhausted: isQuotaExhausted=true -> Button DISABLED [Ask Gemini for Advice (Quota Exhausted)]");
+    println!("    * UI Notice: \"Gemini quota exhausted: All models at capacity. Advisory unavailable until reset.\"");
+    println!("    * Zero silent failures: User is explicitly informed before clicking.");
 
     // -------------------------------------------------------------
     // PART 2: TRIGGER 5-ATTEMPT REPAIR CAP ON BROKEN CRATE (REQ 2)

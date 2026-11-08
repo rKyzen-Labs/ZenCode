@@ -703,4 +703,42 @@ mod tests {
         assert_eq!(m2, "gemini-3.5-flash-lite");
         assert_eq!(m3, "gemini-3.5-flash-lite");
     }
+
+    #[test]
+    fn test_advisory_quota_exhaustion_blocks_action_and_displays_clear_message() {
+        let mut tracker = ModelQuotaTracker::new();
+        let now_ms = now_millis();
+
+        // 1. Initial State: Quota is available -> button is active
+        let initial_check = tracker.select_model_for_request(200);
+        assert!(initial_check.is_ok());
+        let (model, _) = initial_check.unwrap();
+        assert_eq!(model, MODEL_PRIMARY);
+
+        // 2. Saturate all models in cascade to simulate quota exhaustion
+        for _ in 0..15 {
+            tracker.trackers.get_mut(MODEL_PRIMARY).unwrap().record_actual_usage(now_ms, 100);
+            tracker.trackers.get_mut(MODEL_SECONDARY).unwrap().record_actual_usage(now_ms, 100);
+        }
+        for _ in 0..30 {
+            tracker.trackers.get_mut(MODEL_TERTIARY).unwrap().record_actual_usage(now_ms, 100);
+        }
+
+        // 3. Selection must be rejected with QuotaExhaustionAction
+        let exhausted_res = tracker.select_model_for_request(200);
+        assert!(exhausted_res.is_err());
+        match exhausted_res.unwrap_err() {
+            QuotaExhaustionAction::AllModelsAtCapacity { reason, .. } => {
+                assert!(reason.contains("capacity") || reason.contains("RPM") || reason.contains("TPM") || reason.contains("RPD"));
+            }
+            QuotaExhaustionAction::QueueAndRetry { reason, .. } => {
+                assert!(!reason.is_empty());
+            }
+        }
+
+        // 4. Projection to UI QuotaUpdateEvent: all models project is_available: false
+        let update_event = tracker.to_quota_update_event(MODEL_PRIMARY);
+        let all_unavailable = update_event.models.iter().all(|m| !m.is_available);
+        assert!(all_unavailable, "All models must project is_available: false when saturated");
+    }
 }
