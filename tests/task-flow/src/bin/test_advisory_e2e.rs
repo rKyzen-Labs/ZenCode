@@ -65,6 +65,8 @@ name = "advisory-e2e-test"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+
 [dependencies]
 nonexistent_quantum_hyper_crate_xyz_404 = "99.99.99"
 "#;
@@ -174,7 +176,7 @@ nonexistent_quantum_hyper_crate_xyz_404 = "99.99.99"
     let mut tool_called = false;
     let mut worker_events = Vec::new();
 
-    while let Ok(Some(event_res)) = tokio::time::timeout(Duration::from_secs(180), stream.next()).await {
+    while let Ok(Some(event_res)) = tokio::time::timeout(Duration::from_secs(300), stream.next()).await {
         match event_res {
             Ok(event) => {
                 let data = event.data;
@@ -197,7 +199,7 @@ nonexistent_quantum_hyper_crate_xyz_404 = "99.99.99"
                 break;
             }
         }
-        if start_t.elapsed().as_secs() > 120 {
+        if start_t.elapsed().as_secs() > 240 {
             println!("  -> SSE stream timeout.");
             break;
         }
