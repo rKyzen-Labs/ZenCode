@@ -101,6 +101,7 @@ export default function App() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [dirtyFiles, setDirtyFiles] = useState<UncommittedFile[] | null>(null);
   const [pendingPlanForDirty, setPendingPlanForDirty] = useState<ZencodePlan | null>(null);
+  const [pendingAcceptTaskId, setPendingAcceptTaskId] = useState<string | null>(null);
   const [orphanedWorktrees, setOrphanedWorktrees] = useState<OrphanWorktree[]>([]);
 
   // Automatically open right panel when inventory is ready with file changes
@@ -586,7 +587,11 @@ export default function App() {
     try {
       await stashPrimaryChanges(msg);
       setDirtyFiles(null);
-      if (pendingPlanForDirty) {
+      if (pendingAcceptTaskId) {
+        const tid = pendingAcceptTaskId;
+        setPendingAcceptTaskId(null);
+        await handleAcceptTask(tid, false);
+      } else if (pendingPlanForDirty) {
         const p = pendingPlanForDirty;
         setPendingPlanForDirty(null);
         await handleStartWorkerSession(p, undefined, false);
@@ -605,7 +610,11 @@ export default function App() {
     try {
       await commitPrimaryChanges(msg);
       setDirtyFiles(null);
-      if (pendingPlanForDirty) {
+      if (pendingAcceptTaskId) {
+        const tid = pendingAcceptTaskId;
+        setPendingAcceptTaskId(null);
+        await handleAcceptTask(tid, false);
+      } else if (pendingPlanForDirty) {
         const p = pendingPlanForDirty;
         setPendingPlanForDirty(null);
         await handleStartWorkerSession(p, undefined, false);
@@ -620,7 +629,11 @@ export default function App() {
   // Dirty Tree Resolution: Acknowledge & proceed anyway
   const handleProceedAnywayDirty = async () => {
     setDirtyFiles(null);
-    if (pendingPlanForDirty) {
+    if (pendingAcceptTaskId) {
+      const tid = pendingAcceptTaskId;
+      setPendingAcceptTaskId(null);
+      await handleAcceptTask(tid, true);
+    } else if (pendingPlanForDirty) {
       const p = pendingPlanForDirty;
       setPendingPlanForDirty(null);
       await handleStartWorkerSession(p, undefined, true);
@@ -630,13 +643,14 @@ export default function App() {
   const handleCancelDirty = () => {
     setDirtyFiles(null);
     setPendingPlanForDirty(null);
+    setPendingAcceptTaskId(null);
   };
 
   // Handler: Accept Task Changes
-  const handleAcceptTask = async (tid: string): Promise<MergeResult> => {
+  const handleAcceptTask = async (tid: string, acknowledgeDirty?: boolean): Promise<MergeResult> => {
     setIsLoading(true);
     try {
-      const res = await acceptTask(tid);
+      const res = await acceptTask(tid, acknowledgeDirty);
       if ('Success' in res || (res as any).status === 'Success') {
         if (project) {
           await saveChat({
@@ -659,6 +673,12 @@ export default function App() {
         await refreshStatus();
       }
       return res;
+    } catch (err: any) {
+      if (err?.error_type === 'DIRTY_PRIMARY_TREE' || err?.uncommitted_files) {
+        setDirtyFiles(err.uncommitted_files || []);
+        setPendingAcceptTaskId(tid);
+      }
+      throw err;
     } finally {
       setIsLoading(false);
     }

@@ -831,14 +831,22 @@ pub async fn get_change_inventory(
 #[tauri::command]
 pub async fn accept_task(
     task_id: String,
+    acknowledge_dirty: Option<bool>,
     app_handle: AppHandle,
     state: State<'_, AppState>,
-) -> Result<MergeResult, String> {
+) -> Result<MergeResult, WorkerStartError> {
     let (worktree_path, target_branch) = {
         let active_proj = state.active_project.lock().await;
-        let proj = active_proj
-            .as_ref()
-            .ok_or_else(|| "No active project open".to_string())?;
+        let proj = match active_proj.as_ref() {
+            Some(p) => p,
+            None => {
+                return Err(WorkerStartError {
+                    error_type: "NO_ACTIVE_PROJECT".into(),
+                    message: "No active project open".into(),
+                    uncommitted_files: None,
+                });
+            }
+        };
 
         let target_br = proj
             .current_branch
@@ -863,8 +871,29 @@ pub async fn accept_task(
         (wt_path, target_br)
     };
 
-    let merge_result = GitService::accept_task_changes(Path::new(&worktree_path), &target_branch)
-        .map_err(|e| format!("Failed to accept task changes: {e}"))?;
+    let ack = acknowledge_dirty.unwrap_or(false);
+    let merge_result = match GitService::accept_task_changes(Path::new(&worktree_path), &target_branch, ack) {
+        Ok(res) => res,
+        Err(GitError::DirtyPrimaryTree {
+            count,
+            uncommitted_files,
+        }) => {
+            return Err(WorkerStartError {
+                error_type: "DIRTY_PRIMARY_TREE".into(),
+                message: format!(
+                    "Primary working tree is dirty with {count} uncommitted file(s). Explicit acknowledgment required."
+                ),
+                uncommitted_files: Some(uncommitted_files),
+            });
+        }
+        Err(e) => {
+            return Err(WorkerStartError {
+                error_type: "ACCEPT_TASK_FAILED".into(),
+                message: format!("Failed to accept task changes: {e}"),
+                uncommitted_files: None,
+            });
+        }
+    };
 
     match &merge_result {
         MergeResult::Success { .. } => {

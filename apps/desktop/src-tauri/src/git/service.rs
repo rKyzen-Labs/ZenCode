@@ -490,11 +490,12 @@ impl GitService {
         })
     }
 
-    /// 5. accept_task_changes(worktree_path, target_branch) — merges or fast-forwards the task branch
+    /// 5. accept_task_changes(worktree_path, target_branch, acknowledge_dirty) — merges or fast-forwards the task branch
     /// into the target branch after user confirmation. Handles conflicts by stopping and showing options.
     pub fn accept_task_changes(
         worktree_path: &Path,
         target_branch: &str,
+        acknowledge_dirty: bool,
     ) -> Result<MergeResult, GitError> {
         let clean_wt = clean_path_for_git(worktree_path);
         if !clean_wt.exists() {
@@ -523,9 +524,9 @@ impl GitService {
             )?;
         }
 
-        // Primary working tree must be clean before merge
+        // Primary working tree must be clean before merge unless acknowledged
         let primary_status = Self::get_primary_tree_status(&repo_path)?;
-        if !primary_status.is_clean {
+        if !primary_status.is_clean && !acknowledge_dirty {
             return Err(GitError::DirtyPrimaryTree {
                 count: primary_status.uncommitted_files.len(),
                 uncommitted_files: primary_status.uncommitted_files,
@@ -1046,7 +1047,7 @@ mod tests {
         std::fs::write(wt_path.join("feature.rs"), "pub fn feature() {}\n").unwrap();
 
         // Accept task changes
-        let merge_res = GitService::accept_task_changes(&wt_path, "main").unwrap();
+        let merge_res = GitService::accept_task_changes(&wt_path, "main", false).unwrap();
         match merge_res {
             MergeResult::Success { commit_sha } => {
                 assert!(!commit_sha.is_empty());
@@ -1121,7 +1122,7 @@ mod tests {
         let _ = Command::new("git").arg("-C").arg(&repo.path).args(["add", "."]).output();
         let _ = Command::new("git").arg("-C").arg(&repo.path).args(["commit", "-m", "main edit"]).output();
 
-        let res = GitService::accept_task_changes(&wt_path, "main").unwrap();
+        let res = GitService::accept_task_changes(&wt_path, "main", false).unwrap();
         match res {
             MergeResult::Conflict { conflicting_files } => {
                 assert!(conflicting_files.contains(&"shared.txt".to_string()));
@@ -1172,7 +1173,7 @@ mod tests {
             })
             .unwrap_or_else(|| "main".to_string());
 
-        let res = GitService::accept_task_changes(&wt_path, &branch)
+        let res = GitService::accept_task_changes(&wt_path, &branch, false)
             .expect("accept_task_changes should succeed into unborn branch");
         match res {
             MergeResult::Success { commit_sha } => {
@@ -1183,5 +1184,41 @@ mod tests {
 
         // Verify file is now present in primary repo
         assert!(repo.path.join("calculator.rs").exists());
+    }
+
+    #[test]
+    fn test_accept_task_changes_with_acknowledge_dirty() {
+        let repo = TestRepo::new();
+        let wt = GitService::create_task_worktree(&repo.path, "ack_dirty_task", false).unwrap();
+        let wt_path = PathBuf::from(&wt.worktree_path);
+
+        // Create feature in worktree
+        std::fs::write(wt_path.join("task_feature.rs"), "pub fn task() {}\n").unwrap();
+
+        // Introduce dirty file in primary repo
+        std::fs::write(repo.path.join("unrelated_dirty.txt"), "uncommitted work in primary\n").unwrap();
+
+        // Without acknowledgment -> fails with DirtyPrimaryTree
+        let err = GitService::accept_task_changes(&wt_path, "main", false).unwrap_err();
+        match err {
+            GitError::DirtyPrimaryTree { count, uncommitted_files } => {
+                assert_eq!(count, 1);
+                assert_eq!(uncommitted_files[0].path, "unrelated_dirty.txt");
+            }
+            other => panic!("Expected DirtyPrimaryTree, got: {other:?}"),
+        }
+
+        // With acknowledgment -> succeeds!
+        let merge_res = GitService::accept_task_changes(&wt_path, "main", true).unwrap();
+        match merge_res {
+            MergeResult::Success { commit_sha } => {
+                assert!(!commit_sha.is_empty());
+            }
+            MergeResult::Conflict { .. } => panic!("Expected clean merge with acknowledgment"),
+        }
+
+        // Primary repo contains both the merged task file and the uncommitted file
+        assert!(repo.path.join("task_feature.rs").exists());
+        assert!(repo.path.join("unrelated_dirty.txt").exists());
     }
 }

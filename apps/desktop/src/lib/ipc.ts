@@ -449,8 +449,13 @@ export async function getChangeInventory(taskId: string): Promise<ChangeInventor
   return await safeInvoke<ChangeInventory>('get_change_inventory', { taskId });
 }
 
-export async function acceptTask(taskId: string): Promise<MergeResult> {
-  return await safeInvoke<MergeResult>('accept_task', { taskId });
+export async function acceptTask(taskId: string, acknowledgeDirty?: boolean): Promise<MergeResult> {
+  return await safeInvoke<MergeResult>('accept_task', {
+    taskId,
+    acknowledgeDirty: acknowledgeDirty ?? false,
+    task_id: taskId,
+    acknowledge_dirty: acknowledgeDirty ?? false,
+  });
 }
 
 export async function rejectTask(taskId: string): Promise<void> {

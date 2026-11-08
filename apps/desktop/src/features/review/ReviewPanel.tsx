@@ -38,7 +38,9 @@ export const ReviewPanel: FC<ReviewPanelProps> = ({
         setShowAcceptModal(false);
       }
     } catch (err: any) {
-      setActionError(typeof err === 'string' ? err : err.message || 'Failed to accept task changes');
+      if (err?.error_type !== 'DIRTY_PRIMARY_TREE' && !err?.uncommitted_files) {
+        setActionError(typeof err === 'string' ? err : err.message || 'Failed to accept task changes');
+      }
       setShowAcceptModal(false);
     }
   };
