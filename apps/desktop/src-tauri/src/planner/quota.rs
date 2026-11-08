@@ -722,6 +722,7 @@ mod tests {
         }
         for _ in 0..30 {
             tracker.trackers.get_mut(MODEL_TERTIARY).unwrap().record_actual_usage(now_ms, 100);
+            tracker.trackers.get_mut(MODEL_PINNED_ADVANCED).unwrap().record_actual_usage(now_ms, 100);
         }
 
         // 3. Selection must be rejected with QuotaExhaustionAction
