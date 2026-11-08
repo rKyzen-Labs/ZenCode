@@ -22,6 +22,10 @@ interface TaskViewProps {
   onDeclineGitInit?: () => void;
   isGitignoreDeclined?: boolean;
   onDeclineGitignore?: () => void;
+  isUnbornHeadDeclined?: boolean;
+  onDeclineInitialCommit?: () => void;
+  onCreateInitialCommit?: () => Promise<void> | void;
+  initialCommitNotice?: string | null;
   contextPreview: ContextPreview | null;
   plan: ZencodePlan | null;
   taskState: TaskState;
@@ -60,6 +64,10 @@ export const TaskView: FC<TaskViewProps> = ({
   onDeclineGitInit,
   isGitignoreDeclined = false,
   onDeclineGitignore,
+  isUnbornHeadDeclined = false,
+  onDeclineInitialCommit,
+  onCreateInitialCommit,
+  initialCommitNotice,
   contextPreview,
   plan,
   taskState,
@@ -220,6 +228,54 @@ export const TaskView: FC<TaskViewProps> = ({
             </div>
             <p className="text-text-muted text-[11px] leading-relaxed">
               Git initialization was declined. Task creation and worker execution are blocked because Git worktree isolation is required to protect your primary files.
+            </p>
+          </div>
+        )
+      )}
+
+      {/* Offer-Based Initial Commit (Empty / Unborn Repo) */}
+      {project && project.is_git_repo && project.has_commits === false && (
+        initialCommitNotice ? (
+          <div className="w-full max-w-2xl rounded-xl border border-border bg-surface p-3 font-sans text-xs flex items-center justify-between text-zinc-300">
+            <div className="flex items-center gap-2">
+              <span className="text-success font-bold">[ok]</span>
+              <span className="text-[11px] whitespace-pre-wrap">{initialCommitNotice}</span>
+            </div>
+          </div>
+        ) : !isUnbornHeadDeclined ? (
+          <div className="w-full max-w-2xl rounded-xl border border-zinc-700 bg-surface-raised p-4 space-y-3 font-sans shadow-md">
+            <div className="flex items-center justify-between border-b border-border pb-2">
+              <span className="font-semibold text-zinc-100 text-xs">Initial Commit Required</span>
+              <span className="text-[10px] font-mono text-text-muted border border-border px-2 py-0.5 rounded">isolation safety</span>
+            </div>
+            <p className="text-zinc-300 text-xs leading-relaxed">
+              This repository has no commits yet. Zencode needs at least one commit to create an isolated task branch. Create an initial empty commit?
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-1 border-t border-border">
+              <button
+                type="button"
+                onClick={onDeclineInitialCommit}
+                className="px-3 py-1.5 rounded-lg border border-border hover:bg-surface-hover text-text-muted font-medium text-xs transition-colors"
+              >
+                No, Cancel
+              </button>
+              <button
+                type="button"
+                onClick={onCreateInitialCommit}
+                className="px-4 py-1.5 rounded-lg bg-zinc-100 hover:bg-white text-zinc-950 font-medium text-xs transition-colors shadow-sm"
+              >
+                Yes, Create Initial Commit
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="w-full max-w-2xl rounded-xl border border-border bg-surface p-3 space-y-1 font-sans text-xs">
+            <div className="flex items-center gap-1.5 text-text-muted font-semibold">
+              <span>[i]</span>
+              <span>Task Creation Blocked</span>
+            </div>
+            <p className="text-text-muted text-[11px] leading-relaxed">
+              Creation of an initial commit was declined. Task creation and worker execution are blocked because Git worktree isolation requires at least one commit in the repository.
             </p>
           </div>
         )

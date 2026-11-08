@@ -62,7 +62,8 @@ pub async fn execute_open_project(
     // Check Git state using GitService
     let is_git_repo = GitService::is_git_repo(p).unwrap_or(false);
 
-    let (current_branch, git_status_summary, is_clean) = if is_git_repo {
+    let (current_branch, git_status_summary, is_clean, has_commits) = if is_git_repo {
+        let has_commits = GitService::has_commits(p).unwrap_or(false);
         let clean_p = clean_path_for_git(p);
         let branch = Command::new("git")
             .arg("-C")
@@ -81,17 +82,19 @@ pub async fn execute_open_project(
 
         match GitService::get_primary_tree_status(p) {
             Ok(st) => {
-                let summary = if st.is_clean {
+                let summary = if !has_commits {
+                    "No commits yet".to_string()
+                } else if st.is_clean {
                     "Clean working tree".to_string()
                 } else {
                     format!("{} uncommitted file(s)", st.uncommitted_files.len())
                 };
-                (branch, summary, st.is_clean)
+                (branch, summary, st.is_clean, has_commits)
             }
-            Err(_) => (branch, "Unknown Git status".to_string(), false),
+            Err(_) => (branch, "Unknown Git status".to_string(), false, has_commits),
         }
     } else {
-        (None, "Not a Git repository".to_string(), false)
+        (None, "Not a Git repository".to_string(), false, false)
     };
 
     // Step 2: Safe read-only inspection for .gitignore presence (zero writes)
@@ -132,6 +135,7 @@ pub async fn execute_open_project(
         is_clean,
         has_gitignore,
         detected_editor_configs,
+        has_commits,
     };
 
     // Store in AppState
@@ -178,6 +182,30 @@ pub async fn execute_init_git_repo(
     }
 
     // Refresh ProjectState after git init
+    execute_open_project(path, state).await
+}
+
+/// Step 3: Explicit user action to create an initial empty commit in a repository with no commits.
+/// Never run automatically. Only invoked upon per-action user confirmation.
+#[tauri::command]
+pub async fn create_initial_empty_commit(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectState, String> {
+    execute_create_initial_empty_commit(&path, &state).await
+}
+
+pub async fn execute_create_initial_empty_commit(
+    path: &str,
+    state: &AppState,
+) -> Result<ProjectState, String> {
+    let p = Path::new(path);
+    if !p.exists() || !p.is_dir() {
+        return Err(format!("Cannot create initial commit: '{path}' does not exist or is not a directory"));
+    }
+    GitService::create_initial_empty_commit(p)
+        .map_err(|e| format!("Failed to create initial commit: {e}"))?;
+
     execute_open_project(path, state).await
 }
 
@@ -578,6 +606,13 @@ pub async fn start_worker_session(
                 uncommitted_files: Some(uncommitted_files),
             });
         }
+        Err(GitError::UnbornHead) => {
+            return Err(WorkerStartError {
+                error_type: "UNBORN_HEAD".into(),
+                message: "This repository has no commits yet. Zencode needs at least one commit to create an isolated task branch.".into(),
+                uncommitted_files: None,
+            });
+        }
         Err(e) => {
             return Err(WorkerStartError {
                 error_type: "WORKTREE_CREATION_FAILED".into(),
@@ -884,6 +919,13 @@ pub async fn accept_task(
                     "Primary working tree is dirty with {count} uncommitted file(s). Explicit acknowledgment required."
                 ),
                 uncommitted_files: Some(uncommitted_files),
+            });
+        }
+        Err(GitError::UnbornHead) => {
+            return Err(WorkerStartError {
+                error_type: "UNBORN_HEAD".into(),
+                message: "This repository has no commits yet. Zencode needs at least one commit to create an isolated task branch.".into(),
+                uncommitted_files: None,
             });
         }
         Err(e) => {
@@ -1669,6 +1711,7 @@ mod tests {
                 is_clean: true,
                 has_gitignore: true,
                 detected_editor_configs: vec!["rustfmt.toml".into()],
+                has_commits: true,
             });
         }
 

@@ -48,6 +48,7 @@ pub fn run() {
             load_chat,
             delete_chat,
             init_git_repo,
+            create_initial_empty_commit,
             create_standard_gitignore,
         ])
         .on_window_event(|window, event| {

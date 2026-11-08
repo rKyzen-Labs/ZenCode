@@ -39,6 +39,8 @@ pub enum GitError {
     },
     #[error("Worktree error: {0}")]
     WorktreeError(String),
+    #[error("This repository has no commits yet. Zencode needs at least one commit to create an isolated task branch.")]
+    UnbornHead,
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 }
@@ -103,6 +105,25 @@ impl GitService {
             }
             Err(_) => Ok(false),
         }
+    }
+
+    /// Checks if the repository has at least one commit (HEAD is not unborn).
+    pub fn has_commits(repo_path: &Path) -> Result<bool, GitError> {
+        let (has_head, head_sha, _) = Self::run_cmd_allow_err(
+            repo_path,
+            &["rev-parse", "--verify", "HEAD"],
+        )?;
+        Ok(has_head && !head_sha.trim().is_empty())
+    }
+
+    /// Creates an initial empty root commit ("Initial commit") on the current branch.
+    /// MUST only be called after explicit user confirmation.
+    pub fn create_initial_empty_commit(repo_path: &Path) -> Result<String, GitError> {
+        let clean_p = clean_path_for_git(repo_path);
+        Self::run_cmd(
+            &clean_p,
+            &["commit", "--allow-empty", "-m", "Initial commit"],
+        )
     }
 
     /// 2. get_primary_tree_status(repo_path) — returns clean/dirty state and a list of uncommitted changes
@@ -207,14 +228,12 @@ impl GitService {
             &["rev-parse", "--verify", "HEAD"],
         )?;
 
-        let (base_commit, is_empty_repo) = if has_head && !head_sha.trim().is_empty() {
-            (head_sha.trim().to_string(), false)
-        } else {
-            ("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string(), true)
-        };
+        if !has_head || head_sha.trim().is_empty() {
+            return Err(GitError::UnbornHead);
+        }
 
+        let base_commit = head_sha.trim().to_string();
         let branch_name = format!("zencode/task-{}", task_id);
-
         let worktree_path_str = worktree_dir.to_string_lossy().to_string();
 
         // Check if branch already exists
@@ -228,7 +247,7 @@ impl GitService {
                 repo_path,
                 &["worktree", "add", &worktree_path_str, &branch_name],
             )?;
-        } else if !is_empty_repo {
+        } else {
             Self::run_cmd(
                 repo_path,
                 &[
@@ -238,18 +257,6 @@ impl GitService {
                     &branch_name,
                     &worktree_path_str,
                     &base_commit,
-                ],
-            )?;
-        } else {
-            // Freshly initialized 0-commit repository: git infers --orphan automatically
-            Self::run_cmd(
-                repo_path,
-                &[
-                    "worktree",
-                    "add",
-                    "-b",
-                    &branch_name,
-                    &worktree_path_str,
                 ],
             )?;
         }
@@ -1220,5 +1227,54 @@ mod tests {
         // Primary repo contains both the merged task file and the uncommitted file
         assert!(repo.path.join("task_feature.rs").exists());
         assert!(repo.path.join("unrelated_dirty.txt").exists());
+    }
+
+    #[test]
+    fn test_create_task_worktree_unborn_head_fails_and_explicit_commit_succeeds() {
+        let temp_dir = std::env::temp_dir().join(format!("zencode_unborn_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Initialize empty git repo (no commits, unborn HEAD)
+        let init_out = Command::new("git")
+            .arg("-C")
+            .arg(&temp_dir)
+            .args(["init", "-b", "main"])
+            .output()
+            .unwrap();
+        assert!(init_out.status.success());
+
+        // Configure dummy user for committing
+        let _ = Command::new("git").arg("-C").arg(&temp_dir).args(["config", "user.name", "Zencode Test"]).output();
+        let _ = Command::new("git").arg("-C").arg(&temp_dir).args(["config", "user.email", "test@zencode.ai"]).output();
+
+        // 2. has_commits must be false
+        assert_eq!(GitService::has_commits(&temp_dir).unwrap(), false);
+
+        // 3. create_task_worktree must fail with UnbornHead, NOT auto-commit
+        let res = GitService::create_task_worktree(&temp_dir, "unborn_test_task", false);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            GitError::UnbornHead => {}
+            other => panic!("Expected GitError::UnbornHead, got: {other:?}"),
+        }
+
+        // Verify still no commits exist
+        assert_eq!(GitService::has_commits(&temp_dir).unwrap(), false);
+
+        // 4. Explicit user action: create initial empty commit
+        let commit_res = GitService::create_initial_empty_commit(&temp_dir);
+        assert!(commit_res.is_ok());
+
+        // 5. has_commits must now be true
+        assert_eq!(GitService::has_commits(&temp_dir).unwrap(), true);
+
+        // 6. create_task_worktree must now succeed
+        let wt = GitService::create_task_worktree(&temp_dir, "unborn_test_task", false).unwrap();
+        assert_eq!(wt.branch_name, "zencode/task-unborn_test_task");
+        assert!(Path::new(&wt.worktree_path).exists());
+
+        // Cleanup
+        let _ = GitService::reject_task_changes(Path::new(&wt.worktree_path), "unborn_test_task");
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

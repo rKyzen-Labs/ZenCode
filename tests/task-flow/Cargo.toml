@@ -39,6 +39,10 @@ path = "src/bin/item6_accept_reject.rs"
 name = "item7_orphan_recovery"
 path = "src/bin/item7_orphan_recovery.rs"
 
+[[bin]]
+name = "test_qwen25_coder"
+path = "src/bin/test_qwen25_coder.rs"
+
 [dependencies]
 zencode-core = { path = "../../crates/zencode-core" }
 tokio = { version = "1.43", features = ["full"] }

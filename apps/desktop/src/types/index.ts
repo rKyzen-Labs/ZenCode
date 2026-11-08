@@ -17,6 +17,7 @@ export interface ProjectState {
   is_clean?: boolean;
   has_gitignore?: boolean;
   detected_editor_configs?: string[];
+  has_commits?: boolean;
 }
 
 export type ChangeCategory =

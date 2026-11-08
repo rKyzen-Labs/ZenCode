@@ -385,6 +385,21 @@ function getMockResponse<T>(cmd: string, args: Record<string, unknown> = {}): T 
     return `Added standard .gitignore for ${pt}` as unknown as T;
   }
 
+  if (cmd === 'create_initial_empty_commit') {
+    return {
+      path: (args.path as string) || 'A:\\ZenCode',
+      name: 'ZenCode',
+      project_type: 'Rust',
+      is_git_repo: true,
+      current_branch: 'main',
+      git_status_summary: 'Clean working tree',
+      is_clean: true,
+      has_gitignore: true,
+      detected_editor_configs: [],
+      has_commits: true,
+    } as unknown as T;
+  }
+
   return {} as T;
 }
 
@@ -636,6 +651,10 @@ export async function deleteChat(taskId: string): Promise<void> {
 
 export async function initGitRepo(path: string): Promise<ProjectState> {
   return await safeInvoke<ProjectState>('init_git_repo', { path });
+}
+
+export async function createInitialEmptyCommit(path: string): Promise<ProjectState> {
+  return await safeInvoke<ProjectState>('create_initial_empty_commit', { path });
 }
 
 export async function createStandardGitignore(

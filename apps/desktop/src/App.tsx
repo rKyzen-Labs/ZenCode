@@ -52,6 +52,7 @@ import {
   deleteChat,
   getChangeInventory,
   initGitRepo,
+  createInitialEmptyCommit,
   createStandardGitignore,
 } from './lib/ipc';
 import { Sidebar, type StoredChatSummary } from './components/Sidebar';
@@ -161,6 +162,8 @@ export default function App() {
   const [isGitInitDeclined, setIsGitInitDeclined] = useState(false);
   const [isGitignoreDeclined, setIsGitignoreDeclined] = useState(false);
   const [gitignoreAddedNotice, setGitignoreAddedNotice] = useState<string | null>(null);
+  const [isUnbornHeadDeclined, setIsUnbornHeadDeclined] = useState(false);
+  const [initialCommitNotice, setInitialCommitNotice] = useState<string | null>(null);
 
   // Refresh status from Rust backend
   const refreshStatus = useCallback(async () => {
@@ -439,6 +442,8 @@ export default function App() {
       setIsGitInitDeclined(false);
       setIsGitignoreDeclined(false);
       setGitignoreAddedNotice(null);
+      setIsUnbornHeadDeclined(false);
+      setInitialCommitNotice(null);
 
       // Check for orphaned worktrees in this newly opened repository
       const orphans = await listActiveWorktrees();
@@ -481,6 +486,24 @@ export default function App() {
       setProject((prev) => (prev ? { ...prev, has_gitignore: true } : null));
     } catch (err: any) {
       setError(typeof err === 'string' ? err : err.message || 'Failed to create standard .gitignore');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Step 3: Handle explicit per-action initial empty commit on unborn/0-commit repo
+  const handleCreateInitialCommit = async () => {
+    if (!project) return;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const updated = await createInitialEmptyCommit(project.path);
+      setProject(updated);
+      setIsUnbornHeadDeclined(false);
+      setInitialCommitNotice("Created initial empty commit. Repository is ready for isolated task branches.");
+      await refreshStatus();
+    } catch (err: any) {
+      setError(typeof err === 'string' ? err : err.message || 'Failed to create initial commit');
     } finally {
       setIsLoading(false);
     }
@@ -572,6 +595,9 @@ export default function App() {
       if (err?.error_type === 'DIRTY_PRIMARY_TREE' || err?.uncommitted_files) {
         setDirtyFiles(err.uncommitted_files || []);
         setPendingPlanForDirty(planToExecute);
+      } else if (err?.error_type === 'UNBORN_HEAD') {
+        setIsUnbornHeadDeclined(false);
+        setError('This repository has no commits yet. Create an initial commit to proceed.');
       } else {
         setError(typeof err === 'string' ? err : err.message || 'Failed to start worker session');
       }
@@ -1023,6 +1049,10 @@ export default function App() {
                   onDeclineGitInit={() => setIsGitInitDeclined(true)}
                   isGitignoreDeclined={isGitignoreDeclined}
                   onDeclineGitignore={() => setIsGitignoreDeclined(true)}
+                  isUnbornHeadDeclined={isUnbornHeadDeclined}
+                  onDeclineInitialCommit={() => setIsUnbornHeadDeclined(true)}
+                  onCreateInitialCommit={handleCreateInitialCommit}
+                  initialCommitNotice={initialCommitNotice}
                   contextPreview={contextPreview}
                   plan={plan}
                   taskState={systemStatus?.task_state || 'Idle'}
@@ -1079,6 +1109,10 @@ export default function App() {
                     setError('Task creation is blocked: initialize a Git repository to enable safe worktree branch isolation.');
                     return;
                   }
+                  if (project && project.is_git_repo && project.has_commits === false) {
+                    setError('Task creation is blocked: repository has no commits yet. Create an initial commit to enable worktree branch isolation.');
+                    return;
+                  }
                   if (!plan) {
                     setActiveChatTitle(text.slice(0, 32));
                     handlePreviewContext(text);
@@ -1086,10 +1120,12 @@ export default function App() {
                     handleStartWorkerSession(plan);
                   }
                 }}
-                disabled={Boolean(project && !project.is_git_repo)}
+                disabled={Boolean(project && (!project.is_git_repo || project.has_commits === false))}
                 placeholder={
                   project && !project.is_git_repo
                     ? 'Task creation blocked: Git is required to safely isolate and review AI changes.'
+                    : project && project.is_git_repo && project.has_commits === false
+                    ? 'Task creation blocked: repository has no commits yet. Create an initial commit first.'
                     : undefined
                 }
                 isLoading={isLoading}

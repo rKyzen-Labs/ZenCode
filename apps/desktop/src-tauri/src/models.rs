@@ -16,6 +16,8 @@ pub struct ProjectState {
     pub has_gitignore: bool,
     #[serde(default)]
     pub detected_editor_configs: Vec<String>,
+    #[serde(default)]
+    pub has_commits: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
