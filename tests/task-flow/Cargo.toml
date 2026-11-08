@@ -3,6 +3,42 @@ name = "task-flow"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "task_flow_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "task-flow"
+path = "src/main.rs"
+
+[[bin]]
+name = "item1_edit"
+path = "src/bin/item1_edit.rs"
+
+[[bin]]
+name = "item2_delete"
+path = "src/bin/item2_delete.rs"
+
+[[bin]]
+name = "item3_typescript"
+path = "src/bin/item3_typescript.rs"
+
+[[bin]]
+name = "item4_ten_steps"
+path = "src/bin/item4_ten_steps.rs"
+
+[[bin]]
+name = "item5_repair_cap"
+path = "src/bin/item5_repair_cap.rs"
+
+[[bin]]
+name = "item6_accept_reject"
+path = "src/bin/item6_accept_reject.rs"
+
+[[bin]]
+name = "item7_orphan_recovery"
+path = "src/bin/item7_orphan_recovery.rs"
+
 [dependencies]
 zencode-core = { path = "../../crates/zencode-core" }
 tokio = { version = "1.43", features = ["full"] }
@@ -13,3 +49,5 @@ eventsource-stream = "0.2"
 futures-util = "0.3"
 rand = "0.8"
 base64 = "0.22"
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
