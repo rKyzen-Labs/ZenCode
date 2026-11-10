@@ -294,6 +294,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         approved_source_excerpts: vec![],
         constraints: vec!["All implementation must execute locally".into()],
         conversation_history: recent_exchanges.clone(),
+        ..Default::default()
     };
 
     let planner = GeminiPlannerClient::new();

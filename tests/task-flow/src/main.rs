@@ -141,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "All implementation must execute locally using local Ollama worker".into(),
         ],
         conversation_history: vec![],
+        ..Default::default()
     };
 
     context.assert_no_secrets().expect("Security check failed: secrets detected in context payload!");

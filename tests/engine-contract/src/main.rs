@@ -63,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "All writes must use atomic file swaps".into(),
         ],
         conversation_history: vec![],
+        ..Default::default()
     };
 
     println!("  -> Sending 1 explicit planning request to Gemini Interactions API...");

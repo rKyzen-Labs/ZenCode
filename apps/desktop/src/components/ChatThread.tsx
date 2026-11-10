@@ -80,7 +80,7 @@ interface ChatThreadProps {
   onApplyAdvisoryToWorker?: (suggestion: string) => Promise<void>;
   quotaState: QuotaUpdateEvent | null;
   chatMessages?: ChatMessage[];
-  onSubmitPrompt?: (promptText: string, model: string) => void;
+  onSubmitPrompt?: (promptText: string, model: string, attachedFiles?: string[]) => void;
   selectedModel?: string;
   onSelectModel?: (model: string) => void;
   onUndoTask?: (taskId: string, commitHash?: string, messageId?: string) => Promise<void>;
@@ -1204,6 +1204,7 @@ export const ChatThread: FC<ChatThreadProps> = ({
 
   // Follow-up input dock state
   const [followupInput, setFollowupInput] = useState('');
+  const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [selectedExecutionMode, setSelectedExecutionMode] = useState<'Build' | 'Turbo'>('Build');
 
   // Scroll to bottom & scroll indicator detection
@@ -1301,10 +1302,11 @@ export const ChatThread: FC<ChatThreadProps> = ({
   };
 
   const handleSendFollowup = () => {
-    if (!followupInput.trim() || isLoading || isWorkerRunning) return;
+    if ((!followupInput.trim() && attachedFiles.length === 0) || isLoading || isWorkerRunning) return;
     if (onSubmitPrompt) {
-      onSubmitPrompt(followupInput.trim(), selectedModel);
+      onSubmitPrompt(followupInput.trim(), selectedModel, attachedFiles);
       setFollowupInput('');
+      setAttachedFiles([]);
     }
   };
 
@@ -1312,6 +1314,7 @@ export const ChatThread: FC<ChatThreadProps> = ({
     try {
       const file = await pickFile(project?.path);
       if (file) {
+        setAttachedFiles((prev) => (prev.includes(file) ? prev : [...prev, file]));
         let displayPath = file;
         if (project?.path && file.startsWith(project.path)) {
           displayPath = file.slice(project.path.length).replace(/^[/\\]+/, '');
@@ -1889,6 +1892,38 @@ export const ChatThread: FC<ChatThreadProps> = ({
 
           {/* Standard Prompt Input Dock matching PDF Page 2 & 3 */}
           <div className="bg-[#f5f4ee] border border-[#dad9d4] focus-within:border-[#c96442] rounded-xl p-3 shadow-sm transition-colors">
+            {attachedFiles.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 pb-2">
+                {attachedFiles.map((file, idx) => {
+                  const isPdf = file.toLowerCase().endsWith('.pdf');
+                  const isImg = /\.(png|jpe?g|webp|gif|svg|bmp)$/i.test(file);
+                  const basename = file.split(/[/\\]/).pop() || file;
+                  return (
+                    <span
+                      key={idx}
+                      className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-mono bg-[#ede9de] border border-[#dad9d4] text-[#141413] shadow-xs"
+                    >
+                      {isPdf ? (
+                        <span className="text-[10px] font-bold text-red-600 bg-red-100 dark:bg-red-950/40 px-1 py-0.2 rounded">PDF</span>
+                      ) : isImg ? (
+                        <span className="text-[10px] font-bold text-blue-600 bg-blue-100 dark:bg-blue-950/40 px-1 py-0.2 rounded">IMG</span>
+                      ) : (
+                        <Paperclip className="w-3 h-3 text-[#83827d]" />
+                      )}
+                      <span className="max-w-[200px] truncate" title={file}>{basename}</span>
+                      <button
+                        type="button"
+                        onClick={() => setAttachedFiles((prev) => prev.filter((_, i) => i !== idx))}
+                        className="text-[#83827d] hover:text-[#141413] ml-0.5"
+                        title="Remove attachment"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
             <textarea
               value={followupInput}
               onChange={(e) => setFollowupInput(e.target.value)}
@@ -1980,9 +2015,9 @@ export const ChatThread: FC<ChatThreadProps> = ({
               <button
                 type="button"
                 onClick={handleSendFollowup}
-                disabled={!followupInput.trim() || isLoading || isWorkerRunning}
+                disabled={(!followupInput.trim() && attachedFiles.length === 0) || isLoading || isWorkerRunning}
                 className={`h-7 px-3 rounded-lg flex items-center gap-1.5 transition-colors shadow-sm font-sans text-xs font-medium ${
-                  followupInput.trim() && !isLoading && !isWorkerRunning
+                  (followupInput.trim() || attachedFiles.length > 0) && !isLoading && !isWorkerRunning
                     ? 'bg-[#c96442] hover:bg-[#b5523f] text-white cursor-pointer'
                     : 'bg-[#ede9de] text-[#83827d] border border-[#dad9d4] opacity-60 cursor-not-allowed'
                 }`}

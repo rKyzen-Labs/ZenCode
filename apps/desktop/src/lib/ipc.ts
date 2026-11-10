@@ -432,13 +432,17 @@ export async function getProjectState(): Promise<SystemStatus> {
 
 export async function previewPlanningContext(
   taskDescription: string,
-  chatId?: string | null
+  chatId?: string | null,
+  attachedFiles?: string[]
 ): Promise<ContextPreview> {
+  const files = attachedFiles && attachedFiles.length > 0 ? attachedFiles : null;
   return await safeInvoke<ContextPreview>('preview_planning_context', {
     taskDescription,
     task_description: taskDescription,
     chatId: chatId || null,
     chat_id: chatId || null,
+    attachedFiles: files,
+    attached_files: files,
   });
 }
 

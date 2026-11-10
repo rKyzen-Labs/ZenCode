@@ -101,6 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         approved_source_excerpts: vec![],
         constraints: vec!["All implementation must execute locally".into()],
         conversation_history: vec![], // Empty for turn 1
+        ..Default::default()
     };
 
     println!("\n[Turn 1] Generating Plan with Gemini Interaction API...");
@@ -238,6 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )],
         constraints: vec!["All implementation must execute locally".into()],
         conversation_history: conversation_history.clone(),
+        ..Default::default()
     };
 
     let prompt_payload_turn_2 = context_turn_2.to_prompt_text();

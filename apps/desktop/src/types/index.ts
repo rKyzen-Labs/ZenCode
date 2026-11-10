@@ -211,6 +211,7 @@ export interface ContextPreview {
   manifest_summaries: string[];
   git_branch_and_status: string;
   preview_text: string;
+  attached_files?: string[];
 }
 
 export interface PlanStep {

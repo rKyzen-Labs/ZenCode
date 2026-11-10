@@ -80,6 +80,8 @@ pub struct ContextPreview {
     pub manifest_summaries: Vec<String>,
     pub git_branch_and_status: String,
     pub preview_text: String,
+    #[serde(default)]
+    pub attached_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

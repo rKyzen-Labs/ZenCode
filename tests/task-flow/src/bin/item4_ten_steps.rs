@@ -52,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         approved_source_excerpts: vec![],
         constraints: vec![],
         conversation_history: vec![],
+        ..Default::default()
     };
     let plan_res = planner.plan(dummy_key, &ctx).await;
     assert!(plan_res.is_err(), "Invalid key MUST fail planning");

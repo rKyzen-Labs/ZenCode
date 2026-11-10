@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   Check,
   Loader2,
+  X,
 } from 'lucide-react';
 import {
   listAllRecentChats,
@@ -18,7 +19,7 @@ import { WorkspaceSelectorRow } from './WorkspaceSelectorRow';
 interface LandingPageProps {
   currentProject: ProjectState | null;
   onOpenWorkspace: (path: string) => void;
-  onSubmitPrompt: (promptText: string, model: string) => void;
+  onSubmitPrompt: (promptText: string, model: string, attachedFiles?: string[]) => void;
   onSelectRecentChat: (chat: ChatSummaryRecord) => void;
   selectedModel: string;
   onSelectModel: (model: string) => void;
@@ -47,6 +48,7 @@ export const LandingPage: FC<LandingPageProps> = ({
   isStartupVerifying = false,
 }) => {
   const [promptInput, setPromptInput] = useState('');
+  const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [recentChats, setRecentChats] = useState<ChatSummaryRecord[]>([]);
   const [isLoadingChats, setIsLoadingChats] = useState(false);
   const [_workerType, setWorkerType] = useState<'local' | 'groq'>('local');
@@ -83,6 +85,7 @@ export const LandingPage: FC<LandingPageProps> = ({
     try {
       const file = await pickFile(currentProject?.path);
       if (file) {
+        setAttachedFiles((prev) => (prev.includes(file) ? prev : [...prev, file]));
         let displayPath = file;
         if (currentProject?.path && file.startsWith(currentProject.path)) {
           displayPath = file.slice(currentProject.path.length).replace(/^[/\\]+/, '');
@@ -117,8 +120,10 @@ export const LandingPage: FC<LandingPageProps> = ({
   };
 
   const handleSend = () => {
-    if (!promptInput.trim() || isLoading) return;
-    onSubmitPrompt(promptInput.trim(), selectedModel);
+    if ((!promptInput.trim() && attachedFiles.length === 0) || isLoading) return;
+    onSubmitPrompt(promptInput.trim(), selectedModel, attachedFiles);
+    setPromptInput('');
+    setAttachedFiles([]);
   };
 
   const formatRelativeTime = (timestamp: string) => {
@@ -195,6 +200,38 @@ export const LandingPage: FC<LandingPageProps> = ({
 
       {/* Prompt Input Box: matching PDF Page 1 */}
       <div className="w-full bg-[#f5f4ee] border border-[#dad9d4] rounded-2xl p-4 flex flex-col shadow-sm focus-within:border-[#83827d]/60 transition-colors shrink-0">
+        {attachedFiles.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 pb-2">
+            {attachedFiles.map((file, idx) => {
+              const isPdf = file.toLowerCase().endsWith('.pdf');
+              const isImg = /\.(png|jpe?g|webp|gif|svg|bmp)$/i.test(file);
+              const basename = file.split(/[/\\]/).pop() || file;
+              return (
+                <span
+                  key={idx}
+                  className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-mono bg-[#ede9de] border border-[#dad9d4] text-[#141413] shadow-xs"
+                >
+                  {isPdf ? (
+                    <span className="text-[10px] font-bold text-red-600 bg-red-100 dark:bg-red-950/40 px-1 py-0.2 rounded">PDF</span>
+                  ) : isImg ? (
+                    <span className="text-[10px] font-bold text-blue-600 bg-blue-100 dark:bg-blue-950/40 px-1 py-0.2 rounded">IMG</span>
+                  ) : (
+                    <Paperclip className="w-3 h-3 text-[#83827d]" />
+                  )}
+                  <span className="max-w-[200px] truncate" title={file}>{basename}</span>
+                  <button
+                    type="button"
+                    onClick={() => setAttachedFiles((prev) => prev.filter((_, i) => i !== idx))}
+                    className="text-[#83827d] hover:text-[#141413] ml-0.5 cursor-pointer"
+                    title="Remove attachment"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              );
+            })}
+          </div>
+        )}
         <textarea
           value={promptInput}
           onChange={(e) => setPromptInput(e.target.value)}
@@ -263,9 +300,9 @@ export const LandingPage: FC<LandingPageProps> = ({
           <button
             type="button"
             onClick={handleSend}
-            disabled={!promptInput.trim() || isLoading}
+            disabled={(!promptInput.trim() && attachedFiles.length === 0) || isLoading}
             className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-white text-[12px] font-medium shadow-sm transition-colors ${
-              !promptInput.trim() || isLoading
+              (!promptInput.trim() && attachedFiles.length === 0) || isLoading
                 ? 'bg-[#c96442]/60 cursor-not-allowed'
                 : 'bg-[#c96442] hover:bg-[#b5523f] active:bg-[#b05730] cursor-pointer'
             }`}

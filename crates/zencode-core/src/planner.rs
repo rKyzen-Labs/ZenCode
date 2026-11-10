@@ -110,6 +110,76 @@ pub struct PriorExchange {
     pub summary: Option<String>,
 }
 
+/// Multimodal attachment (PDF, image, etc.) sent inline to Gemini.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultimodalAttachment {
+    pub file_name: String,
+    pub mime_type: String,
+    pub base64_data: String,
+}
+
+impl MultimodalAttachment {
+    pub fn new(file_name: impl Into<String>, mime_type: impl Into<String>, base64_data: impl Into<String>) -> Self {
+        Self {
+            file_name: file_name.into(),
+            mime_type: mime_type.into(),
+            base64_data: base64_data.into(),
+        }
+    }
+
+    pub fn from_bytes(file_name: &str, mime_type: &str, bytes: &[u8]) -> Self {
+        use base64::prelude::*;
+        Self {
+            file_name: file_name.to_string(),
+            mime_type: mime_type.to_string(),
+            base64_data: BASE64_STANDARD.encode(bytes),
+        }
+    }
+
+    pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, std::io::Error> {
+        let path = path.as_ref();
+        let file_name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "attachment".to_string());
+        let mime_type = detect_mime_type(path);
+        let bytes = std::fs::read(path)?;
+        Ok(Self::from_bytes(&file_name, &mime_type, &bytes))
+    }
+}
+
+pub fn detect_mime_type(path: &std::path::Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf".to_string(),
+        "png" => "image/png".to_string(),
+        "jpg" | "jpeg" => "image/jpeg".to_string(),
+        "webp" => "image/webp".to_string(),
+        "gif" => "image/gif".to_string(),
+        "svg" => "image/svg+xml".to_string(),
+        "bmp" => "image/bmp".to_string(),
+        "ico" => "image/x-icon".to_string(),
+        "tiff" | "tif" => "image/tiff".to_string(),
+        _ => "application/octet-stream".to_string(),
+    }
+}
+
+pub fn is_multimodal_file(path: &std::path::Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        ext.as_str(),
+        "pdf" | "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "bmp" | "ico" | "tiff" | "tif"
+    )
+}
+
 /// Planning context assembled locally before being presented to the user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanningContext {
@@ -122,6 +192,24 @@ pub struct PlanningContext {
     pub constraints: Vec<String>,
     #[serde(default)]
     pub conversation_history: Vec<PriorExchange>,
+    #[serde(default)]
+    pub multimodal_attachments: Vec<MultimodalAttachment>,
+}
+
+impl Default for PlanningContext {
+    fn default() -> Self {
+        Self {
+            task_description: String::new(),
+            project_type: String::new(),
+            shallow_tree: Vec::new(),
+            manifest_summaries: Vec::new(),
+            git_branch_and_status: String::new(),
+            approved_source_excerpts: Vec::new(),
+            constraints: Vec::new(),
+            conversation_history: Vec::new(),
+            multimodal_attachments: Vec::new(),
+        }
+    }
 }
 
 const FORBIDDEN_SECRET_PATTERNS: &[&str] = &[
@@ -216,16 +304,25 @@ impl PlanningContext {
             out.push('\n');
         }
 
+        if !self.multimodal_attachments.is_empty() {
+            out.push_str("ATTACHED VISUAL & MULTIMODAL SPECIFICATIONS:\n");
+            for att in &self.multimodal_attachments {
+                out.push_str(&format!("- [{}] (Type: {})\n", att.file_name, att.mime_type));
+            }
+            out.push_str("Note: The visual/multimodal files above are attached directly as inline data parts in this request. Visually inspect their contents, design, layout, typography, colors, sections, and structure when planning the implementation.\n\n");
+        }
+
         out.push_str("CLASSIFICATION & ROUTING INSTRUCTION:\n");
         out.push_str("1. If PRIOR CONVERSATION exists, evaluate the CURRENT FOLLOW-UP REQUEST in the full context of what was previously requested, created, or modified. If the user refers back to previous files, functions, or concepts (e.g. 'also add input validation to that function', 'now write tests for it'), link directly to the relevant files and functions from prior turns.\n");
-        out.push_str("2. READ-ONLY EXPLORATION & ARCHITECTURAL ANALYSIS: When the user asks to explore, analyze, overview, review, or explain the project, codebase, or architecture (e.g. 'explore this project', 'explain the codebase', 'overview of this repo', 'how is this project structured') and does NOT request writing code, editing/creating/deleting files, installing packages, or running commands:\n");
+        out.push_str("2. READ-ONLY EXPLORATION & ARCHITECTURAL ANALYSIS: When the user asks to explore, analyze, overview, review, or explain the project, codebase, architecture, or an attached document/PDF/design (e.g. 'explore this project', 'explain the codebase', 'overview of this repo', 'summarize this pdf') and does NOT request writing code, editing/creating/deleting files, installing packages, or running commands:\n");
         out.push_str("   - Set is_actionable: false.\n");
         out.push_str("   - Leave steps as an empty array [].\n");
-        out.push_str("   - Answer the user's exploration request DIRECTLY, THOROUGHLY, and COMPREHENSIVELY in conversational_reply, analyzing the PROJECT TREE and MANIFEST SUMMARIES provided above. Explain the architecture, directory layout, key modules, entrypoints, and tech stack in rich, structured Markdown.\n");
+        out.push_str("   - Answer the user's exploration request DIRECTLY, THOROUGHLY, and COMPREHENSIVELY in conversational_reply, analyzing the PROJECT TREE, MANIFEST SUMMARIES, or ATTACHED VISUAL/PDF SPECIFICATIONS provided above. Explain the architecture, directory layout, design, and structure in rich, structured Markdown.\n");
         out.push_str("   - Do NOT dispatch to a worker or formulate coding steps; exploration is answered directly by you.\n");
         out.push_str("3. GENERAL CONVERSATION & GREETINGS: For pure greetings (like 'hi', 'hello', 'thanks') or general questions without project action: set is_actionable: false, set steps: [], and provide a direct helpful response in conversational_reply.\n");
         out.push_str("4. DYNAMIC ENVIRONMENT DISCOVERY VIA COMMANDS: If the user explicitly asks about the host machine, installed runtimes, models, or command outputs (e.g. 'what models are installed in ollama', 'check git branch', 'what version of python do I have', 'run pip install requests'): set is_actionable: true, set conversational_reply: null, and formulate a step with the exact terminal command (`COMMAND: ollama list`, `COMMAND: python --version`, etc.).\n");
         out.push_str("5. ACTIONABLE CODING & REFACTORING TASKS: If the user asks to write code, modify files, create files, delete files, move folders, or implement features: set is_actionable: true, set conversational_reply: null, and provide a concrete task_summary with detailed implementation steps in the steps array. The worker has full native capabilities to create files, edit files, delete files, make folders, move files, and execute terminal commands.\n");
+        out.push_str("6. MULTIMODAL & PDF/IMAGE-BASED SPECIFICATIONS: If the user provides an attached design mock, wireframe, or PDF specification (e.g. 'develop me website based on this pdf'): thoroughly analyze the visual structure, layout, typography, components, color scheme, sections, and functional requirements from the attached visual/PDF parts. Formulate concrete, precise implementation steps to build the requested application or website to match the visual specification faithfully, specifying exact file paths (e.g. index.html, styles.css, etc.) and complete code implementation.\n");
 
         out
     }
@@ -312,13 +409,24 @@ impl GeminiPlannerClient {
 
         let prompt_text = context.to_prompt_text();
 
+        let mut parts = vec![
+            serde_json::json!({ "text": prompt_text })
+        ];
+
+        for attachment in &context.multimodal_attachments {
+            parts.push(serde_json::json!({
+                "inlineData": {
+                    "mimeType": attachment.mime_type,
+                    "data": attachment.base64_data
+                }
+            }));
+        }
+
         let request_body = serde_json::json!({
             "contents": [
                 {
                     "role": "user",
-                    "parts": [
-                        { "text": prompt_text }
-                    ]
+                    "parts": parts
                 }
             ],
             "generationConfig": {
@@ -835,6 +943,7 @@ mod tests {
                     summary: Some("Created calculate.rs with add function".into()),
                 },
             ],
+            ..Default::default()
         };
 
         let prompt = ctx.to_prompt_text();
@@ -879,5 +988,38 @@ mod tests {
 
         let text2 = "Here is the summary of the completed task:\n- Updated index.html\n- Added styles.css";
         assert_eq!(strip_director_preamble(text2), "- Updated index.html\n- Added styles.css");
+    }
+
+    #[test]
+    fn test_multimodal_attachment_detection_and_prompt_formatting() {
+        use std::path::Path;
+
+        assert!(is_multimodal_file(Path::new("spec.pdf")));
+        assert!(is_multimodal_file(Path::new("mockup.png")));
+        assert!(is_multimodal_file(Path::new("photo.jpg")));
+        assert!(is_multimodal_file(Path::new("banner.webp")));
+        assert!(!is_multimodal_file(Path::new("main.rs")));
+        assert!(!is_multimodal_file(Path::new("index.ts")));
+
+        assert_eq!(detect_mime_type(Path::new("document.pdf")), "application/pdf");
+        assert_eq!(detect_mime_type(Path::new("image.png")), "image/png");
+        assert_eq!(detect_mime_type(Path::new("image.jpeg")), "image/jpeg");
+
+        let pdf_sample = b"%PDF-1.4 sample content";
+        let att = MultimodalAttachment::from_bytes("design.pdf", "application/pdf", pdf_sample);
+        assert_eq!(att.file_name, "design.pdf");
+        assert_eq!(att.mime_type, "application/pdf");
+        assert!(!att.base64_data.is_empty());
+
+        let ctx = PlanningContext {
+            task_description: "Build website from design.pdf".into(),
+            multimodal_attachments: vec![att],
+            ..Default::default()
+        };
+
+        let prompt_text = ctx.to_prompt_text();
+        assert!(prompt_text.contains("ATTACHED VISUAL & MULTIMODAL SPECIFICATIONS:"));
+        assert!(prompt_text.contains("[design.pdf] (Type: application/pdf)"));
+        assert!(prompt_text.contains("Visually inspect their contents"));
     }
 }

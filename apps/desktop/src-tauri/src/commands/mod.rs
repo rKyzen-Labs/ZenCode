@@ -401,14 +401,16 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<SystemStatu
 pub async fn preview_planning_context(
     task_description: String,
     chat_id: Option<String>,
+    attached_files: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<ContextPreview, String> {
-    execute_preview_planning_context(&task_description, chat_id.as_deref(), &state).await
+    execute_preview_planning_context(&task_description, chat_id.as_deref(), attached_files, &state).await
 }
 
 pub async fn execute_preview_planning_context(
     task_description: &str,
     chat_id: Option<&str>,
+    attached_files: Option<Vec<String>>,
     state: &AppState,
 ) -> Result<ContextPreview, String> {
     if task_description.trim().is_empty() {
@@ -473,18 +475,139 @@ pub async fn execute_preview_planning_context(
         Vec::new()
     };
 
+    // --- Multimodal & File Attachment Ingestion ---
+    let mut candidate_paths: Vec<String> = attached_files.unwrap_or_default();
+
+    // 1. Scan task_description for explicit markers: [Attached file: <path>]
+    for cap in task_description.split("[Attached file:").skip(1) {
+        if let Some(end) = cap.find(']') {
+            let path_str = cap[..end].trim().to_string();
+            if !path_str.is_empty() && !candidate_paths.contains(&path_str) {
+                candidate_paths.push(path_str);
+            }
+        }
+    }
+
+    // 2. Scan task_description for @tokens (e.g. @uxpilot.pdf, @app.tsx)
+    for word in task_description.split_whitespace() {
+        if let Some(stripped) = word.strip_prefix('@') {
+            let clean = stripped.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\' && c != '_' && c != '-');
+            if !clean.is_empty() && !candidate_paths.contains(&clean.to_string()) {
+                candidate_paths.push(clean.to_string());
+            }
+        }
+    }
+
+    // 3. Scan task_description for filenames directly present in the project directory
+    for word in task_description.split_whitespace() {
+        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\' && c != '_' && c != '-');
+        if clean.contains('.') {
+            let potential_file = project_dir.join(clean);
+            if potential_file.is_file() {
+                let clean_str = clean.to_string();
+                if !candidate_paths.contains(&clean_str) {
+                    candidate_paths.push(clean_str);
+                }
+            }
+        }
+    }
+
+    // 4. If prompt mentions "pdf", "wireframe", "mockup", or "design" and no candidate found,
+    // look for a PDF directly inside the project directory root
+    let task_lower = task_description.to_lowercase();
+    if candidate_paths.is_empty() && (task_lower.contains("pdf") || task_lower.contains("mockup") || task_lower.contains("wireframe")) {
+        if let Ok(entries) = std::fs::read_dir(project_dir) {
+            for entry in entries.flatten() {
+                if let Some(ext) = entry.path().extension() {
+                    if ext.to_string_lossy().eq_ignore_ascii_case("pdf") {
+                        candidate_paths.push(entry.path().to_string_lossy().to_string());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut multimodal_attachments = Vec::new();
+    let mut approved_source_excerpts = Vec::new();
+    let mut resolved_attached_names = Vec::new();
+
+    for raw_path in candidate_paths {
+        let path = Path::new(&raw_path);
+        let resolved_path = if path.is_absolute() && path.is_file() {
+            path.to_path_buf()
+        } else if project_dir.join(path).is_file() {
+            project_dir.join(path)
+        } else {
+            let trimmed = raw_path.trim_start_matches(|c| c == '/' || c == '\\');
+            if project_dir.join(trimmed).is_file() {
+                project_dir.join(trimmed)
+            } else {
+                continue;
+            }
+        };
+
+        let file_name = resolved_path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| raw_path.clone());
+
+        if zencode_core::is_multimodal_file(&resolved_path) {
+            // Check size <= 20MB for Gemini inlineData
+            if let Ok(metadata) = resolved_path.metadata() {
+                if metadata.len() > 20 * 1024 * 1024 {
+                    eprintln!(
+                        "[Multimodal] Attachment {} exceeds 20MB limit ({} bytes), skipping inlineData",
+                        file_name,
+                        metadata.len()
+                    );
+                    continue;
+                }
+            }
+
+            match zencode_core::MultimodalAttachment::from_file(&resolved_path) {
+                Ok(att) => {
+                    println!(
+                        "[Multimodal] Ingested visual attachment '{}' (mime: {}, base64 len: {}) for Gemini Planner",
+                        att.file_name, att.mime_type, att.base64_data.len()
+                    );
+                    resolved_attached_names.push(format!("{} ({})", att.file_name, att.mime_type));
+                    multimodal_attachments.push(att);
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[Multimodal] Failed to read visual attachment {}: {}",
+                        resolved_path.display(),
+                        err
+                    );
+                }
+            }
+        } else {
+            // Text or code file -> add to approved source excerpts
+            if let Ok(content) = std::fs::read_to_string(&resolved_path) {
+                let display_rel = resolved_path
+                    .strip_prefix(project_dir)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| file_name.clone());
+                resolved_attached_names.push(display_rel.clone());
+                approved_source_excerpts.push((display_rel, content));
+            }
+        }
+    }
+
     let context = PlanningContext {
         task_description: task_description.to_string(),
         project_type: active_project.project_type.clone(),
         shallow_tree: shallow_tree.clone(),
         manifest_summaries: manifest_summaries.clone(),
         git_branch_and_status: git_branch_and_status.clone(),
-        approved_source_excerpts: Vec::new(),
+        approved_source_excerpts,
         constraints: vec![
             "Free-tier planning only: produce clear step-by-step guidance".into(),
             "All implementation must execute locally".into(),
         ],
         conversation_history,
+        multimodal_attachments,
     };
 
     // Assert that no credentials or secret files exist in the payload
@@ -515,6 +638,7 @@ pub async fn execute_preview_planning_context(
         manifest_summaries,
         git_branch_and_status,
         preview_text,
+        attached_files: resolved_attached_names,
     })
 }
 
@@ -4218,6 +4342,7 @@ mod tests {
             approved_source_excerpts: vec![],
             constraints: vec![],
             conversation_history: vec![],
+            ..Default::default()
         };
 
         // When Gemini returns an exploration plan that was initially marked is_actionable: true,
@@ -4285,5 +4410,73 @@ mod tests {
         assert!(mock_plan.conversational_reply.is_some(), "Must contain direct conversational reply");
         let reply = mock_plan.conversational_reply.unwrap();
         assert!(reply.contains("Monorepo with Rust backend and React frontend"));
+    }
+
+    #[tokio::test]
+    async fn test_multimodal_pdf_and_image_context_preview_ingestion() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "zencode_multimodal_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let pdf_path = temp_dir.join("mockup.pdf");
+        std::fs::write(&pdf_path, b"%PDF-1.4\n1 0 obj\n<<\n>>\nendobj\ntrailer\n<<\n>>\n%%EOF").unwrap();
+
+        let state = AppState::new();
+        {
+            let mut active = state.active_project.lock().await;
+            *active = Some(ProjectState {
+                path: temp_dir.to_string_lossy().to_string(),
+                name: "TestProject".into(),
+                project_type: "Web / Static".to_string(),
+                is_git_repo: true,
+                current_branch: Some("main".to_string()),
+                git_status_summary: "clean".to_string(),
+                is_clean: true,
+                has_gitignore: true,
+                detected_editor_configs: vec![],
+                has_commits: true,
+                just_initialized_git: false,
+                is_corrupted: false,
+                system_notice: None,
+            });
+        }
+
+        // 1. Ingestion via explicit attached_files parameter
+        let preview = execute_preview_planning_context(
+            "develop me a website based on the design",
+            None,
+            Some(vec![pdf_path.to_string_lossy().to_string()]),
+            &state,
+        ).await.unwrap();
+
+        assert_eq!(preview.attached_files.len(), 1);
+        assert!(preview.attached_files[0].contains("mockup.pdf"));
+        assert!(preview.attached_files[0].contains("application/pdf"));
+
+        // Verify stored in pending_previews with multimodal inline attachment
+        let stored_context = {
+            let previews = state.pending_previews.lock().await;
+            previews.get(&preview.preview_id).cloned().unwrap()
+        };
+        assert_eq!(stored_context.multimodal_attachments.len(), 1);
+        assert_eq!(stored_context.multimodal_attachments[0].file_name, "mockup.pdf");
+        assert_eq!(stored_context.multimodal_attachments[0].mime_type, "application/pdf");
+        assert!(!stored_context.multimodal_attachments[0].base64_data.is_empty());
+
+        // 2. Ingestion via @mention in prompt text
+        let preview2 = execute_preview_planning_context(
+            "build website according to @mockup.pdf specifications",
+            None,
+            None,
+            &state,
+        ).await.unwrap();
+        assert_eq!(preview2.attached_files.len(), 1);
+        assert!(preview2.attached_files[0].contains("mockup.pdf"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

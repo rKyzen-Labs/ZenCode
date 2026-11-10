@@ -586,7 +586,7 @@ export default function App() {
   };
 
   // Planning & Worker Session Handlers
-  const handlePreviewContext = async (taskDescription: string, chatId?: string | null) => {
+  const handlePreviewContext = async (taskDescription: string, chatId?: string | null, attachedFiles?: string[]) => {
     setIsLoading(true);
     setError(null);
     setIsUndone(false);
@@ -604,7 +604,7 @@ export default function App() {
     }
 
     try {
-      const preview = await previewPlanningContext(taskDescription, targetChatId);
+      const preview = await previewPlanningContext(taskDescription, targetChatId, attachedFiles);
 
       // Context preview — trust once per workspace
       const isTrusted = project?.path
@@ -1183,7 +1183,7 @@ function parseShellCommand(input: string): { program: string; args: string[] } |
 }
 
   // Landing Page Submissions (Start New Chat Session)
-  const handleLandingSubmitPrompt = async (promptText: string) => {
+  const handleLandingSubmitPrompt = async (promptText: string, _model?: string, attachedFiles?: string[]) => {
     // Auto-manage Git: auto-init repo if missing, or auto-create initial commit if 0-commit repo
     if (project && !project.is_git_repo) {
       try {
@@ -1276,11 +1276,11 @@ function parseShellCommand(input: string): { program: string; args: string[] } |
       return;
     }
 
-    await handlePreviewContext(promptText, newChatId);
+    await handlePreviewContext(promptText, newChatId, attachedFiles);
   };
 
   // Chat Thread Submissions (Follow-up message in active chat)
-  const handleChatThreadSubmitPrompt = async (promptText: string) => {
+  const handleChatThreadSubmitPrompt = async (promptText: string, _model?: string, attachedFiles?: string[]) => {
     const currentChatId = activeChatIdRef.current || `task_${Date.now()}`;
     activeChatIdRef.current = currentChatId;
     activeTaskIdRef.current = currentChatId;
@@ -1320,7 +1320,7 @@ function parseShellCommand(input: string): { program: string; args: string[] } |
       return;
     }
 
-    await handlePreviewContext(promptText, currentChatId);
+    await handlePreviewContext(promptText, currentChatId, attachedFiles);
   };
 
   const handleSelectRecentChat = async (chat: ChatSummaryRecord) => {

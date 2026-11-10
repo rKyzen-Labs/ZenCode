@@ -42,7 +42,8 @@ impl CascadePlannerClient {
             .map_err(|e| format!("Security validation failed: {e}"))?;
 
         let prompt_text = context.to_prompt_text();
-        let estimated_tokens = Self::estimate_tokens(&prompt_text);
+        let attachment_tokens: u32 = context.multimodal_attachments.iter().map(|_| 1000).sum();
+        let estimated_tokens = Self::estimate_tokens(&prompt_text) + attachment_tokens;
 
         // Max retry loop for sliding window queues
         let mut attempts = 0;
@@ -98,13 +99,24 @@ impl CascadePlannerClient {
             self.emit_quota_update(&model_id, app_handle).await;
 
             // 3. Prepare Gemini API Request
+            let mut parts = vec![
+                serde_json::json!({ "text": prompt_text })
+            ];
+
+            for attachment in &context.multimodal_attachments {
+                parts.push(serde_json::json!({
+                    "inlineData": {
+                        "mimeType": attachment.mime_type,
+                        "data": attachment.base64_data
+                    }
+                }));
+            }
+
             let request_body = serde_json::json!({
                 "contents": [
                     {
                         "role": "user",
-                        "parts": [
-                            { "text": prompt_text }
-                        ]
+                        "parts": parts
                     }
                 ],
                 "generationConfig": {

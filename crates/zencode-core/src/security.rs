@@ -296,6 +296,7 @@ mod tests {
             approved_source_excerpts: vec![],
             constraints: vec![],
             conversation_history: vec![],
+            ..Default::default()
         };
         let plan_result = planner.plan(&current_key, &context).await;
         assert!(plan_result.is_err(), "Expected planning to fail with invalid API key");
