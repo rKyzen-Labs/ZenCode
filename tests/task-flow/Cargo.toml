@@ -47,6 +47,34 @@ path = "src/bin/test_qwen25_coder.rs"
 name = "test_advisory_e2e"
 path = "src/bin/test_advisory_e2e.rs"
 
+[[bin]]
+name = "test_multiturn_chat"
+path = "src/bin/test_multiturn_chat.rs"
+
+[[bin]]
+name = "test_six_turn_history"
+path = "src/bin/test_six_turn_history.rs"
+
+[[bin]]
+name = "test_worker_process_kill"
+path = "src/bin/test_worker_process_kill.rs"
+
+[[bin]]
+name = "test_three_task_undo"
+path = "src/bin/test_three_task_undo.rs"
+
+[[bin]]
+name = "test_git_scenarios"
+path = "src/bin/test_git_scenarios.rs"
+
+[[bin]]
+name = "test_running_indicators"
+path = "src/bin/test_running_indicators.rs"
+
+[[bin]]
+name = "diagnostic_multistep"
+path = "src/bin/diagnostic_multistep.rs"
+
 [dependencies]
 zencode-core = { path = "../../crates/zencode-core" }
 tokio = { version = "1.43", features = ["full"] }

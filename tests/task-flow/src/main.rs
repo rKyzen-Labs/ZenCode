@@ -140,6 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Free-tier planning only: produce clear step-by-step guidance".into(),
             "All implementation must execute locally using local Ollama worker".into(),
         ],
+        conversation_history: vec![],
     };
 
     context.assert_no_secrets().expect("Security check failed: secrets detected in context payload!");

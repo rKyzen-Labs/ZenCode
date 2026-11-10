@@ -9,6 +9,7 @@ pub enum SecurityError {
 }
 
 pub const ZENCODE_GEMINI_KEY_TARGET: &str = "zencode:gemini_api_key";
+pub const ZENCODE_GROQ_KEY_TARGET: &str = "zencode:groq_api_key";
 
 pub struct CredentialService;
 
@@ -29,6 +30,42 @@ impl CredentialService {
     #[cfg(windows)]
     pub fn set_gemini_api_key(key: &str) -> Result<(), SecurityError> {
         Self::set_generic_credential(ZENCODE_GEMINI_KEY_TARGET, "zencode", key)
+    }
+
+    #[cfg(windows)]
+    pub fn get_groq_api_key() -> Result<String, SecurityError> {
+        Self::get_generic_credential(ZENCODE_GROQ_KEY_TARGET)
+    }
+
+    #[cfg(not(windows))]
+    pub fn get_groq_api_key() -> Result<String, SecurityError> {
+        Err(SecurityError::WindowsCredentialError(
+            "Windows Credential Manager is only supported on Windows".into(),
+        ))
+    }
+
+    #[cfg(windows)]
+    pub fn set_groq_api_key(key: &str) -> Result<(), SecurityError> {
+        Self::set_generic_credential(ZENCODE_GROQ_KEY_TARGET, "zencode", key)
+    }
+
+    #[cfg(not(windows))]
+    pub fn set_groq_api_key(_key: &str) -> Result<(), SecurityError> {
+        Err(SecurityError::WindowsCredentialError(
+            "Windows Credential Manager is only supported on Windows".into(),
+        ))
+    }
+
+    #[cfg(windows)]
+    pub fn delete_groq_api_key() -> Result<(), SecurityError> {
+        Self::delete_generic_credential(ZENCODE_GROQ_KEY_TARGET)
+    }
+
+    #[cfg(not(windows))]
+    pub fn delete_groq_api_key() -> Result<(), SecurityError> {
+        Err(SecurityError::WindowsCredentialError(
+            "Windows Credential Manager is only supported on Windows".into(),
+        ))
     }
 
     #[cfg(windows)]
@@ -150,6 +187,33 @@ impl CredentialService {
         }
         Ok(())
     }
+
+    #[cfg(windows)]
+    pub fn delete_generic_credential(target: &str) -> Result<(), SecurityError> {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
+
+        let mut target_u16: Vec<u16> = OsStr::new(target).encode_wide().collect();
+        target_u16.push(0);
+
+        unsafe {
+            let ok = CredDeleteW(target_u16.as_ptr(), CRED_TYPE_GENERIC, 0);
+            if ok == 0 {
+                let err = GetLastError();
+                if err == 1168 {
+                    // ERROR_NOT_FOUND - already not present
+                    return Ok(());
+                }
+                return Err(SecurityError::WindowsCredentialError(format!(
+                    "CredDeleteW failed with error code: {}",
+                    err
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Utility for redacting sensitive secrets from any logs or diagnostic traces.
@@ -165,6 +229,13 @@ pub fn redact_secrets(text: &str, secret: Option<&str>) -> String {
         if pos + 39 <= out.len() {
             out.replace_range(pos..pos + 39, "[REDACTED_API_KEY]");
         }
+    }
+    if let Some(pos) = out.find("gsk_") {
+        let end = out[pos..]
+            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}')
+            .map(|i| pos + i)
+            .unwrap_or(out.len());
+        out.replace_range(pos..end, "[REDACTED_API_KEY]");
     }
     out
 }
@@ -217,6 +288,7 @@ mod tests {
             git_branch_and_status: "main clean".into(),
             approved_source_excerpts: vec![],
             constraints: vec![],
+            conversation_history: vec![],
         };
         let plan_result = planner.plan(&current_key, &context).await;
         assert!(plan_result.is_err(), "Expected planning to fail with invalid API key");

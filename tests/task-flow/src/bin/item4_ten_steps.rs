@@ -51,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         git_branch_and_status: "main clean".into(),
         approved_source_excerpts: vec![],
         constraints: vec![],
+        conversation_history: vec![],
     };
     let plan_res = planner.plan(dummy_key, &ctx).await;
     assert!(plan_res.is_err(), "Invalid key MUST fail planning");

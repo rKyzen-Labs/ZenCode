@@ -41,6 +41,10 @@ pub enum GitError {
     WorktreeError(String),
     #[error("This repository has no commits yet. Zencode needs at least one commit to create an isolated task branch.")]
     UnbornHead,
+    #[error("Corrupted Git repository: {0}")]
+    CorruptedRepository(String),
+    #[error("Undo conflict: {0}")]
+    UndoConflict(String),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 }
@@ -178,11 +182,13 @@ impl GitService {
     }
 
     /// 3. create_task_worktree(repo_path, task_id) — creates a new worktree at a path like ../.zencode-worktrees/{task_id}
-    /// on a new branch named zencode/task-{task_id}. Fails hard if primary tree is dirty and user has not explicitly acknowledged.
+    /// on a new branch named zencode/task-{task_id}.
+    /// Automatically handles Scenarios 1, 2, 3, 7, 8, 12: auto-commits dirty primary trees with "Pre-task checkpoint",
+    /// auto-creates initial commit if unborn HEAD, auto-cleans stale leftover task folders, and auto-suffixes colliding branch names.
     pub fn create_task_worktree(
         repo_path: &Path,
         task_id: &str,
-        acknowledge_dirty: bool,
+        _acknowledge_dirty: bool,
     ) -> Result<WorktreeInfo, GitError> {
         // Validate task_id (alphanumeric, dashes, underscores)
         if task_id.is_empty()
@@ -193,23 +199,63 @@ impl GitService {
             return Err(GitError::InvalidTaskId(task_id.to_string()));
         }
 
-        if !Self::is_git_repo(repo_path)? {
-            return Err(GitError::NotAGitRepo(repo_path.to_string_lossy().to_string()));
+        let clean_repo = clean_path_for_git(repo_path);
+        if !clean_repo.exists() {
+            return Err(GitError::PathNotFound(clean_repo.to_string_lossy().to_string()));
         }
 
-        // Hard enforcement: check if primary tree is clean
-        let status = Self::get_primary_tree_status(repo_path)?;
-        if !status.is_clean && !acknowledge_dirty {
-            return Err(GitError::DirtyPrimaryTree {
-                count: status.uncommitted_files.len(),
-                uncommitted_files: status.uncommitted_files,
-            });
+        // Scenario 12: Check repo corruption (destructive territory — do not touch)
+        if Self::check_repo_corruption(&clean_repo)? {
+            return Err(GitError::CorruptedRepository(
+                "This project's Git history appears damaged and Zencode can't safely continue automatically. No changes have been made.".to_string(),
+            ));
         }
 
-        let canonical_repo = repo_path
+        let mut system_notices: Vec<String> = Vec::new();
+
+        // Scenario 1: Silently init if not a Git repo
+        if !Self::is_git_repo(&clean_repo)? {
+            Self::init_repo(&clean_repo)?;
+            system_notices.push("Git initialized.".to_string());
+        }
+
+        // Scenario 3: Primary working tree uncommitted changes auto-commit before starting task
+        let status = Self::get_primary_tree_status(&clean_repo)?;
+        if !status.is_clean {
+            let (add_ok, _, _) = Self::run_cmd_allow_err(&clean_repo, &["add", "-A"])?;
+            if add_ok {
+                let (commit_ok, _, _) = Self::run_cmd_allow_err(
+                    &clean_repo,
+                    &["commit", "-m", "Pre-task checkpoint"],
+                )?;
+                if commit_ok {
+                    system_notices.push("Saved your existing changes before starting this task.".to_string());
+                }
+            }
+        }
+
+        // Scenario 2: Unborn HEAD detection & auto empty commit
+        let (has_head, mut head_sha, _) = Self::run_cmd_allow_err(
+            &clean_repo,
+            &["rev-parse", "--verify", "HEAD"],
+        )?;
+
+        if !has_head || head_sha.trim().is_empty() {
+            Self::create_initial_empty_commit(&clean_repo)?;
+            let (_, new_sha, _) = Self::run_cmd_allow_err(
+                &clean_repo,
+                &["rev-parse", "--verify", "HEAD"],
+            )?;
+            head_sha = new_sha;
+            system_notices.push("Initial commit created.".to_string());
+        }
+
+        let base_commit = head_sha.trim().to_string();
+
+        let canonical_repo = clean_repo
             .canonicalize()
             .map(|p| clean_path_for_git(&p))
-            .unwrap_or_else(|_| clean_path_for_git(repo_path));
+            .unwrap_or_else(|_| clean_path_for_git(&clean_repo));
 
         // Target worktree path at ../.zencode-worktrees/{task_id}
         let worktree_dir = if let Some(parent) = canonical_repo.parent() {
@@ -222,49 +268,63 @@ impl GitService {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        // Check if HEAD exists in primary repository (empty / 0-commit repos have unborn HEAD)
-        let (has_head, head_sha, _) = Self::run_cmd_allow_err(
-            repo_path,
-            &["rev-parse", "--verify", "HEAD"],
-        )?;
-
-        if !has_head || head_sha.trim().is_empty() {
-            return Err(GitError::UnbornHead);
-        }
-
-        let base_commit = head_sha.trim().to_string();
-        let branch_name = format!("zencode/task-{}", task_id);
         let worktree_path_str = worktree_dir.to_string_lossy().to_string();
 
-        // Check if branch already exists
-        let (branch_exists, _, _) = Self::run_cmd_allow_err(
-            repo_path,
-            &["rev-parse", "--verify", &branch_name],
-        )?;
-
-        if branch_exists {
-            Self::run_cmd(
-                repo_path,
-                &["worktree", "add", &worktree_path_str, &branch_name],
-            )?;
-        } else {
-            Self::run_cmd(
-                repo_path,
-                &[
-                    "worktree",
-                    "add",
-                    "-b",
-                    &branch_name,
-                    &worktree_path_str,
-                    &base_commit,
-                ],
-            )?;
+        // Scenario 7: Stale worktree cleanup if path already exists (leftover from crash)
+        let mut cleaned_stale = false;
+        if worktree_dir.exists() {
+            let _ = Self::run_cmd_allow_err(&clean_repo, &["worktree", "remove", "--force", &worktree_path_str]);
+            let _ = Self::run_cmd_allow_err(&clean_repo, &["worktree", "prune"]);
+            if worktree_dir.exists() {
+                let _ = std::fs::remove_dir_all(&worktree_dir);
+            }
+            cleaned_stale = true;
         }
+
+        // Also prune any leftover dead worktree records
+        let _ = Self::run_cmd_allow_err(&clean_repo, &["worktree", "prune"]);
+
+        if cleaned_stale {
+            system_notices.push("Cleaned up a leftover task folder.".to_string());
+        }
+
+        // Scenario 8: Branch name collision resolution
+        let base_branch_name = format!("zencode/task-{}", task_id);
+        let mut branch_name = base_branch_name.clone();
+        let mut suffix = 1;
+        while {
+            let (branch_exists, _, _) = Self::run_cmd_allow_err(
+                &clean_repo,
+                &["rev-parse", "--verify", &branch_name],
+            )?;
+            branch_exists
+        } {
+            branch_name = format!("{}-{}", base_branch_name, suffix);
+            suffix += 1;
+        }
+
+        Self::run_cmd(
+            &clean_repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &branch_name,
+                &worktree_path_str,
+                &base_commit,
+            ],
+        )?;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
+
+        let notice_combined = if system_notices.is_empty() {
+            None
+        } else {
+            Some(system_notices.join("\n"))
+        };
 
         Ok(WorktreeInfo {
             task_id: task_id.to_string(),
@@ -272,6 +332,7 @@ impl GitService {
             worktree_path: worktree_path_str,
             base_commit,
             created_at: now,
+            system_notice: notice_combined,
         })
     }
 
@@ -498,11 +559,11 @@ impl GitService {
     }
 
     /// 5. accept_task_changes(worktree_path, target_branch, acknowledge_dirty) — merges or fast-forwards the task branch
-    /// into the target branch after user confirmation. Handles conflicts by stopping and showing options.
+    /// into the target branch. Handles conflicts automatically in favor of task branch (Scenario 5).
     pub fn accept_task_changes(
         worktree_path: &Path,
         target_branch: &str,
-        acknowledge_dirty: bool,
+        _acknowledge_dirty: bool,
     ) -> Result<MergeResult, GitError> {
         let clean_wt = clean_path_for_git(worktree_path);
         if !clean_wt.exists() {
@@ -531,13 +592,11 @@ impl GitService {
             )?;
         }
 
-        // Primary working tree must be clean before merge unless acknowledged
+        // Primary working tree uncommitted changes: auto-checkpoint so changes are never lost
         let primary_status = Self::get_primary_tree_status(&repo_path)?;
-        if !primary_status.is_clean && !acknowledge_dirty {
-            return Err(GitError::DirtyPrimaryTree {
-                count: primary_status.uncommitted_files.len(),
-                uncommitted_files: primary_status.uncommitted_files,
-            });
+        if !primary_status.is_clean {
+            let _ = Self::run_cmd_allow_err(&repo_path, &["add", "-A"]);
+            let _ = Self::run_cmd_allow_err(&repo_path, &["commit", "-m", "Pre-merge checkpoint"]);
         }
 
         // Checkout target branch in main repository if not already on it
@@ -566,20 +625,24 @@ impl GitService {
         )?;
 
         if !merge_ok {
-            // Collect conflicting files
-            let conflict_files = Self::run_cmd(&repo_path, &["diff", "--name-only", "--diff-filter=U"])
-                .unwrap_or_default()
-                .lines()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<String>>();
-
-            // Always abort merge so primary repository is untouched and clean
-            let _ = Self::run_cmd_allow_err(&repo_path, &["merge", "--abort"]);
-
-            return Ok(MergeResult::Conflict {
-                conflicting_files: conflict_files,
-            });
+            // Automatic conflict resolution: task branch version wins (Scenario 5)
+            let (unmerged_ok, unmerged_out, _) = Self::run_cmd_allow_err(
+                &repo_path,
+                &["diff", "--name-only", "--diff-filter=U"],
+            )?;
+            if unmerged_ok {
+                for file in unmerged_out.lines().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    let (co_ok, _, _) = Self::run_cmd_allow_err(&repo_path, &["checkout", "--theirs", "--", file])?;
+                    if !co_ok {
+                        let _ = Self::run_cmd_allow_err(&repo_path, &["rm", "-f", file]);
+                    }
+                }
+            }
+            let _ = Self::run_cmd_allow_err(&repo_path, &["add", "-A"]);
+            let _ = Self::run_cmd_allow_err(
+                &repo_path,
+                &["commit", "-m", &format!("Merge task branch {} (auto-resolved conflicts)", task_branch)],
+            );
         }
 
         let new_head = match Self::run_cmd_allow_err(&repo_path, &["rev-parse", "HEAD"])? {
@@ -630,6 +693,290 @@ impl GitService {
         }
 
         Ok(())
+    }
+
+    /// Silently initializes a new Git repository with default branch 'main' and creates an initial empty commit.
+    pub fn init_repo(repo_path: &Path) -> Result<(), GitError> {
+        let clean = clean_path_for_git(repo_path);
+        if !clean.exists() {
+            return Err(GitError::PathNotFound(clean.to_string_lossy().to_string()));
+        }
+
+        let (ok, _, _) = Self::run_cmd_allow_err(&clean, &["init", "-b", "main"])?;
+        if !ok {
+            let (ok2, _, err2) = Self::run_cmd_allow_err(&clean, &["init"])?;
+            if !ok2 {
+                return Err(GitError::CommandFailed {
+                    command: "git init".to_string(),
+                    stderr: err2,
+                });
+            }
+        }
+        let _ = Self::create_initial_empty_commit(&clean);
+        Ok(())
+    }
+
+    /// On every task completion: commits all changes in the task worktree with task_summary,
+    /// merges the task branch into the primary branch (resolving conflicts automatically with task branch winning),
+    /// cleans up the worktree, and returns the commit hash and conflict flag.
+    pub fn commit_and_merge_task_to_primary(
+        worktree_path: &Path,
+        target_branch: &str,
+        commit_message: &str,
+    ) -> Result<MergeOutcome, GitError> {
+        let clean_wt = clean_path_for_git(worktree_path);
+        if !clean_wt.exists() {
+            return Err(GitError::PathNotFound(clean_wt.to_string_lossy().to_string()));
+        }
+
+        let repo_path = Self::find_repo_root_from_worktree(&clean_wt)?;
+
+        // Check if there are changes in worktree
+        let status = Self::run_cmd(&clean_wt, &["status", "--porcelain=v1", "-uall"])?;
+        if status.trim().is_empty() {
+            // No changes produced by task
+            let task_branch = Self::run_cmd(&clean_wt, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let wt_str = clean_wt.to_string_lossy().to_string();
+            let _ = Self::run_cmd_allow_err(&repo_path, &["worktree", "remove", "--force", &wt_str]);
+            if !task_branch.is_empty() && task_branch != target_branch {
+                let _ = Self::run_cmd_allow_err(&repo_path, &["branch", "-D", &task_branch]);
+            }
+            let _ = std::fs::remove_dir_all(&clean_wt);
+            return Ok(MergeOutcome {
+                commit_sha: None,
+                conflict_resolved: false,
+            });
+        }
+
+        // Commit all changes in worktree to the task branch
+        Self::run_cmd(&clean_wt, &["add", "-A"])?;
+        Self::run_cmd(&clean_wt, &["commit", "-m", commit_message])?;
+
+        let task_branch = Self::run_cmd(&clean_wt, &["rev-parse", "--abbrev-ref", "HEAD"])?
+            .trim()
+            .to_string();
+
+        let effective_target = if target_branch.trim().is_empty() {
+            match Self::run_cmd_allow_err(&repo_path, &["branch", "--show-current"])? {
+                (true, b, _) if !b.trim().is_empty() => b.trim().to_string(),
+                _ => "main".to_string(),
+            }
+        } else {
+            target_branch.to_string()
+        };
+
+        // Switch to target branch in primary repo if needed
+        let current_branch = match Self::run_cmd_allow_err(&repo_path, &["branch", "--show-current"])? {
+            (true, b, _) if !b.trim().is_empty() => b.trim().to_string(),
+            _ => effective_target.clone(),
+        };
+
+        if current_branch != effective_target {
+            let _ = Self::run_cmd_allow_err(&repo_path, &["checkout", &effective_target]);
+        }
+
+        // Scenario 3: If primary working tree has uncommitted files, auto-checkpoint before merge
+        let primary_status = Self::get_primary_tree_status(&repo_path)?;
+        if !primary_status.is_clean {
+            let _ = Self::run_cmd_allow_err(&repo_path, &["add", "-A"]);
+            let _ = Self::run_cmd_allow_err(&repo_path, &["commit", "-m", "Pre-merge checkpoint"]);
+        }
+
+        let mut conflict_resolved = false;
+
+        // Merge task branch into primary with fast-forward preferred
+        let (merge_ok, _, _merge_err) = Self::run_cmd_allow_err(
+            &repo_path,
+            &["merge", "--ff", "-m", commit_message, &task_branch],
+        )?;
+
+        if !merge_ok {
+            // Attempt standard merge if ff wasn't cleanly applied
+            let (m2_ok, _, _) = Self::run_cmd_allow_err(
+                &repo_path,
+                &["merge", "--no-ff", "-m", commit_message, &task_branch],
+            )?;
+
+            if !m2_ok {
+                // Scenario 5: Conflict resolution — task branch's version wins
+                conflict_resolved = true;
+                let (unmerged_ok, unmerged_out, _) = Self::run_cmd_allow_err(
+                    &repo_path,
+                    &["diff", "--name-only", "--diff-filter=U"],
+                )?;
+                if unmerged_ok {
+                    for file in unmerged_out.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+                        let (co_ok, _, _) = Self::run_cmd_allow_err(
+                            &repo_path,
+                            &["checkout", "--theirs", "--", file],
+                        )?;
+                        if !co_ok {
+                            let _ = Self::run_cmd_allow_err(&repo_path, &["rm", "-f", file]);
+                        }
+                    }
+                }
+                let _ = Self::run_cmd_allow_err(&repo_path, &["add", "-A"]);
+                let _ = Self::run_cmd_allow_err(
+                    &repo_path,
+                    &["commit", "-m", &format!("{} (resolved conflicts - task branch won)", commit_message)],
+                );
+            }
+        }
+
+        let primary_head = Self::run_cmd(&repo_path, &["rev-parse", "HEAD"])?
+            .trim()
+            .to_string();
+
+        // Clean up worktree and task branch
+        let wt_str = clean_wt.to_string_lossy().to_string();
+        let _ = Self::run_cmd_allow_err(&repo_path, &["worktree", "remove", "--force", &wt_str]);
+        if !task_branch.is_empty() && task_branch != effective_target {
+            let _ = Self::run_cmd_allow_err(&repo_path, &["branch", "-D", &task_branch]);
+        }
+        let _ = std::fs::remove_dir_all(&clean_wt);
+
+        Ok(MergeOutcome {
+            commit_sha: Some(primary_head),
+            conflict_resolved,
+        })
+    }
+
+    /// Reverts a specific commit by hash on the primary branch using `git revert <commit_hash> --no-edit`.
+    /// Does NOT perform git reset --hard, and does NOT target whatever the latest commit happens to be.
+    /// Handles conflicts automatically in favor of revert's intent (Scenario 6).
+    /// Returns (new_head_sha, conflict_adjusted).
+    pub fn revert_commit(repo_path: &Path, commit_sha: &str) -> Result<(String, bool), GitError> {
+        let clean = clean_path_for_git(repo_path);
+        if !clean.exists() {
+            return Err(GitError::PathNotFound(clean.to_string_lossy().to_string()));
+        }
+
+        let (is_merge, _, _) = Self::run_cmd_allow_err(
+            &clean,
+            &["rev-parse", "-q", "--verify", &format!("{}^2", commit_sha)],
+        )?;
+
+        let revert_args: &[&str] = if is_merge {
+            &["revert", "-m", "1", commit_sha, "--no-edit"]
+        } else {
+            &["revert", commit_sha, "--no-edit"]
+        };
+
+        let (ok, _, stderr) = Self::run_cmd_allow_err(&clean, revert_args)?;
+        if ok {
+            let new_head = Self::run_cmd(&clean, &["rev-parse", "HEAD"])?
+                .trim()
+                .to_string();
+            return Ok((new_head, false));
+        }
+
+        // Clean revert failed. Abort and retry with revert's intent winning (-X theirs) (Scenario 6)
+        let _ = Self::run_cmd_allow_err(&clean, &["revert", "--abort"]);
+
+        let strategy_args: &[&str] = if is_merge {
+            &["revert", "-X", "theirs", "-m", "1", commit_sha, "--no-edit"]
+        } else {
+            &["revert", "-X", "theirs", commit_sha, "--no-edit"]
+        };
+
+        let (s_ok, _, s_err) = Self::run_cmd_allow_err(&clean, strategy_args)?;
+        if s_ok {
+            let new_head = Self::run_cmd(&clean, &["rev-parse", "HEAD"])?
+                .trim()
+                .to_string();
+            return Ok((new_head, true));
+        }
+
+        // If -X theirs also had unmerged files, resolve them in favor of the revert state
+        let (unmerged_ok, unmerged_out, _) = Self::run_cmd_allow_err(&clean, &["diff", "--name-only", "--diff-filter=U"])?;
+        if unmerged_ok && !unmerged_out.trim().is_empty() {
+            for file in unmerged_out.lines().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+                let (co_ok, _, _) = Self::run_cmd_allow_err(&clean, &["checkout", "--theirs", "--", file])?;
+                if !co_ok {
+                    let _ = Self::run_cmd_allow_err(&clean, &["rm", "-f", file]);
+                }
+            }
+            let _ = Self::run_cmd_allow_err(&clean, &["add", "-A"]);
+            let (c_ok, _, _) = Self::run_cmd_allow_err(&clean, &["commit", "-m", &format!("Revert {} (adjusted conflicts)", commit_sha)])?;
+            if c_ok {
+                let new_head = Self::run_cmd(&clean, &["rev-parse", "HEAD"])?
+                    .trim()
+                    .to_string();
+                return Ok((new_head, true));
+            }
+        }
+
+        // Check if nothing to commit / already undone
+        let (status_ok, status_out, _) = Self::run_cmd_allow_err(&clean, &["status", "--porcelain"])?;
+        if status_ok && status_out.trim().is_empty() {
+            let _ = Self::run_cmd_allow_err(&clean, &["revert", "--abort"]);
+            return Err(GitError::UndoConflict(
+                "Could not undo task: the target changes were already modified or deleted by subsequent tasks.".to_string(),
+            ));
+        }
+
+        let _ = Self::run_cmd_allow_err(&clean, &["revert", "--abort"]);
+        Err(GitError::UndoConflict(format!(
+            "Could not undo task: target files could not be cleanly reverted ({})",
+            if !s_err.trim().is_empty() { s_err.trim() } else { stderr.trim() }
+        )))
+    }
+
+    /// Undo task changes by reverting the specific commit created for this task.
+    pub fn undo_task_changes(repo_path: &Path, commit_sha: &str) -> Result<(String, bool), GitError> {
+        Self::revert_commit(repo_path, commit_sha)
+    }
+
+    /// Scenario 9: Detects detached HEAD state and silently recovers onto a safe branch.
+    pub fn detect_and_fix_detached_head(repo_path: &Path) -> Result<Option<String>, GitError> {
+        let clean = clean_path_for_git(repo_path);
+        if !clean.exists() || !Self::is_git_repo(&clean)? {
+            return Ok(None);
+        }
+
+        let (has_head, head_sha, _) = Self::run_cmd_allow_err(&clean, &["rev-parse", "--verify", "HEAD"])?;
+        if !has_head || head_sha.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let (is_sym, _, _) = Self::run_cmd_allow_err(&clean, &["symbolic-ref", "-q", "HEAD"])?;
+        if !is_sym {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let recovered_branch = format!("zencode-recovered-{}", now);
+            Self::run_cmd(&clean, &["checkout", "-b", &recovered_branch])?;
+            return Ok(Some(recovered_branch));
+        }
+        Ok(None)
+    }
+
+    /// Scenario 12: Detects corrupted repository (.git directory damaged).
+    pub fn check_repo_corruption(repo_path: &Path) -> Result<bool, GitError> {
+        let clean = clean_path_for_git(repo_path);
+        let git_dir = clean.join(".git");
+        if !git_dir.exists() {
+            return Ok(false);
+        }
+
+        let (ok, _, stderr) = Self::run_cmd_allow_err(&clean, &["status"])?;
+        if !ok {
+            let err = stderr.to_lowercase();
+            if err.contains("bad object")
+                || err.contains("corrupt")
+                || err.contains("fatal: not a git repository")
+                || err.contains("object file")
+                || err.contains("missing object")
+                || err.contains("broken link")
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// 7. list_active_worktrees(repo_path) — returns all Zencode-managed worktrees for orphan detection on startup
@@ -941,23 +1288,13 @@ mod tests {
     }
 
     #[test]
-    fn test_create_task_worktree_dirty_tree_fails_without_acknowledgment() {
+    fn test_create_task_worktree_dirty_tree_auto_checkpoints() {
         let repo = TestRepo::new();
         std::fs::write(repo.path.join("dirty.txt"), "uncommitted work\n").unwrap();
 
-        // Must fail hard when acknowledge_dirty = false
-        let res = GitService::create_task_worktree(&repo.path, "test1", false);
-        assert!(res.is_err());
-        match res.unwrap_err() {
-            GitError::DirtyPrimaryTree { count, uncommitted_files } => {
-                assert_eq!(count, 1);
-                assert_eq!(uncommitted_files[0].path, "dirty.txt");
-            }
-            other => panic!("Expected DirtyPrimaryTree error, got: {other:?}"),
-        }
-
-        // Must succeed when acknowledge_dirty = true
-        let wt = GitService::create_task_worktree(&repo.path, "test1", true).unwrap();
+        // Scenario 3: Silently commits dirty primary changes to Pre-task checkpoint and creates worktree
+        let wt = GitService::create_task_worktree(&repo.path, "test1", false).unwrap();
+        assert!(wt.system_notice.as_ref().unwrap().contains("Saved your existing changes before starting this task."));
         assert_eq!(wt.branch_name, "zencode/task-test1");
         assert!(Path::new(&wt.worktree_path).exists());
 
@@ -1131,18 +1468,17 @@ mod tests {
 
         let res = GitService::accept_task_changes(&wt_path, "main", false).unwrap();
         match res {
-            MergeResult::Conflict { conflicting_files } => {
-                assert!(conflicting_files.contains(&"shared.txt".to_string()));
+            MergeResult::Success { commit_sha } => {
+                assert!(!commit_sha.is_empty());
             }
-            MergeResult::Success { .. } => panic!("Expected conflict!"),
+            MergeResult::Conflict { .. } => panic!("Conflict must be automatically resolved with task branch winning!"),
         }
 
-        // Primary working tree must be clean because merge was aborted!
+        // Primary working tree must be clean
         let primary_status = GitService::get_primary_tree_status(&repo.path).unwrap();
-        assert!(primary_status.is_clean, "Primary repo must remain clean after conflict abort");
-
-        // Clean up
-        let _ = GitService::reject_task_changes(&wt_path, "conflict1");
+        assert!(primary_status.is_clean, "Primary repo must remain clean");
+        let content = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert!(content.contains("worktree change"), "Task branch changes must win");
     }
 
     #[test]
@@ -1194,7 +1530,7 @@ mod tests {
     }
 
     #[test]
-    fn test_accept_task_changes_with_acknowledge_dirty() {
+    fn test_accept_task_changes_with_auto_checkpoint_dirty() {
         let repo = TestRepo::new();
         let wt = GitService::create_task_worktree(&repo.path, "ack_dirty_task", false).unwrap();
         let wt_path = PathBuf::from(&wt.worktree_path);
@@ -1205,23 +1541,13 @@ mod tests {
         // Introduce dirty file in primary repo
         std::fs::write(repo.path.join("unrelated_dirty.txt"), "uncommitted work in primary\n").unwrap();
 
-        // Without acknowledgment -> fails with DirtyPrimaryTree
-        let err = GitService::accept_task_changes(&wt_path, "main", false).unwrap_err();
-        match err {
-            GitError::DirtyPrimaryTree { count, uncommitted_files } => {
-                assert_eq!(count, 1);
-                assert_eq!(uncommitted_files[0].path, "unrelated_dirty.txt");
-            }
-            other => panic!("Expected DirtyPrimaryTree, got: {other:?}"),
-        }
-
-        // With acknowledgment -> succeeds!
-        let merge_res = GitService::accept_task_changes(&wt_path, "main", true).unwrap();
+        // Automatically checkpoints primary without errors
+        let merge_res = GitService::accept_task_changes(&wt_path, "main", false).unwrap();
         match merge_res {
             MergeResult::Success { commit_sha } => {
                 assert!(!commit_sha.is_empty());
             }
-            MergeResult::Conflict { .. } => panic!("Expected clean merge with acknowledgment"),
+            MergeResult::Conflict { .. } => panic!("Expected clean merge with auto-checkpoint"),
         }
 
         // Primary repo contains both the merged task file and the uncommitted file
@@ -1247,34 +1573,221 @@ mod tests {
         let _ = Command::new("git").arg("-C").arg(&temp_dir).args(["config", "user.name", "Zencode Test"]).output();
         let _ = Command::new("git").arg("-C").arg(&temp_dir).args(["config", "user.email", "test@zencode.ai"]).output();
 
-        // 2. has_commits must be false
+        // 2. has_commits must initially be false
         assert_eq!(GitService::has_commits(&temp_dir).unwrap(), false);
 
-        // 3. create_task_worktree must fail with UnbornHead, NOT auto-commit
-        let res = GitService::create_task_worktree(&temp_dir, "unborn_test_task", false);
-        assert!(res.is_err());
-        match res.unwrap_err() {
-            GitError::UnbornHead => {}
-            other => panic!("Expected GitError::UnbornHead, got: {other:?}"),
-        }
-
-        // Verify still no commits exist
-        assert_eq!(GitService::has_commits(&temp_dir).unwrap(), false);
-
-        // 4. Explicit user action: create initial empty commit
-        let commit_res = GitService::create_initial_empty_commit(&temp_dir);
-        assert!(commit_res.is_ok());
-
-        // 5. has_commits must now be true
-        assert_eq!(GitService::has_commits(&temp_dir).unwrap(), true);
-
-        // 6. create_task_worktree must now succeed
-        let wt = GitService::create_task_worktree(&temp_dir, "unborn_test_task", false).unwrap();
+        // 3. create_task_worktree auto-creates the initial commit and succeeds seamlessly
+        let wt = GitService::create_task_worktree(&temp_dir, "unborn_test_task", false)
+            .expect("create_task_worktree should auto-create initial commit and succeed");
         assert_eq!(wt.branch_name, "zencode/task-unborn_test_task");
         assert!(Path::new(&wt.worktree_path).exists());
+
+        // 4. has_commits must now be true
+        assert_eq!(GitService::has_commits(&temp_dir).unwrap(), true);
 
         // Cleanup
         let _ = GitService::reject_task_changes(Path::new(&wt.worktree_path), "unborn_test_task");
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_three_sequential_tasks_and_middle_revert() {
+        let repo = TestRepo::new();
+
+        // Task 1: Add task1.rs
+        let wt1 = GitService::create_task_worktree(&repo.path, "task_1", false).unwrap();
+        let wt1_path = PathBuf::from(&wt1.worktree_path);
+        std::fs::write(wt1_path.join("task1.rs"), "pub fn task1() -> i32 { 1 }\n").unwrap();
+        let outcome1 = GitService::commit_and_merge_task_to_primary(&wt1_path, "main", "Task 1: Add task1.rs")
+            .unwrap();
+        let _commit1 = outcome1.commit_sha.expect("Task 1 should produce a commit");
+
+        // Task 2: Add task2.rs
+        let wt2 = GitService::create_task_worktree(&repo.path, "task_2", false).unwrap();
+        let wt2_path = PathBuf::from(&wt2.worktree_path);
+        std::fs::write(wt2_path.join("task2.rs"), "pub fn task2() -> i32 { 2 }\n").unwrap();
+        let outcome2 = GitService::commit_and_merge_task_to_primary(&wt2_path, "main", "Task 2: Add task2.rs")
+            .unwrap();
+        let commit2 = outcome2.commit_sha.expect("Task 2 should produce a commit");
+
+        // Task 3: Add task3.rs
+        let wt3 = GitService::create_task_worktree(&repo.path, "task_3", false).unwrap();
+        let wt3_path = PathBuf::from(&wt3.worktree_path);
+        std::fs::write(wt3_path.join("task3.rs"), "pub fn task3() -> i32 { 3 }\n").unwrap();
+        let outcome3 = GitService::commit_and_merge_task_to_primary(&wt3_path, "main", "Task 3: Add task3.rs")
+            .unwrap();
+        let _commit3 = outcome3.commit_sha.expect("Task 3 should produce a commit");
+
+        // Verify all 3 files exist in repo
+        assert!(repo.path.join("task1.rs").exists());
+        assert!(repo.path.join("task2.rs").exists());
+        assert!(repo.path.join("task3.rs").exists());
+
+        // Verify 3 distinct commits on main in order
+        let log_out = Command::new("git")
+            .arg("-C")
+            .arg(&repo.path)
+            .args(["log", "--oneline", "-n", "4"])
+            .output()
+            .unwrap();
+        let log_str = String::from_utf8_lossy(&log_out.stdout);
+        println!("Git log before undo:\n{}", log_str);
+        assert!(log_str.contains("Task 3: Add task3.rs"));
+        assert!(log_str.contains("Task 2: Add task2.rs"));
+        assert!(log_str.contains("Task 1: Add task1.rs"));
+
+        // Now Undo the middle task (Task 2) using revert_commit
+        let (revert_head, _) = GitService::revert_commit(&repo.path, &commit2).unwrap();
+        assert!(!revert_head.is_empty());
+
+        let log_after = Command::new("git")
+            .arg("-C")
+            .arg(&repo.path)
+            .args(["log", "--oneline", "-n", "5"])
+            .output()
+            .unwrap();
+        let log_after_str = String::from_utf8_lossy(&log_after.stdout);
+        println!("Git log after reverting Task 2:\n{}", log_after_str);
+
+        // Verify task 1 and task 3 files remain intact, but task 2 file is gone!
+        assert!(repo.path.join("task1.rs").exists(), "task1.rs should still exist");
+        assert!(!repo.path.join("task2.rs").exists(), "task2.rs should be removed by revert");
+        assert!(repo.path.join("task3.rs").exists(), "task3.rs should still exist");
+    }
+
+    #[test]
+    fn test_scenario1_and_scenario2_auto_init_and_empty_commit() {
+        let temp_dir = std::env::temp_dir().join(format!("zencode_sc1_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Non-git folder
+        assert!(!GitService::is_git_repo(&temp_dir).unwrap());
+
+        // create_task_worktree silently inits and creates empty commit (Scenario 1 & 2)
+        let _ = Command::new("git").arg("-C").arg(&temp_dir).args(["config", "user.name", "Test"]).output();
+        let _ = Command::new("git").arg("-C").arg(&temp_dir).args(["config", "user.email", "test@test.com"]).output();
+
+        let wt = GitService::create_task_worktree(&temp_dir, "sc1_task", false).unwrap();
+        assert!(GitService::is_git_repo(&temp_dir).unwrap());
+        assert!(GitService::has_commits(&temp_dir).unwrap());
+        assert!(wt.system_notice.is_some());
+
+        let _ = GitService::reject_task_changes(Path::new(&wt.worktree_path), "sc1_task");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_scenario3_dirty_primary_tree_pre_task_checkpoint() {
+        let repo = TestRepo::new();
+        // Create an uncommitted file on primary before task
+        std::fs::write(repo.path.join("user_work.txt"), "important user work\n").unwrap();
+
+        // Starting task should auto-checkpoint dirty tree without errors
+        let wt = GitService::create_task_worktree(&repo.path, "sc3_task", false).unwrap();
+        assert!(wt.system_notice.as_ref().unwrap().contains("Saved your existing changes before starting this task."));
+
+        let log_out = Command::new("git").arg("-C").arg(&repo.path).args(["log", "-n", "1", "--oneline"]).output().unwrap();
+        let log_str = String::from_utf8_lossy(&log_out.stdout);
+        assert!(log_str.contains("Pre-task checkpoint"), "Log should contain Pre-task checkpoint: {log_str}");
+
+        let _ = GitService::reject_task_changes(Path::new(&wt.worktree_path), "sc3_task");
+    }
+
+    #[test]
+    fn test_scenario5_merge_conflict_task_branch_wins() {
+        let repo = TestRepo::new();
+        std::fs::write(repo.path.join("shared.txt"), "line 1\nbase content\nline 3\n").unwrap();
+        let _ = Command::new("git").arg("-C").arg(&repo.path).args(["add", "shared.txt"]).output();
+        let _ = Command::new("git").arg("-C").arg(&repo.path).args(["commit", "-m", "add shared.txt"]).output();
+
+        let wt = GitService::create_task_worktree(&repo.path, "sc5_task", false).unwrap();
+        let wt_path = PathBuf::from(&wt.worktree_path);
+
+        // Task modifies shared.txt
+        std::fs::write(wt_path.join("shared.txt"), "line 1\nTASK BRANCH VERSION\nline 3\n").unwrap();
+
+        // Primary branch moves and modifies the same line
+        std::fs::write(repo.path.join("shared.txt"), "line 1\nPRIMARY COMPETING VERSION\nline 3\n").unwrap();
+        let _ = Command::new("git").arg("-C").arg(&repo.path).args(["commit", "-am", "competing commit"]).output();
+
+        // Merging task branch into primary must automatically resolve conflict with task branch winning!
+        let outcome = GitService::commit_and_merge_task_to_primary(&wt_path, "main", "Task: modify shared.txt").unwrap();
+        assert!(outcome.conflict_resolved, "Scenario 5 must flag conflict_resolved = true");
+
+        let content = std::fs::read_to_string(repo.path.join("shared.txt")).unwrap();
+        assert!(content.contains("TASK BRANCH VERSION"), "Task branch version must win over primary: {content}");
+        assert!(!content.contains("PRIMARY COMPETING VERSION"));
+    }
+
+    #[test]
+    fn test_scenario6_revert_conflict_revert_intent_wins() {
+        let repo = TestRepo::new();
+        std::fs::write(repo.path.join("config.txt"), "key=initial\n").unwrap();
+        let _ = Command::new("git").arg("-C").arg(&repo.path).args(["add", "config.txt"]).output();
+        let _ = Command::new("git").arg("-C").arg(&repo.path).args(["commit", "-m", "init config"]).output();
+
+        // Task 1: add feature setting
+        let wt1 = GitService::create_task_worktree(&repo.path, "task_rev1", false).unwrap();
+        let wt1_path = PathBuf::from(&wt1.worktree_path);
+        std::fs::write(wt1_path.join("config.txt"), "key=feature_setting\n").unwrap();
+        let out1 = GitService::commit_and_merge_task_to_primary(&wt1_path, "main", "Task 1").unwrap();
+        let sha1 = out1.commit_sha.unwrap();
+
+        // Task 2: modifies the same setting
+        let wt2 = GitService::create_task_worktree(&repo.path, "task_rev2", false).unwrap();
+        let wt2_path = PathBuf::from(&wt2.worktree_path);
+        std::fs::write(wt2_path.join("config.txt"), "key=feature_modified\n").unwrap();
+        let _ = GitService::commit_and_merge_task_to_primary(&wt2_path, "main", "Task 2").unwrap();
+
+        // Reverting Task 1 touches lines modified by Task 2 -> conflict!
+        // Revert's intent must win!
+        let (revert_sha, adjusted) = GitService::revert_commit(&repo.path, &sha1).unwrap();
+        assert!(!revert_sha.is_empty());
+        assert!(adjusted, "Revert should be marked as conflict-adjusted");
+
+        let content = std::fs::read_to_string(repo.path.join("config.txt")).unwrap();
+        assert!(content.contains("key=initial"), "Revert intent must win: {content}");
+    }
+
+    #[test]
+    fn test_scenario7_stale_worktree_cleanup() {
+        let repo = TestRepo::new();
+        // Simulate a stale leftover worktree folder from a crash
+        let canonical = repo.path.canonicalize().unwrap();
+        let wt_parent = canonical.parent().unwrap().join(".zencode-worktrees");
+        let stale_dir = wt_parent.join("stale_task");
+        std::fs::create_dir_all(&stale_dir).unwrap();
+        std::fs::write(stale_dir.join("leftover.txt"), "stale junk").unwrap();
+
+        let wt = GitService::create_task_worktree(&repo.path, "stale_task", false).unwrap();
+        assert!(wt.system_notice.as_ref().unwrap().contains("Cleaned up a leftover task folder."));
+        assert!(Path::new(&wt.worktree_path).exists());
+        assert!(!stale_dir.join("leftover.txt").exists(), "Leftover files must be cleaned");
+
+        let _ = GitService::reject_task_changes(Path::new(&wt.worktree_path), "stale_task");
+    }
+
+    #[test]
+    fn test_scenario9_detached_head_auto_recovery() {
+        let repo = TestRepo::new();
+        // Detach HEAD
+        let head_out = Command::new("git").arg("-C").arg(&repo.path).args(["rev-parse", "HEAD"]).output().unwrap();
+        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+        let _ = Command::new("git").arg("-C").arg(&repo.path).args(["checkout", &head_sha]).output().unwrap();
+
+        // Verify HEAD is detached
+        let sym_out = Command::new("git").arg("-C").arg(&repo.path).args(["symbolic-ref", "-q", "HEAD"]).output().unwrap();
+        assert!(!sym_out.status.success(), "HEAD should be detached");
+
+        // detect_and_fix_detached_head must recover to a safe branch
+        let recovered = GitService::detect_and_fix_detached_head(&repo.path).unwrap();
+        assert!(recovered.is_some(), "Should recover to a branch");
+        let branch_name = recovered.unwrap();
+        assert!(branch_name.starts_with("zencode-recovered-"));
+
+        let cur_branch = Command::new("git").arg("-C").arg(&repo.path).args(["branch", "--show-current"]).output().unwrap();
+        let cur_str = String::from_utf8_lossy(&cur_branch.stdout).trim().to_string();
+        assert_eq!(cur_str, branch_name);
     }
 }

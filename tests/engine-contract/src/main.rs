@@ -62,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "No cloud dependencies".into(),
             "All writes must use atomic file swaps".into(),
         ],
+        conversation_history: vec![],
     };
 
     println!("  -> Sending 1 explicit planning request to Gemini Interactions API...");

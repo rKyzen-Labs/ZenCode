@@ -27,6 +27,7 @@ base64 = "0.22"
 thiserror = "2.0"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.59"
 features = [

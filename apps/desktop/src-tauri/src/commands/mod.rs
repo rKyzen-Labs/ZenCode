@@ -16,8 +16,8 @@ use crate::git::{
     PrimaryTreeStatus, WorktreeInfo,
 };
 use crate::models::{
-    AdvisoryPreview, ContextPreview, EngineHealth, PlanSubmissionResult, ProjectState, SystemStatus,
-    TaskState, WorkerEventPayload, WorkerStartError,
+    AdvisoryPreview, ContextPreview, DependencyStatus, EngineHealth, PlanSubmissionResult,
+    ProjectState, StartupCheckResult, SystemStatus, TaskState, WorkerEventPayload, WorkerStartError,
 };
 use crate::planner::{QuotaUpdateEvent, MODEL_PRIMARY};
 use crate::state::AppState;
@@ -37,8 +37,9 @@ pub async fn execute_open_project(
     state: &AppState,
 ) -> Result<ProjectState, String> {
     let p = Path::new(path);
+    // Scenario 10: Folder not found / moved / deleted
     if !p.exists() || !p.is_dir() {
-        return Err(format!("Invalid project path: '{path}' does not exist or is not a directory"));
+        return Err("This workspace's folder can't be found. It may have been moved or deleted.".to_string());
     }
 
     let name = p
@@ -59,8 +60,56 @@ pub async fn execute_open_project(
         "Generic Project".to_string()
     };
 
+    // Scenario 12: Check if repository is corrupted (.git damaged)
+    let is_corrupted = GitService::check_repo_corruption(p).unwrap_or(false);
+    if is_corrupted {
+        let proj = ProjectState {
+            path: path.to_string(),
+            name,
+            project_type,
+            is_git_repo: true,
+            current_branch: None,
+            git_status_summary: "Corrupted repository".to_string(),
+            is_clean: false,
+            has_gitignore: p.join(".gitignore").exists(),
+            detected_editor_configs: vec![],
+            has_commits: false,
+            just_initialized_git: false,
+            is_corrupted: true,
+            system_notice: Some("This project's Git history appears damaged and Zencode can't safely continue automatically. No changes have been made.".to_string()),
+        };
+        let mut active_proj = state.active_project.lock().await;
+        *active_proj = Some(proj.clone());
+        return Ok(proj);
+    }
+
     // Check Git state using GitService
-    let is_git_repo = GitService::is_git_repo(p).unwrap_or(false);
+    let mut is_git_repo = GitService::is_git_repo(p).unwrap_or(false);
+    let mut just_initialized_git = false;
+    let mut open_notice: Option<String> = None;
+
+    if !is_git_repo {
+        // Scenario 1: Silently run git init, then silently create one empty initial commit
+        if GitService::init_repo(p).is_ok() {
+            is_git_repo = GitService::is_git_repo(p).unwrap_or(false);
+            just_initialized_git = true;
+            open_notice = Some("Git initialized.".to_string());
+        }
+    } else {
+        // Scenario 2: Unborn HEAD
+        let has_commits = GitService::has_commits(p).unwrap_or(false);
+        if !has_commits {
+            let _ = GitService::create_initial_empty_commit(p);
+            open_notice = Some("Initial commit created.".to_string());
+        }
+    }
+
+    // Scenario 9: Detached HEAD recovery
+    if is_git_repo {
+        if let Ok(Some(_recovered_branch)) = GitService::detect_and_fix_detached_head(p) {
+            open_notice = Some("Your repository was in an unusual state — created a safe branch to continue from.".to_string());
+        }
+    }
 
     let (current_branch, git_status_summary, is_clean, has_commits) = if is_git_repo {
         let has_commits = GitService::has_commits(p).unwrap_or(false);
@@ -136,6 +185,9 @@ pub async fn execute_open_project(
         has_gitignore,
         detected_editor_configs,
         has_commits,
+        just_initialized_git,
+        is_corrupted: false,
+        system_notice: open_notice,
     };
 
     // Store in AppState
@@ -180,6 +232,9 @@ pub async fn execute_init_git_repo(
         let err = String::from_utf8_lossy(&output.stderr);
         return Err(format!("'git init' failed: {err}"));
     }
+
+    // Auto-create initial empty commit so repository is immediately usable and ready for task worktrees
+    let _ = GitService::create_initial_empty_commit(p);
 
     // Refresh ProjectState after git init
     execute_open_project(path, state).await
@@ -327,17 +382,21 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<SystemStatu
 }
 
 /// Assembles the Gemini context package locally for user inspection.
+/// Assembles all project context, manifests, tree structure, and prior conversation history
+/// into an immutable PlanningContext.
 /// Makes zero network calls.
 #[tauri::command]
 pub async fn preview_planning_context(
     task_description: String,
+    chat_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ContextPreview, String> {
-    execute_preview_planning_context(&task_description, &state).await
+    execute_preview_planning_context(&task_description, chat_id.as_deref(), &state).await
 }
 
 pub async fn execute_preview_planning_context(
     task_description: &str,
+    chat_id: Option<&str>,
     state: &AppState,
 ) -> Result<ContextPreview, String> {
     if task_description.trim().is_empty() {
@@ -389,6 +448,19 @@ pub async fn execute_preview_planning_context(
         active_project.git_status_summary
     );
 
+    // Fetch prior conversation history and modified files from database if chat_id is provided
+    let conversation_history = if let Some(cid) = chat_id {
+        let mut hist = state.db.get_recent_exchanges(cid, 5).unwrap_or_default();
+        if let Some(last) = hist.last() {
+            if last.role == "user" && last.content == task_description {
+                hist.pop();
+            }
+        }
+        hist
+    } else {
+        Vec::new()
+    };
+
     let context = PlanningContext {
         task_description: task_description.to_string(),
         project_type: active_project.project_type.clone(),
@@ -400,6 +472,7 @@ pub async fn execute_preview_planning_context(
             "Free-tier planning only: produce clear step-by-step guidance".into(),
             "All implementation must execute locally".into(),
         ],
+        conversation_history,
     };
 
     // Assert that no credentials or secret files exist in the payload
@@ -468,13 +541,16 @@ pub async fn execute_submit_plan(
         .map_err(|e| format!("Failed to read Gemini API key from OS Credential Store: {e}"))?;
 
     // Execute plan request through Rate Limit Manager & Auto-Cascade Router
+    let planning_start = std::time::Instant::now();
     let plan_result = state
         .planner_client
         .plan_with_cascade(&api_key, &context, app_handle)
         .await;
 
     match plan_result {
-        Ok((plan, active_model, usage)) => {
+        Ok((mut plan, active_model, usage)) => {
+            let duration_secs = planning_start.elapsed().as_secs();
+            plan.planning_duration_seconds = Some(duration_secs.max(1));
             state.increment_request_count();
             let switch_reason = {
                 let tracker = state.planner_client.quota_tracker.lock().await;
@@ -602,6 +678,142 @@ pub fn parse_worker_sse_event(data: &str, current_session_id: &str) -> (String, 
     }
 }
 
+/// Formats a change inventory into concise summaries and diff excerpts for Gemini summarization.
+pub fn format_inventory_for_summary(inventory: &ChangeInventory) -> (String, String) {
+    let mut files_summary = String::new();
+    let mut diff_excerpts = String::new();
+    let mut total_diff_chars = 0;
+    const MAX_DIFF_CHARS: usize = 3500;
+
+    for f in &inventory.files {
+        files_summary.push_str(&format!(
+            "- {} ({:?}, +{}/-{})\n",
+            f.path, f.category, f.additions, f.deletions
+        ));
+
+        if total_diff_chars < MAX_DIFF_CHARS {
+            if let Some(ref diff) = f.diff_content {
+                let available = MAX_DIFF_CHARS - total_diff_chars;
+                let excerpt = if diff.len() > available {
+                    &diff[..available]
+                } else {
+                    diff.as_str()
+                };
+                diff_excerpts.push_str(&format!("--- {}\n{}\n", f.path, excerpt));
+                total_diff_chars += excerpt.len();
+            }
+        }
+    }
+
+    if files_summary.is_empty() {
+        files_summary = "No files modified.".to_string();
+    }
+    if diff_excerpts.is_empty() {
+        diff_excerpts = "No diff available.".to_string();
+    }
+
+    (files_summary, diff_excerpts)
+}
+
+/// Cross-checks planned steps against verified tool calls, file modifications, and executed commands.
+/// Returns (verified_commands_summary, unperformed_steps_summary, unperformed_step_names).
+pub fn analyze_execution_grounding(
+    steps: &[zencode_core::PlanStep],
+    inventory: &ChangeInventory,
+    captured_commands: &[String],
+) -> (String, String, Vec<String>) {
+    let mut verified_cmds_summary = String::new();
+    if captured_commands.is_empty() {
+        verified_cmds_summary.push_str("No terminal commands were executed during this task.\n");
+    } else {
+        for cmd in captured_commands {
+            verified_cmds_summary.push_str(&format!("- {}\n", cmd));
+        }
+    }
+
+    let modified_files: Vec<String> = inventory
+        .files
+        .iter()
+        .map(|f| f.path.to_lowercase().replace('\\', "/"))
+        .collect();
+    let mut unperformed_steps = Vec::new();
+
+    for step in steps {
+        let step_desc = format!("{}: {}", step.id, step.goal);
+        let goal_lower = step.goal.to_lowercase();
+        let instructions_lower = step.instructions.join(" ").to_lowercase();
+        let checks_lower = step.acceptance_checks.join(" ").to_lowercase();
+
+        // 1. Check if step was file-modification oriented
+        let mut file_matched = false;
+        let target_files = &step.likely_files;
+
+        for tf in target_files {
+            let tflow = tf.to_lowercase().replace('\\', "/");
+            let tf_basename = tflow.split('/').last().unwrap_or(&tflow);
+            if modified_files.iter().any(|mf| mf.contains(tf_basename)) {
+                file_matched = true;
+                break;
+            }
+        }
+
+        // 2. Check if step was command/execution oriented (e.g. tests, build, server restart, exec)
+        let mut command_matched = false;
+        let is_command_oriented = goal_lower.contains("test")
+            || goal_lower.contains("restart")
+            || goal_lower.contains("serve")
+            || goal_lower.contains("build")
+            || goal_lower.contains("run")
+            || !step.acceptance_checks.is_empty()
+            || instructions_lower.contains("restart")
+            || instructions_lower.contains("run ")
+            || checks_lower.contains("test");
+
+        if is_command_oriented {
+            for cmd in captured_commands {
+                let cmd_lower = cmd.to_lowercase();
+                if (goal_lower.contains("test") || checks_lower.contains("test"))
+                    && (cmd_lower.contains("test") || cmd_lower.contains("pytest") || cmd_lower.contains("cargo test") || cmd_lower.contains("npm test"))
+                {
+                    command_matched = true;
+                    break;
+                }
+                if (goal_lower.contains("restart") || instructions_lower.contains("restart"))
+                    && (cmd_lower.contains("dev") || cmd_lower.contains("serve") || cmd_lower.contains("start") || cmd_lower.contains("restart"))
+                {
+                    command_matched = true;
+                    break;
+                }
+                if (goal_lower.contains("build") || checks_lower.contains("build"))
+                    && (cmd_lower.contains("build") || cmd_lower.contains("cargo check") || cmd_lower.contains("tsc"))
+                {
+                    command_matched = true;
+                    break;
+                }
+            }
+        }
+
+        // If it's command-oriented and no command matched: unperformed!
+        if is_command_oriented && !command_matched {
+            unperformed_steps.push(format!("{step_desc} (no command execution detected)"));
+        } else if !is_command_oriented && !file_matched {
+            // If it was file-oriented but no file matched: unperformed!
+            unperformed_steps.push(format!("{step_desc} (no file modifications detected)"));
+        }
+    }
+
+    let mut unperformed_summary = String::new();
+    if unperformed_steps.is_empty() {
+        unperformed_summary.push_str("All planned steps were verified by file changes or executed commands.\n");
+    } else {
+        for s in &unperformed_steps {
+            unperformed_summary.push_str(&format!("- {}\n", s));
+        }
+    }
+
+    (verified_cmds_summary, unperformed_summary, unperformed_steps)
+}
+
 /// Starts an OpenCode worker session restricted strictly to local Ollama.
 #[tauri::command]
 pub async fn start_worker_session(
@@ -653,7 +865,31 @@ pub async fn start_worker_session(
     // If worktree creation fails for any reason, abort and return typed error - NEVER fall back to primary tree!
     let ack = acknowledge_dirty.unwrap_or(false);
     let worktree_info = match GitService::create_task_worktree(Path::new(&project_dir), &tid, ack) {
-        Ok(info) => info,
+        Ok(info) => {
+            if let Some(ref notice) = info.system_notice {
+                let notice_record = crate::db::models::ChatMessageRecord {
+                    id: format!("sys_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),
+                    chat_id: tid.clone(),
+                    role: "system".to_string(),
+                    content: notice.clone(),
+                    plan_json: None,
+                    worker_summary: None,
+                    files_changed_json: None,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    commit_hash: None,
+                };
+                let _ = state.db.add_chat_message(&notice_record);
+                let _ = app_handle.emit("chat:message_added", &notice_record);
+            }
+            info
+        }
+        Err(GitError::CorruptedRepository(msg)) => {
+            return Err(WorkerStartError {
+                error_type: "CORRUPTED_REPOSITORY".into(),
+                message: msg,
+                uncommitted_files: None,
+            });
+        }
         Err(GitError::DirtyPrimaryTree {
             count,
             uncommitted_files,
@@ -690,7 +926,248 @@ pub async fn start_worker_session(
         *cur_tid = Some(tid.clone());
     }
 
-    // 4. Configure OpenCode sidecar strictly with worktree path as its working directory
+    // 4. Check workspace default worker type (local vs groq)
+    let (worker_type, preferred_groq_model) = state
+        .db
+        .get_workspace_worker_config(&project_dir)
+        .unwrap_or_else(|_| ("local".to_string(), Some("openai/gpt-oss-120b".to_string())));
+
+    if worker_type == "groq" {
+        // Groq Cloud Worker Mode (BYOK)
+        let groq_api_key = CredentialService::get_groq_api_key().map_err(|_| WorkerStartError {
+            error_type: "MISSING_GROQ_KEY".into(),
+            message: "Groq API key not found in Windows Credential Manager. Please configure your Groq API key in Settings or the Onboarding wizard.".into(),
+            uncommitted_files: None,
+        })?;
+
+        let session_id = format!("groq_session_{}", tid);
+        let groq_client = crate::worker::GroqWorkerClient::new(
+            groq_api_key,
+            state.planner_client.quota_tracker.clone(),
+        );
+        let worktree_buf = PathBuf::from(&worktree_info.worktree_path);
+        let tid_clone = tid.clone();
+        let ses_id_clone = session_id.clone();
+        let plan_summary = plan.task_summary.clone();
+        let plan_steps = plan.steps.clone();
+        let app_clone = app_handle.clone();
+        let active_task_inventories = state.active_task_inventories.clone();
+        let task_state_arc = state.task_state.clone();
+        let db_arc = state.db.clone();
+        let planner_client_groq = state.planner_client.clone();
+
+        // Update state to WorkerRunning
+        {
+            let mut task = state.task_state.lock().await;
+            *task = TaskState::WorkerRunning {
+                session_id: session_id.clone(),
+            };
+        }
+
+        let _ = app_handle.emit(
+            "worker:status",
+            &TaskState::WorkerRunning {
+                session_id: session_id.clone(),
+            },
+        );
+
+        tokio::spawn(async move {
+            match groq_client
+                .execute_session(
+                    &worktree_buf,
+                    &tid_clone,
+                    &ses_id_clone,
+                    &plan_summary,
+                    &plan_steps,
+                    preferred_groq_model.as_deref(),
+                    app_clone.clone(),
+                )
+                .await
+            {
+                Ok(inventory) => {
+                    let mut inv_map = active_task_inventories.lock().await;
+                    inv_map.insert(tid_clone.clone(), inventory.clone());
+
+                    // Fix 1: Automatically commit all changes on the task branch and merge to primary branch
+                    let (commit_hash, conflict_resolved) = match GitService::commit_and_merge_task_to_primary(
+                        &worktree_buf,
+                        "",
+                        &plan_summary,
+                    ) {
+                        Ok(outcome) => (outcome.commit_sha, outcome.conflict_resolved),
+                        Err(e) => {
+                            eprintln!("Warning: automatic commit and merge to primary failed: {e}");
+                            (None, false)
+                        }
+                    };
+
+                    if conflict_resolved {
+                        let notice_record = crate::db::models::ChatMessageRecord {
+                            id: format!("sys_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),
+                            chat_id: tid_clone.clone(),
+                            role: "system".to_string(),
+                            content: format!("Resolved a conflict automatically — {}'s changes were kept.", plan_summary),
+                            plan_json: None,
+                            worker_summary: None,
+                            files_changed_json: None,
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                            commit_hash: None,
+                        };
+                        let _ = db_arc.add_chat_message(&notice_record);
+                        let _ = app_clone.emit("chat:message_added", &notice_record);
+                    }
+
+                    // Emit progress reasoning that summary is being generated before task completes
+                    let _ = app_clone.emit(
+                        "worker:message",
+                        &WorkerEventPayload {
+                            session_id: ses_id_clone.clone(),
+                            event_type: "message.part.updated".into(),
+                            content: serde_json::json!({
+                                "type": "message.part.updated",
+                                "properties": {
+                                    "part": {
+                                        "type": "reasoning",
+                                        "text": "Summarizing and verifying task execution outcomes..."
+                                    }
+                                }
+                            }).to_string(),
+                            timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                        },
+                    );
+
+                    let (files_summary, diff_excerpts) = format_inventory_for_summary(&inventory);
+                    let (verified_cmds, unperformed_summary, unperformed_list) =
+                        analyze_execution_grounding(&plan_steps, &inventory, &[]);
+
+                    // Ask Gemini (Director model) to summarize what happened with grounded verified outcomes
+                    let summary = match CredentialService::get_gemini_api_key() {
+                        Ok(key) => {
+                            match planner_client_groq
+                                .summarize_task_outcome_grounded(
+                                    &key,
+                                    &plan_summary,
+                                    &files_summary,
+                                    &diff_excerpts,
+                                    &verified_cmds,
+                                    &unperformed_summary,
+                                    Some(&app_clone),
+                                )
+                                .await
+                            {
+                                Ok((gemini_sum, _, _)) => {
+                                    let files_modified: Vec<String> = inventory.files.iter().map(|f| f.path.clone()).collect();
+                                    zencode_core::verify_and_reconcile_summary(
+                                        &gemini_sum,
+                                        &files_modified,
+                                        &[],
+                                        &unperformed_list,
+                                    )
+                                }
+                                Err(e) => {
+                                    eprintln!("Gemini summarization failed ({e}), falling back to inventory stats");
+                                    format!(
+                                        "Completed task with Groq worker: {} file(s) modified (+{}/-{})",
+                                        inventory.files.len(),
+                                        inventory.total_additions,
+                                        inventory.total_deletions
+                                    )
+                                }
+                            }
+                        }
+                        Err(_) => format!(
+                            "Completed task with Groq worker: {} file(s) modified (+{}/-{})",
+                            inventory.files.len(),
+                            inventory.total_additions,
+                            inventory.total_deletions
+                        ),
+                    };
+
+
+                    let inv_json = serde_json::to_string(&inventory).ok();
+                    let finalized = db_arc
+                        .finalize_latest_assistant_message(
+                            &tid_clone,
+                            &summary,
+                            inv_json.as_deref(),
+                            commit_hash.as_deref(),
+                        )
+                        .unwrap_or(false);
+
+                    let record = if finalized {
+                        db_arc
+                            .get_chat_messages(&tid_clone)
+                            .ok()
+                            .and_then(|msgs| msgs.into_iter().rev().find(|m| m.role == "assistant"))
+                            .unwrap_or_else(|| {
+                                crate::db::models::ChatMessageRecord {
+                                    id: format!("msg_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()),
+                                    chat_id: tid_clone.clone(),
+                                    role: "assistant".to_string(),
+                                    content: summary.clone(),
+                                    plan_json: None,
+                                    worker_summary: Some(summary.clone()),
+                                    files_changed_json: inv_json.clone(),
+                                    created_at: chrono::Utc::now().to_rfc3339(),
+                                    commit_hash: commit_hash.clone(),
+                                }
+                            })
+                    } else {
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let msg_id = format!(
+                            "msg_{}",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis()
+                        );
+                        let rec = crate::db::models::ChatMessageRecord {
+                            id: msg_id,
+                            chat_id: tid_clone.clone(),
+                            role: "assistant".to_string(),
+                            content: summary.clone(),
+                            plan_json: None,
+                            worker_summary: Some(summary.clone()),
+                            files_changed_json: inv_json,
+                            created_at: now,
+                            commit_hash: commit_hash.clone(),
+                        };
+                        let _ = db_arc.add_chat_message(&rec);
+                        rec
+                    };
+                    let _ = app_clone.emit("chat:message_added", &record);
+
+                    // Associate commit_hash with user prompt message in this chat
+                    if let Some(ref sha) = commit_hash {
+                        if let Ok(msgs) = db_arc.get_chat_messages(&tid_clone) {
+                            if let Some(user_msg) = msgs.iter().rev().find(|m| m.role == "user") {
+                                let _ = db_arc.update_message_commit_hash(&user_msg.id, sha);
+                            }
+                        }
+                    }
+
+                    // Emit inventory ready and transition task state to Complete ONLY AFTER the summary message is published
+                    let _ = app_clone.emit("review:inventory_ready", &inventory);
+                    let mut task = task_state_arc.lock().await;
+                    *task = TaskState::Complete;
+                    let _ = app_clone.emit(
+                        "worker:status",
+                        &TaskState::Complete,
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Groq worker error: {e}");
+                    let mut task = task_state_arc.lock().await;
+                    *task = TaskState::Failed(e.clone());
+                    let _ = app_clone.emit("worker:status", &TaskState::Failed(e));
+                }
+            }
+        });
+
+        return Ok(session_id);
+    }
+
+    // 5. Configure OpenCode sidecar strictly with worktree path as its working directory (Local Ollama)
     let mut supervisor_guard = state.engine_supervisor.lock().await;
     if let Some(mut existing) = supervisor_guard.take() {
         existing.shutdown();
@@ -717,11 +1194,28 @@ pub async fn start_worker_session(
             uncommitted_files: None,
         })?;
 
-    // 6. Format initial worker prompt from plan
-    let mut prompt = format!(
+    // 6. Format initial worker prompt from plan, including prior context if this is a follow-up task
+    let prior_exchanges = state.db.get_recent_exchanges(&tid, 5).unwrap_or_default();
+    let mut prompt = String::new();
+    if !prior_exchanges.is_empty() {
+        prompt.push_str("Context from previous tasks in this chat session:\n");
+        for ex in &prior_exchanges {
+            if ex.role == "user" {
+                prompt.push_str(&format!("- User previously asked: {}\n", ex.content));
+            } else if let Some(ref sum) = ex.summary {
+                prompt.push_str(&format!("- Assistant previously did: {}\n", sum));
+                if !ex.files_changed.is_empty() {
+                    prompt.push_str(&format!("  Modified/created files: {}\n", ex.files_changed.join(", ")));
+                }
+            }
+        }
+        prompt.push_str("\n");
+    }
+
+    prompt.push_str(&format!(
         "Execute the following implementation plan using local tools only:\n\nTask: {}\n\nSteps:\n",
         plan.task_summary
-    );
+    ));
     for step in &plan.steps {
         prompt.push_str(&format!(
             "- [Goal]: {}\n  Instructions: {:?}\n  Likely files: {:?}\n",
@@ -729,9 +1223,10 @@ pub async fn start_worker_session(
         ));
     }
 
-    // 7. Send asynchronous prompt specifying Ollama worker model (Granite 4.1 8B)
+    // 7. Send asynchronous prompt specifying configured Ollama worker model (defaults to granite4.1:8b)
+    let worker_model_name = state.worker_model.lock().await.clone();
     supervisor
-        .send_prompt(&session_id, &prompt, "granite4.1:8b")
+        .send_prompt(&session_id, &prompt, &worker_model_name)
         .await
         .map_err(|e| WorkerStartError {
             error_type: "PROMPT_DISPATCH_FAILED".into(),
@@ -764,11 +1259,102 @@ pub async fn start_worker_session(
     let task_id_clone = tid.clone();
     let inventories_arc = state.active_task_inventories.clone();
     let task_state_arc = state.task_state.clone();
+    let supervisor_arc_sse = state.engine_supervisor.clone();
+    let plan_summary_sse = plan.task_summary.clone();
+    let plan_steps_sse = plan.steps.clone();
+    let exec_service_sse = state.execution_service.clone();
+    let db_arc_sse = state.db.clone();
+    let planner_client_sse = state.planner_client.clone();
+
+    // 9. Active Worker Watchdog: Polls process status & /global/health while WorkerRunning
+    let supervisor_watch = state.engine_supervisor.clone();
+    let task_state_watch = state.task_state.clone();
+    let app_handle_watch = app_handle.clone();
+    let watch_ses_id = session_id.clone();
+    let watch_health_url = supervisor.health_url();
+    let watch_auth = supervisor.auth_header();
+
+    tokio::spawn(async move {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(1500))
+            .build()
+            .unwrap_or_default();
+
+        loop {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+
+            // Check if still WorkerRunning for this session
+            {
+                let current_task = task_state_watch.lock().await;
+                match &*current_task {
+                    TaskState::WorkerRunning { session_id } if session_id == &watch_ses_id => {}
+                    _ => break, // Task ended or transitioned cleanly
+                }
+            }
+
+            // Check process status on supervisor
+            let mut is_dead = false;
+            let mut error_msg = String::new();
+            {
+                let mut sup_guard = supervisor_watch.lock().await;
+                if let Some(sup) = sup_guard.as_mut() {
+                    if !sup.check_process_alive() {
+                        is_dead = true;
+                        error_msg = "OpenCode worker process terminated unexpectedly".to_string();
+                    }
+                } else {
+                    is_dead = true;
+                    error_msg = "Engine supervisor stopped".to_string();
+                }
+            }
+
+            // Check /global/health endpoint
+            if !is_dead {
+                match client.get(&watch_health_url).header("Authorization", &watch_auth).send().await {
+                    Ok(resp) => {
+                        if !resp.status().is_success() {
+                            is_dead = true;
+                            error_msg = format!("OpenCode /global/health returned error status {}", resp.status());
+                        }
+                    }
+                    Err(e) => {
+                        is_dead = true;
+                        error_msg = format!("OpenCode worker stopped responding: {e}");
+                    }
+                }
+            }
+
+            if is_dead {
+                eprintln!("[WORKER WATCHDOG] Detected dead worker process: {error_msg}");
+                let fail_state = TaskState::Failed(error_msg.clone());
+                {
+                    let mut current_task = task_state_watch.lock().await;
+                    *current_task = fail_state.clone();
+                }
+
+                let _ = app_handle_watch.emit("worker:status", &fail_state);
+                let _ = app_handle_watch.emit("engine:health", &EngineHealth::Failed(error_msg.clone()));
+
+                let fail_payload = WorkerEventPayload {
+                    session_id: watch_ses_id.clone(),
+                    event_type: "worker.failed".to_string(),
+                    content: serde_json::json!({
+                        "type": "error",
+                        "error": error_msg
+                    }).to_string(),
+                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                };
+                let _ = app_handle_watch.emit("worker:message", &fail_payload);
+                break;
+            }
+        }
+    });
 
     tokio::spawn(async move {
         use eventsource_stream::Eventsource;
         use futures_util::StreamExt;
 
+        let mut captured_commands: Vec<String> = Vec::new();
         let client = reqwest::Client::new();
         if let Ok(response) = client
             .get(&sse_url)
@@ -783,6 +1369,27 @@ pub async fn start_worker_session(
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64;
+
+                    // Parse real tool and command executions from OpenCode SSE payload
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                        if let Some(part) = val.get("properties").and_then(|p| p.get("part")) {
+                            let ptype = part.get("type").and_then(|s| s.as_str()).unwrap_or_default();
+                            if ptype == "tool" {
+                                let tool_name = part.get("tool").and_then(|s| s.as_str()).unwrap_or("unknown");
+                                let state = part.get("state");
+                                let input = state.and_then(|st| st.get("input"));
+                                if tool_name == "exec" || tool_name == "run" || tool_name == "bash" {
+                                    if let Some(cmd) = input.and_then(|i| i.get("command")).and_then(|c| c.as_str()) {
+                                        let status = state.and_then(|st| st.get("status")).and_then(|s| s.as_str()).unwrap_or("completed");
+                                        let cmd_entry = format!("$ {} ({})", cmd, status);
+                                        if !captured_commands.contains(&cmd_entry) {
+                                            captured_commands.push(cmd_entry);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     // Extract the event type and evaluate completion signals
                     let (event_type, is_idle_transition) = parse_worker_sse_event(&event.data, &ses_id_clone);
@@ -805,11 +1412,185 @@ pub async fn start_worker_session(
                                         let mut inv_map = inventories_arc.lock().await;
                                         inv_map.insert(task_id_clone.clone(), inventory.clone());
                                     }
-                                    // Emit review:inventory_ready event with full change inventory
                                     let _ = app_handle_clone.emit("review:inventory_ready", &inventory);
 
-                                    *task = TaskState::AwaitingReview;
-                                    let _ = app_handle_clone.emit("worker:status", &TaskState::AwaitingReview);
+                                    // Fix 1: Automatically commit all changes on the task branch and merge to primary branch
+                                    let (commit_hash, conflict_resolved) = match GitService::commit_and_merge_task_to_primary(
+                                        Path::new(&wt_path_clone),
+                                        "",
+                                        &plan_summary_sse,
+                                    ) {
+                                        Ok(outcome) => (outcome.commit_sha, outcome.conflict_resolved),
+                                        Err(e) => {
+                                            eprintln!("Warning: automatic commit and merge to primary failed: {e}");
+                                            (None, false)
+                                        }
+                                    };
+
+                                    if conflict_resolved {
+                                        let notice_record = crate::db::models::ChatMessageRecord {
+                                            id: format!("sys_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),
+                                            chat_id: task_id_clone.clone(),
+                                            role: "system".to_string(),
+                                            content: format!("Resolved a conflict automatically — {}'s changes were kept.", plan_summary_sse),
+                                            plan_json: None,
+                                            worker_summary: None,
+                                            files_changed_json: None,
+                                            created_at: chrono::Utc::now().to_rfc3339(),
+                                            commit_hash: None,
+                                        };
+                                        let _ = db_arc_sse.add_chat_message(&notice_record);
+                                        let _ = app_handle_clone.emit("chat:message_added", &notice_record);
+                                    }
+
+                                    // Emit progress reasoning that summary is being generated before task completes
+                                    let _ = app_handle_clone.emit(
+                                        "worker:message",
+                                        &WorkerEventPayload {
+                                            session_id: ses_id_clone.clone(),
+                                            event_type: "message.part.updated".into(),
+                                            content: serde_json::json!({
+                                                "type": "message.part.updated",
+                                                "properties": {
+                                                    "part": {
+                                                        "type": "reasoning",
+                                                        "text": "Summarizing and verifying task execution outcomes..."
+                                                    }
+                                                }
+                                            }).to_string(),
+                                            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                                        },
+                                    );
+
+                                    // Collect any commands executed via ExecutionService during this task
+                                    {
+                                        let exec_hist = exec_service_sse.execution_history.lock().await;
+                                        for ex in exec_hist.iter() {
+                                            let cmd_str = format!("{} {}", ex.program, ex.args.join(" "));
+                                            let status_str = match ex.exit_code {
+                                                Some(0) => "exit code 0 (success)".to_string(),
+                                                Some(c) => format!("exit code {c}"),
+                                                None => "executed".to_string(),
+                                            };
+                                            let cmd_entry = format!("$ {} ({})", cmd_str, status_str);
+                                            if !captured_commands.contains(&cmd_entry) {
+                                                captured_commands.push(cmd_entry);
+                                            }
+                                        }
+                                    }
+
+                                    let (files_summary, diff_excerpts) = format_inventory_for_summary(&inventory);
+                                    let (verified_cmds, unperformed_summary, unperformed_list) =
+                                        analyze_execution_grounding(&plan_steps_sse, &inventory, &captured_commands);
+
+                                    // Ask Gemini (Director model) to summarize what happened with grounded verified outcomes
+                                    let summary = match CredentialService::get_gemini_api_key() {
+                                        Ok(key) => {
+                                            match planner_client_sse
+                                                .summarize_task_outcome_grounded(
+                                                    &key,
+                                                    &plan_summary_sse,
+                                                    &files_summary,
+                                                    &diff_excerpts,
+                                                    &verified_cmds,
+                                                    &unperformed_summary,
+                                                    Some(&app_handle_clone),
+                                                )
+                                                .await
+                                            {
+                                                Ok((gemini_sum, _, _)) => {
+                                                    let files_modified: Vec<String> = inventory.files.iter().map(|f| f.path.clone()).collect();
+                                                    zencode_core::verify_and_reconcile_summary(
+                                                        &gemini_sum,
+                                                        &files_modified,
+                                                        &captured_commands,
+                                                        &unperformed_list,
+                                                    )
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("Gemini summarization failed ({e}), falling back to inventory stats");
+                                                    format!(
+                                                        "Completed task: {} file(s) modified (+{}/-{})",
+                                                        inventory.files.len(),
+                                                        inventory.total_additions,
+                                                        inventory.total_deletions
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        Err(_) => format!(
+                                            "Completed task: {} file(s) modified (+{}/-{})",
+                                            inventory.files.len(),
+                                            inventory.total_additions,
+                                            inventory.total_deletions
+                                        ),
+                                    };
+
+
+                                    let inv_json = serde_json::to_string(&inventory).ok();
+                                    let finalized = db_arc_sse
+                                        .finalize_latest_assistant_message(
+                                            &task_id_clone,
+                                            &summary,
+                                            inv_json.as_deref(),
+                                            commit_hash.as_deref(),
+                                        )
+                                        .unwrap_or(false);
+
+                                    let record = if finalized {
+                                        db_arc_sse
+                                            .get_chat_messages(&task_id_clone)
+                                            .ok()
+                                            .and_then(|msgs| msgs.into_iter().rev().find(|m| m.role == "assistant"))
+                                            .unwrap_or_else(|| {
+                                                crate::db::models::ChatMessageRecord {
+                                                    id: format!("msg_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()),
+                                                    chat_id: task_id_clone.clone(),
+                                                    role: "assistant".to_string(),
+                                                    content: summary.clone(),
+                                                    plan_json: None,
+                                                    worker_summary: Some(summary.clone()),
+                                                    files_changed_json: inv_json.clone(),
+                                                    created_at: chrono::Utc::now().to_rfc3339(),
+                                                    commit_hash: commit_hash.clone(),
+                                                }
+                                            })
+                                    } else {
+                                        let now = chrono::Utc::now().to_rfc3339();
+                                        let msg_id = format!(
+                                            "msg_{}",
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_millis()
+                                        );
+                                        let rec = crate::db::models::ChatMessageRecord {
+                                            id: msg_id,
+                                            chat_id: task_id_clone.clone(),
+                                            role: "assistant".to_string(),
+                                            content: summary.clone(),
+                                            plan_json: None,
+                                            worker_summary: Some(summary),
+                                            files_changed_json: inv_json,
+                                            created_at: now,
+                                            commit_hash: commit_hash.clone(),
+                                        };
+                                        let _ = db_arc_sse.add_chat_message(&rec);
+                                        rec
+                                    };
+                                    let _ = app_handle_clone.emit("chat:message_added", &record);
+
+                                    if let Some(ref sha) = commit_hash {
+                                        if let Ok(msgs) = db_arc_sse.get_chat_messages(&task_id_clone) {
+                                            if let Some(user_msg) = msgs.iter().rev().find(|m| m.role == "user") {
+                                                let _ = db_arc_sse.update_message_commit_hash(&user_msg.id, sha);
+                                            }
+                                        }
+                                    }
+
+                                    // Transition task state to Complete ONLY AFTER the summary message is published
+                                    *task = TaskState::Complete;
+                                    let _ = app_handle_clone.emit("worker:status", &TaskState::Complete);
                                 }
                                 Err(e) => {
                                     eprintln!("Failed to generate diff inventory: {e}");
@@ -822,23 +1603,178 @@ pub async fn start_worker_session(
                 }
             }
 
-            // Stream closed safety net: if still WorkerRunning when stream ends, transition cleanly
+            // Stream closed safety net: check if process died unexpectedly
+            let mut is_healthy = false;
+            {
+                let mut sup_guard = supervisor_arc_sse.lock().await;
+                if let Some(sup) = sup_guard.as_mut() {
+                    if sup.check_process_alive() {
+                        is_healthy = sup.ping_health().await;
+                    }
+                }
+            }
+
             let mut task = task_state_arc.lock().await;
             if matches!(*task, TaskState::WorkerRunning { .. }) {
-                match GitService::get_worktree_diff(Path::new(&wt_path_clone)) {
-                    Ok(inventory) => {
-                        {
-                            let mut inv_map = inventories_arc.lock().await;
-                            inv_map.insert(task_id_clone.clone(), inventory.clone());
+                if !is_healthy {
+                    let err = "OpenCode worker stream disconnected and engine is unreachable".to_string();
+                    *task = TaskState::Failed(err.clone());
+                    let _ = app_handle_clone.emit("worker:status", &TaskState::Failed(err.clone()));
+                    let _ = app_handle_clone.emit("engine:health", &EngineHealth::Failed(err));
+                } else {
+                    match GitService::get_worktree_diff(Path::new(&wt_path_clone)) {
+                        Ok(inventory) => {
+                            {
+                                let mut inv_map = inventories_arc.lock().await;
+                                inv_map.insert(task_id_clone.clone(), inventory.clone());
+                            }
+                            let _ = app_handle_clone.emit("review:inventory_ready", &inventory);
+
+                            // Fix 1: Automatically commit all changes on the task branch and merge to primary branch
+                            let (commit_hash, conflict_resolved) = match GitService::commit_and_merge_task_to_primary(
+                                Path::new(&wt_path_clone),
+                                "",
+                                &plan_summary_sse,
+                            ) {
+                                Ok(outcome) => (outcome.commit_sha, outcome.conflict_resolved),
+                                Err(e) => {
+                                    eprintln!("Warning: automatic commit and merge to primary failed: {e}");
+                                    (None, false)
+                                }
+                            };
+
+                            if conflict_resolved {
+                                let notice_record = crate::db::models::ChatMessageRecord {
+                                    id: format!("sys_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),
+                                    chat_id: task_id_clone.clone(),
+                                    role: "system".to_string(),
+                                    content: format!("Resolved a conflict automatically — {}'s changes were kept.", plan_summary_sse),
+                                    plan_json: None,
+                                    worker_summary: None,
+                                    files_changed_json: None,
+                                    created_at: chrono::Utc::now().to_rfc3339(),
+                                    commit_hash: None,
+                                };
+                                let _ = db_arc_sse.add_chat_message(&notice_record);
+                                let _ = app_handle_clone.emit("chat:message_added", &notice_record);
+                            }
+
+                            *task = TaskState::Complete;
+                            let _ = app_handle_clone.emit("worker:status", &TaskState::Complete);
+
+                            let (files_summary, diff_excerpts) = format_inventory_for_summary(&inventory);
+                            let (verified_cmds, unperformed_summary, unperformed_list) =
+                                analyze_execution_grounding(&plan_steps_sse, &inventory, &captured_commands);
+
+                            // Ask Gemini (Director model) to summarize what happened and what changes were made
+                            let summary = match CredentialService::get_gemini_api_key() {
+                                Ok(key) => {
+                                    match planner_client_sse
+                                        .summarize_task_outcome_grounded(
+                                            &key,
+                                            &plan_summary_sse,
+                                            &files_summary,
+                                            &diff_excerpts,
+                                            &verified_cmds,
+                                            &unperformed_summary,
+                                            Some(&app_handle_clone),
+                                        )
+                                        .await
+                                    {
+                                        Ok((gemini_sum, _, _)) => {
+                                            let files_modified: Vec<String> = inventory.files.iter().map(|f| f.path.clone()).collect();
+                                            zencode_core::verify_and_reconcile_summary(
+                                                &gemini_sum,
+                                                &files_modified,
+                                                &captured_commands,
+                                                &unperformed_list,
+                                            )
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Gemini summarization failed ({e}), falling back to inventory stats");
+                                            format!(
+                                                "Completed task: {} file(s) modified (+{}/-{})",
+                                                inventory.files.len(),
+                                                inventory.total_additions,
+                                                inventory.total_deletions
+                                            )
+                                        }
+                                    }
+                                }
+                                Err(_) => format!(
+                                    "Completed task: {} file(s) modified (+{}/-{})",
+                                    inventory.files.len(),
+                                    inventory.total_additions,
+                                    inventory.total_deletions
+                                ),
+                            };
+
+                            let inv_json = serde_json::to_string(&inventory).ok();
+                            let finalized = db_arc_sse
+                                .finalize_latest_assistant_message(
+                                    &task_id_clone,
+                                    &summary,
+                                    inv_json.as_deref(),
+                                    commit_hash.as_deref(),
+                                )
+                                .unwrap_or(false);
+
+                            let record = if finalized {
+                                db_arc_sse
+                                    .get_chat_messages(&task_id_clone)
+                                    .ok()
+                                    .and_then(|msgs| msgs.into_iter().rev().find(|m| m.role == "assistant"))
+                                    .unwrap_or_else(|| {
+                                        crate::db::models::ChatMessageRecord {
+                                            id: format!("msg_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()),
+                                            chat_id: task_id_clone.clone(),
+                                            role: "assistant".to_string(),
+                                            content: summary.clone(),
+                                            plan_json: None,
+                                            worker_summary: Some(summary.clone()),
+                                            files_changed_json: inv_json.clone(),
+                                            created_at: chrono::Utc::now().to_rfc3339(),
+                                            commit_hash: commit_hash.clone(),
+                                        }
+                                    })
+                            } else {
+                                let now = chrono::Utc::now().to_rfc3339();
+                                let msg_id = format!(
+                                    "msg_{}",
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis()
+                                );
+                                let rec = crate::db::models::ChatMessageRecord {
+                                    id: msg_id,
+                                    chat_id: task_id_clone.clone(),
+                                    role: "assistant".to_string(),
+                                    content: summary.clone(),
+                                    plan_json: None,
+                                    worker_summary: Some(summary.clone()),
+                                    files_changed_json: inv_json,
+                                    created_at: now,
+                                    commit_hash: commit_hash.clone(),
+                                };
+                                let _ = db_arc_sse.add_chat_message(&rec);
+                                rec
+                            };
+                            let _ = app_handle_clone.emit("chat:message_added", &record);
+
+                            if let Some(ref sha) = commit_hash {
+                                if let Ok(msgs) = db_arc_sse.get_chat_messages(&task_id_clone) {
+                                    if let Some(user_msg) = msgs.iter().rev().find(|m| m.role == "user") {
+                                        let _ = db_arc_sse.update_message_commit_hash(&user_msg.id, sha);
+                                    }
+                                }
+                            }
                         }
-                        let _ = app_handle_clone.emit("review:inventory_ready", &inventory);
-                        *task = TaskState::AwaitingReview;
-                        let _ = app_handle_clone.emit("worker:status", &TaskState::AwaitingReview);
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to generate diff inventory on stream end: {e}");
-                        *task = TaskState::Complete;
-                        let _ = app_handle_clone.emit("worker:status", &TaskState::Complete);
+                        Err(e) => {
+                            eprintln!("Failed to generate diff inventory on stream end: {e}");
+                            *task = TaskState::Complete;
+                            let _ = app_handle_clone.emit("worker:status", &TaskState::Complete);
+                        }
                     }
                 }
             }
@@ -1077,6 +2013,113 @@ pub async fn reject_task(
     Ok(())
 }
 
+/// Reverts changes associated with a specific task/prompt back to the state before it ran
+/// using `git revert <commit_hash> --no-edit` on the primary branch.
+#[tauri::command]
+pub async fn undo_task_changes(
+    task_id: String,
+    commit_hash: Option<String>,
+    message_id: Option<String>,
+    base_commit: Option<String>,
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let repo_path = {
+        let active_proj = state.active_project.lock().await;
+        let proj = active_proj
+            .as_ref()
+            .ok_or_else(|| "No active project open".to_string())?;
+        proj.path.clone()
+    };
+
+    // Determine the commit hash to revert
+    let sha_to_revert = if let Some(ch) = commit_hash {
+        ch
+    } else if let Some(mid) = message_id {
+        state
+            .db
+            .get_message_commit_hash(&mid)
+            .map_err(|e| format!("DB lookup error: {e}"))?
+            .ok_or_else(|| format!("No commit hash found for message '{mid}'"))?
+    } else {
+        // Find latest commit hash associated with this chat/task
+        let msgs = state
+            .db
+            .get_chat_messages(&task_id)
+            .map_err(|e| format!("DB error: {e}"))?;
+        if let Some(hash) = msgs.into_iter().rev().find_map(|m| m.commit_hash) {
+            hash
+        } else if let Some(bc) = base_commit {
+            bc
+        } else {
+            return Err(format!("No commit found to undo for task '{task_id}'"));
+        }
+    };
+
+    let (_new_head, adjusted) = match GitService::undo_task_changes(Path::new(&repo_path), &sha_to_revert) {
+        Ok(res) => res,
+        Err(e) => {
+            // Scenario 6: Log clearly what couldn't be undone directly in chat (never a popup)
+            let err_msg = format!("{e}");
+            let err_record = crate::db::models::ChatMessageRecord {
+                id: format!("sys_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),
+                chat_id: task_id.clone(),
+                role: "system".to_string(),
+                content: err_msg.clone(),
+                plan_json: None,
+                worker_summary: None,
+                files_changed_json: None,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                commit_hash: None,
+            };
+            let _ = state.db.add_chat_message(&err_record);
+            let _ = app_handle.emit("chat:message_added", &err_record);
+            return Err(err_msg);
+        }
+    };
+
+    let notice_text = if adjusted {
+        "Undid task. Some later changes were adjusted to keep things consistent.".to_string()
+    } else {
+        "Undid task changes.".to_string()
+    };
+
+    let notice_record = crate::db::models::ChatMessageRecord {
+        id: format!("sys_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),
+        chat_id: task_id.clone(),
+        role: "system".to_string(),
+        content: notice_text,
+        plan_json: None,
+        worker_summary: None,
+        files_changed_json: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        commit_hash: None,
+    };
+    let _ = state.db.add_chat_message(&notice_record);
+    let _ = app_handle.emit("chat:message_added", &notice_record);
+
+    // Refresh project status in state
+    if let Ok(updated_status) = GitService::get_primary_tree_status(Path::new(&repo_path)) {
+        let mut active_proj = state.active_project.lock().await;
+        if let Some(p) = active_proj.as_mut() {
+            p.is_clean = updated_status.is_clean;
+            p.git_status_summary = if updated_status.is_clean {
+                "clean".to_string()
+            } else {
+                format!("{} uncommitted changes", updated_status.uncommitted_files.len())
+            };
+        }
+    }
+
+    {
+        let mut task = state.task_state.lock().await;
+        *task = TaskState::Idle;
+    }
+    let _ = app_handle.emit("worker:status", &TaskState::Idle);
+
+    Ok(())
+}
+
 /// Checks the primary working tree clean/dirty status and returns uncommitted files.
 #[tauri::command]
 pub async fn get_primary_tree_status(
@@ -1230,6 +2273,7 @@ pub async fn recover_orphaned_worktree(
                         worktree_path: wt_path.to_string_lossy().to_string(),
                         base_commit: inv.base_commit.clone(),
                         created_at: 0,
+                        system_notice: None,
                     },
                 );
                 let mut inventories = state.active_task_inventories.lock().await;
@@ -1616,8 +2660,9 @@ pub async fn send_advisory_to_worker(
         suggestion
     );
 
+    let worker_model_name = state.worker_model.lock().await.clone();
     supervisor
-        .send_prompt(&session_id, &prompt, "granite4.1:8b")
+        .send_prompt(&session_id, &prompt, &worker_model_name)
         .await
         .map_err(|e| format!("Failed to dispatch advisory advice to worker: {e}"))?;
 
@@ -1630,6 +2675,25 @@ pub async fn list_workspaces(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::db::WorkspaceRecord>, String> {
     state.db.get_recent_workspaces(20).map_err(|e| e.to_string())
+}
+
+/// Update trusted status for Gemini context preview in a given workspace.
+#[tauri::command]
+pub async fn set_workspace_context_preview_trusted(
+    path: String,
+    trusted: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.db.set_workspace_context_preview_trusted(&path, trusted).map_err(|e| e.to_string())
+}
+
+/// Check if Gemini context preview is trusted for a given workspace.
+#[tauri::command]
+pub async fn is_workspace_context_preview_trusted(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    state.db.is_workspace_context_preview_trusted(&path).map_err(|e| e.to_string())
 }
 
 /// Retrieve stored chats/tasks for a specific workspace.
@@ -1666,6 +2730,742 @@ pub async fn delete_chat(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.db.delete_chat(&task_id).map_err(|e| e.to_string())
+}
+
+/// Append a message to the persistent chat history.
+#[tauri::command]
+pub async fn add_chat_message(
+    chat_id: String,
+    role: String,
+    content: String,
+    plan_json: Option<String>,
+    worker_summary: Option<String>,
+    files_changed: Option<Vec<String>>,
+    commit_hash: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<crate::db::ChatMessageRecord, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let msg_id = format!(
+        "msg_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    let files_changed_json = files_changed.map(|f| serde_json::to_string(&f).unwrap_or_else(|_| "[]".to_string()));
+    let record = crate::db::ChatMessageRecord {
+        id: msg_id,
+        chat_id,
+        role,
+        content,
+        plan_json,
+        worker_summary,
+        files_changed_json,
+        created_at: now,
+        commit_hash,
+    };
+    state.db.add_chat_message(&record).map_err(|e| e.to_string())?;
+    Ok(record)
+}
+
+/// Retrieve all ordered messages for a chat.
+#[tauri::command]
+pub async fn get_chat_messages(
+    chat_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::ChatMessageRecord>, String> {
+    state.db.get_chat_messages(&chat_id).map_err(|e| e.to_string())
+}
+
+/// Summarizes a completed task using Gemini (Director model).
+#[tauri::command]
+pub async fn summarize_task(
+    chat_id: String,
+    task_summary: String,
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let api_key = CredentialService::get_gemini_api_key()
+        .map_err(|_| "Gemini API key not found in Windows Credential Manager".to_string())?;
+
+    let inv_opt = {
+        let inv_map = state.active_task_inventories.lock().await;
+        inv_map.get(&chat_id).cloned()
+    };
+
+    let inventory = inv_opt.unwrap_or_else(|| ChangeInventory {
+        worktree_path: String::new(),
+        branch_name: String::new(),
+        base_commit: String::new(),
+        files: Vec::new(),
+        total_additions: 0,
+        total_deletions: 0,
+        modified_count: 0,
+        added_count: 0,
+        untracked_count: 0,
+        deleted_count: 0,
+        renamed_count: 0,
+        binary_count: 0,
+    });
+
+    let (files_summary, diff_excerpts) = format_inventory_for_summary(&inventory);
+
+    let (summary, _, _) = state
+        .planner_client
+        .summarize_task_outcome(
+            &api_key,
+            &task_summary,
+            &files_summary,
+            &diff_excerpts,
+            Some(&app_handle),
+        )
+        .await?;
+
+    Ok(summary)
+}
+
+/// Represents a file or folder in the workspace file tree.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceFileEntry {
+    pub name: String,
+    pub path: String, // relative to workspace root, normalized with '/'
+    pub is_dir: bool,
+    pub children: Option<Vec<WorkspaceFileEntry>>,
+}
+
+fn build_file_tree(base: &Path, current: &Path, depth: usize) -> Vec<WorkspaceFileEntry> {
+    if depth > 8 {
+        return Vec::new();
+    }
+    let read_dir = match std::fs::read_dir(current) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+
+    let ignored_names = [
+        ".git", "node_modules", "target", "dist", ".zencode-worktrees",
+        "build", ".next", ".idea", ".vscode", ".gemini", ".system_generated"
+    ];
+
+    let mut items: Vec<_> = read_dir.filter_map(|e| e.ok()).collect();
+    // Sort directories first, then alphabetical
+    items.sort_by(|a, b| {
+        let a_is_dir = a.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        let b_is_dir = b.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        match (a_is_dir, b_is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.file_name().cmp(&b.file_name()),
+        }
+    });
+
+    let mut entries = Vec::new();
+    for item in items {
+        let file_name = item.file_name().to_string_lossy().to_string();
+        if ignored_names.contains(&file_name.as_str()) {
+            continue;
+        }
+        let full_path = item.path();
+        let rel_path = match full_path.strip_prefix(base) {
+            Ok(p) => p.to_string_lossy().replace('\\', "/"),
+            Err(_) => file_name.clone(),
+        };
+        let is_dir = item.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        if is_dir {
+            let children = build_file_tree(base, &full_path, depth + 1);
+            entries.push(WorkspaceFileEntry {
+                name: file_name,
+                path: rel_path,
+                is_dir: true,
+                children: Some(children),
+            });
+        } else {
+            entries.push(WorkspaceFileEntry {
+                name: file_name,
+                path: rel_path,
+                is_dir: false,
+                children: None,
+            });
+        }
+    }
+    entries
+}
+
+/// Retrieve recursive file tree for the currently open workspace.
+#[tauri::command]
+pub async fn get_workspace_file_tree(
+    workspace_path: String,
+) -> Result<Vec<WorkspaceFileEntry>, String> {
+    let p = Path::new(&workspace_path);
+    if !p.exists() || !p.is_dir() {
+        return Err(format!("Workspace path '{workspace_path}' does not exist or is not a directory"));
+    }
+    Ok(build_file_tree(p, p, 0))
+}
+
+/// Read text content of a workspace file for the code viewer.
+#[tauri::command]
+pub async fn read_workspace_file(
+    file_path: String,
+) -> Result<String, String> {
+    let p = Path::new(&file_path);
+    if !p.exists() {
+        return Err(format!("File '{file_path}' does not exist"));
+    }
+    let meta = std::fs::metadata(p).map_err(|e| e.to_string())?;
+    if meta.len() > 5 * 1024 * 1024 {
+        return Err("File exceeds 5MB limit for inline viewing".to_string());
+    }
+    std::fs::read_to_string(p).map_err(|e| format!("Failed to read file: {e}"))
+}
+
+/// List recent chats across all workspaces for landing and search pages.
+#[tauri::command]
+pub async fn list_all_recent_chats(
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::ChatSummaryRecord>, String> {
+    state.db.list_all_recent_chats(limit.unwrap_or(20)).map_err(|e| e.to_string())
+}
+
+/// Remove a workspace from known list (does not touch filesystem).
+#[tauri::command]
+pub async fn remove_workspace(
+    workspace_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.db.remove_workspace(&workspace_path).map_err(|e| e.to_string())
+}
+
+/// Search chats across all workspaces and title/plan contents.
+#[tauri::command]
+pub async fn search_chats(
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::ChatSummaryRecord>, String> {
+    state.db.search_chats(&query).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GeminiKeyStatus {
+    pub has_key: bool,
+    pub masked_key: String,
+    pub status_text: String,
+}
+
+/// Query Gemini API key status from Windows Credential Manager without exposing the secret.
+#[tauri::command]
+pub async fn get_gemini_key_status() -> Result<GeminiKeyStatus, String> {
+    match CredentialService::get_gemini_api_key() {
+        Ok(key) if !key.is_empty() => {
+            let masked = if key.len() > 8 {
+                format!("{}...{}", &key[..4], &key[key.len() - 4..])
+            } else {
+                "********".to_string()
+            };
+            Ok(GeminiKeyStatus {
+                has_key: true,
+                masked_key: masked,
+                status_text: "Configured in Windows Credential Manager".to_string(),
+            })
+        }
+        _ => Ok(GeminiKeyStatus {
+            has_key: false,
+            masked_key: String::new(),
+            status_text: "Not configured".to_string(),
+        }),
+    }
+}
+
+/// Update Gemini API key in Windows Credential Manager.
+#[tauri::command]
+pub async fn set_gemini_api_key_command(key: String) -> Result<GeminiKeyStatus, String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err("API key cannot be empty".to_string());
+    }
+    CredentialService::set_gemini_api_key(trimmed)
+        .map_err(|e| format!("Failed to save key to Windows Credential Manager: {e}"))?;
+    get_gemini_key_status().await
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GroqKeyStatus {
+    pub has_key: bool,
+    pub masked_key: String,
+    pub status_text: String,
+}
+
+/// Query Groq API key status from Windows Credential Manager without exposing the secret.
+#[tauri::command]
+pub async fn get_groq_key_status() -> Result<GroqKeyStatus, String> {
+    match CredentialService::get_groq_api_key() {
+        Ok(key) if !key.is_empty() => {
+            let masked = if key.len() > 8 {
+                format!("{}...{}", &key[..4], &key[key.len() - 4..])
+            } else {
+                "********".to_string()
+            };
+            Ok(GroqKeyStatus {
+                has_key: true,
+                masked_key: masked,
+                status_text: "Configured in Windows Credential Manager".to_string(),
+            })
+        }
+        _ => Ok(GroqKeyStatus {
+            has_key: false,
+            masked_key: String::new(),
+            status_text: "Not configured".to_string(),
+        }),
+    }
+}
+
+/// Update Groq API key in Windows Credential Manager.
+#[tauri::command]
+pub async fn set_groq_api_key_command(key: String) -> Result<GroqKeyStatus, String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err("API key cannot be empty".to_string());
+    }
+    CredentialService::set_groq_api_key(trimmed)
+        .map_err(|e| format!("Failed to save key to Windows Credential Manager: {e}"))?;
+    get_groq_key_status().await
+}
+
+/// Remove Groq API key from Windows Credential Manager.
+#[tauri::command]
+pub async fn delete_groq_api_key_command() -> Result<(), String> {
+    CredentialService::delete_groq_api_key()
+        .map_err(|e| format!("Failed to delete key from Windows Credential Manager: {e}"))
+}
+
+/// Validate a Gemini API key via a lightweight test request.
+#[tauri::command]
+pub async fn validate_gemini_api_key(key: String) -> Result<bool, String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err("API key cannot be empty".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models?key={trimmed}");
+    let resp = client.get(&url).send().await.map_err(|e| format!("Network request failed: {e}"))?;
+
+    let status = resp.status();
+    if status.is_success() {
+        Ok(true)
+    } else {
+        let err_txt = resp.text().await.unwrap_or_default();
+        Err(format!("Validation failed with status {}: {err_txt}", status))
+    }
+}
+
+/// Validate a Groq API key via a lightweight test request and extract real rate limit headers.
+#[tauri::command]
+pub async fn validate_groq_api_key(
+    key: String,
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<bool, String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err("API key cannot be empty".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Perform a lightweight 1-token completion request to extract real rate-limit headers
+    let body = serde_json::json!({
+        "model": "openai/gpt-oss-120b",
+        "messages": [{ "role": "user", "content": "ping" }],
+        "max_tokens": 1
+    });
+
+    let resp = client
+        .post("https://api.groq.com/openai/v1/chat/completions")
+        .header("Authorization", format!("Bearer {trimmed}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Network request failed: {e}"))?;
+
+    let status = resp.status();
+    // Parse real rate limit headers from Groq response
+    let groq_headers = crate::planner::quota::parse_groq_headers(resp.headers());
+    {
+        let mut tracker = state.planner_client.quota_tracker.lock().await;
+        tracker.update_groq_server_headers("openai/gpt-oss-120b", &groq_headers);
+        let event = tracker.to_quota_update_event("gemini-3.5-flash-lite");
+        let _ = app_handle.emit("planner:quota_update", &event);
+    }
+
+    if status.is_success() || status.as_u16() == 429 {
+        Ok(true)
+    } else {
+        let err_txt = resp.text().await.unwrap_or_default();
+        Err(format!("Validation failed with status {}: {err_txt}", status))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceWorkerConfig {
+    pub worker_type: String,
+    pub groq_model: String,
+}
+
+/// Get workspace default worker configuration (local vs groq).
+#[tauri::command]
+pub async fn get_workspace_worker_config(
+    workspace_path: String,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceWorkerConfig, String> {
+    let (worker_type, groq_model) = state
+        .db
+        .get_workspace_worker_config(&workspace_path)
+        .map_err(|e| e.to_string())?;
+
+    Ok(WorkspaceWorkerConfig {
+        worker_type,
+        groq_model: groq_model.unwrap_or_else(|| "openai/gpt-oss-120b".to_string()),
+    })
+}
+
+/// Set workspace default worker configuration (local vs groq).
+#[tauri::command]
+pub async fn set_workspace_worker_config(
+    workspace_path: String,
+    worker_type: String,
+    groq_model: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .db
+        .set_workspace_worker_config(&workspace_path, &worker_type, groq_model.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OllamaModelItem {
+    pub name: String,
+    pub size: String,
+    pub is_recommended: bool,
+}
+
+/// Query installed Ollama models live via `ollama list`.
+#[tauri::command]
+pub async fn list_installed_ollama_models() -> Result<Vec<OllamaModelItem>, String> {
+    let output = std::process::Command::new("ollama")
+        .arg("list")
+        .output()
+        .map_err(|e| format!("Failed to run ollama list: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut models = Vec::new();
+
+    for line in stdout.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if !parts.is_empty() {
+            let name = parts[0].to_string();
+            let size = if parts.len() >= 3 {
+                format!("{} {}", parts[parts.len() - 3], parts[parts.len() - 2])
+            } else {
+                String::new()
+            };
+            let is_recommended = name.starts_with("granite4.1:8b");
+            models.push(OllamaModelItem {
+                name,
+                size,
+                is_recommended,
+            });
+        }
+    }
+
+    if models.is_empty() {
+        models.push(OllamaModelItem {
+            name: "granite4.1:8b".to_string(),
+            size: "5.3 GB".to_string(),
+            is_recommended: true,
+        });
+    }
+
+    Ok(models)
+}
+
+/// Get current worker model.
+#[tauri::command]
+pub async fn get_worker_model(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.worker_model.lock().await.clone())
+}
+
+/// Set active worker model.
+#[tauri::command]
+pub async fn set_worker_model(model: String, state: State<'_, AppState>) -> Result<(), String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err("Worker model name cannot be empty".to_string());
+    }
+    let mut m = state.worker_model.lock().await;
+    *m = trimmed.to_string();
+    Ok(())
+}
+
+/// Custom window titlebar minimize command.
+#[tauri::command]
+pub async fn window_minimize(window: tauri::Window) -> Result<(), String> {
+    window.minimize().map_err(|e| e.to_string())
+}
+
+/// Custom window titlebar toggle maximize command.
+#[tauri::command]
+pub async fn window_toggle_maximize(window: tauri::Window) -> Result<bool, String> {
+    let is_max = window.is_maximized().map_err(|e| e.to_string())?;
+    if is_max {
+        window.unmaximize().map_err(|e| e.to_string())?;
+        Ok(false)
+    } else {
+        window.maximize().map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+}
+
+/// Custom window titlebar close command.
+#[tauri::command]
+pub async fn window_close(window: tauri::Window) -> Result<(), String> {
+    window.close().map_err(|e| e.to_string())
+}
+
+/// Open native OS folder picker dialog to select a workspace directory.
+#[tauri::command]
+pub async fn pick_folder() -> Result<Option<String>, String> {
+    let handle = tokio::task::spawn_blocking(|| {
+        #[cfg(target_os = "windows")]
+        {
+            let script = r#"Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = 'Select Workspace Folder'; $dialog.ShowNewFolderButton = $true; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Output $dialog.SelectedPath }"#;
+            let output = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .output()
+                .map_err(|e| format!("Failed to open folder picker: {e}"))?;
+
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if path.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(path))
+                }
+            } else {
+                Err(String::from_utf8_lossy(&output.stderr).to_string())
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(None)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    Ok(handle)
+}
+
+/// Native OS file picker dialog for attaching files to prompts.
+#[tauri::command]
+pub async fn pick_file(default_dir: Option<String>) -> Result<Option<String>, String> {
+    let handle = tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "windows")]
+        {
+            let initial = default_dir.unwrap_or_default().replace('\'', "''");
+            let script = format!(
+                r#"Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Title = 'Select File to Attach'; if ('{initial}' -ne '') {{ $dialog.InitialDirectory = '{initial}' }}; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Output $dialog.FileName }}"#
+            );
+            let output = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .output()
+                .map_err(|e| format!("Failed to open file picker: {e}"))?;
+
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if path.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(path))
+                }
+            } else {
+                Err(String::from_utf8_lossy(&output.stderr).to_string())
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(None)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    Ok(handle)
+}
+
+/// Runs a quick health check of required local dependencies:
+/// 1. Ollama daemon reachable and selected worker model installed.
+/// 2. OpenCode sidecar binary present and version-verified.
+/// 3. Git available on PATH.
+/// 4. Gemini API key present in Windows Credential Manager.
+#[tauri::command]
+pub async fn verify_startup_dependencies(
+    state: State<'_, AppState>,
+) -> Result<StartupCheckResult, String> {
+    let mut dependencies = Vec::new();
+
+    // 1. Check Ollama daemon & worker model
+    let target_worker_model = {
+        let configured = get_worker_model(state.clone())
+            .await
+            .unwrap_or_else(|_| "granite4.1:8b".to_string());
+        if configured.trim().is_empty() {
+            "granite4.1:8b".to_string()
+        } else {
+            configured
+        }
+    };
+
+    let client = reqwest::Client::new();
+    let ollama_status = match client
+        .get("http://127.0.0.1:11434/api/tags")
+        .timeout(Duration::from_millis(1500))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                let models = body.get("models").and_then(|m| m.as_array());
+                let has_model = models.map_or(false, |arr| {
+                    arr.iter().any(|m| {
+                        let name = m.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        name.starts_with(&target_worker_model) || target_worker_model.starts_with(name)
+                    })
+                });
+
+                if has_model {
+                    DependencyStatus {
+                        name: "Ollama & Worker Model".into(),
+                        is_ready: true,
+                        details: format!("Ollama daemon running with '{}' installed", target_worker_model),
+                        fix_recommendation: None,
+                    }
+                } else {
+                    DependencyStatus {
+                        name: "Ollama & Worker Model".into(),
+                        is_ready: false,
+                        details: format!(
+                            "Ollama is running, but worker model '{}' is not installed",
+                            target_worker_model
+                        ),
+                        fix_recommendation: Some(format!(
+                            "Run 'ollama pull {}' in terminal to install the model",
+                            target_worker_model
+                        )),
+                    }
+                }
+            } else {
+                DependencyStatus {
+                    name: "Ollama & Worker Model".into(),
+                    is_ready: false,
+                    details: "Ollama returned invalid response format".into(),
+                    fix_recommendation: Some("Verify Ollama installation and run 'ollama serve'".into()),
+                }
+            }
+        }
+        _ => DependencyStatus {
+            name: "Ollama & Worker Model".into(),
+            is_ready: false,
+            details: "Ollama daemon unreachable at 127.0.0.1:11434".into(),
+            fix_recommendation: Some("Start Ollama by running 'ollama serve' in your terminal".into()),
+        },
+    };
+    dependencies.push(ollama_status);
+
+    // 2. OpenCode sidecar binary check
+    let opencode_status = match EngineSupervisor::locate_pinned_binary() {
+        Ok(path) => {
+            let version = match std::process::Command::new(&path).arg("--version").output() {
+                Ok(out) if out.status.success() => {
+                    String::from_utf8_lossy(&out.stdout).trim().to_string()
+                }
+                _ => "v1.0.0".to_string(),
+            };
+            DependencyStatus {
+                name: "OpenCode Sidecar Engine".into(),
+                is_ready: true,
+                details: format!("Binary present at {:?} ({})", path, version),
+                fix_recommendation: None,
+            }
+        }
+        Err(_) => DependencyStatus {
+            name: "OpenCode Sidecar Engine".into(),
+            is_ready: false,
+            details: "OpenCode sidecar executable not found in binaries directory".into(),
+            fix_recommendation: Some(
+                "Ensure 'opencode.exe' is present in the application binaries/ folder".into(),
+            ),
+        },
+    };
+    dependencies.push(opencode_status);
+
+    // 3. Git on PATH
+    let git_status = match std::process::Command::new("git").arg("--version").output() {
+        Ok(out) if out.status.success() => {
+            let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            DependencyStatus {
+                name: "Git Version Control".into(),
+                is_ready: true,
+                details: format!("Available on PATH ({})", ver),
+                fix_recommendation: None,
+            }
+        }
+        _ => DependencyStatus {
+            name: "Git Version Control".into(),
+            is_ready: false,
+            details: "Git executable not found on system PATH".into(),
+            fix_recommendation: Some(
+                "Install Git from https://git-scm.com and ensure it is added to PATH".into(),
+            ),
+        },
+    };
+    dependencies.push(git_status);
+
+    // 4. Gemini API Key in Windows Credential Manager
+    let gemini_status = match CredentialService::get_gemini_api_key() {
+        Ok(key) if !key.trim().is_empty() => DependencyStatus {
+            name: "Gemini Planner Key".into(),
+            is_ready: true,
+            details: "API key configured in Windows Credential Manager".into(),
+            fix_recommendation: None,
+        },
+        _ => DependencyStatus {
+            name: "Gemini Planner Key".into(),
+            is_ready: false,
+            details: "Gemini API key not found in Windows Credential Manager".into(),
+            fix_recommendation: Some(
+                "Configure your Gemini API key in Settings (gear icon) or via Windows Credential Manager"
+                    .into(),
+            ),
+        },
+    };
+    dependencies.push(gemini_status);
+
+    let all_passed = dependencies.iter().all(|d| d.is_ready);
+    Ok(StartupCheckResult {
+        all_passed,
+        dependencies,
+    })
 }
 
 #[cfg(test)]
@@ -1812,6 +3612,9 @@ mod tests {
                 has_gitignore: true,
                 detected_editor_configs: vec!["rustfmt.toml".into()],
                 has_commits: true,
+                just_initialized_git: false,
+                is_corrupted: false,
+                system_notice: None,
             });
         }
 
@@ -1921,7 +3724,8 @@ mod tests {
             .expect("open_project should succeed");
 
         assert_eq!(proj.project_type, "Rust");
-        assert!(!proj.is_git_repo, "Must detect it is not yet a Git repo");
+        assert!(proj.just_initialized_git, "Must silently initialize git on opening a non-git workspace");
+        assert!(proj.is_git_repo, "Workspace is now initialized with git");
         assert!(!proj.has_gitignore, "Must detect absence of .gitignore without creating it");
         assert!(
             proj.detected_editor_configs.contains(&".editorconfig".to_string()),

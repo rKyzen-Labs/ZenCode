@@ -62,6 +62,14 @@ pub struct WorktreeInfo {
     pub worktree_path: String,
     pub base_commit: String,
     pub created_at: u64,
+    #[serde(default)]
+    pub system_notice: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergeOutcome {
+    pub commit_sha: Option<String>,
+    pub conflict_resolved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

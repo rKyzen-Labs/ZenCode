@@ -18,6 +18,7 @@ export interface ProjectState {
   has_gitignore?: boolean;
   detected_editor_configs?: string[];
   has_commits?: boolean;
+  just_initialized_git?: boolean;
 }
 
 export type ChangeCategory =
@@ -229,6 +230,8 @@ export interface PlanStep {
 export type ZencodePlanStep = PlanStep;
 
 export interface ZencodePlan {
+  is_actionable?: boolean;
+  conversational_reply?: string | null;
   task_summary?: string;
   assumptions?: string[];
   questions?: string[];
@@ -236,6 +239,7 @@ export interface ZencodePlan {
   steps: PlanStep[];
   risks?: string[];
   verification_suggestions?: string[];
+  planning_duration_seconds?: number;
   // Compatibility fields
   goal?: string;
   architecture_notes?: string;
@@ -279,6 +283,9 @@ export interface QuotaUpdateEvent {
   last_switch_reason: string | null;
   models: ModelQuotaStatus[];
   timestamp_ms: number;
+  groq_combined_rpd_remaining?: number;
+  groq_combined_rpd_limit?: number;
+  all_groq_exhausted?: boolean;
 }
 
 export interface WorkerEventPayload {
@@ -366,6 +373,9 @@ export interface WorkspaceRecord {
   path: string;
   name: string;
   last_opened_at: string;
+  is_context_preview_trusted?: boolean;
+  default_worker_type?: 'local' | 'groq';
+  groq_model?: string;
 }
 
 export interface ChatSummaryRecord {
@@ -407,4 +417,67 @@ export interface ChatDetailRecord {
   events_json?: string | null;
   verification_json?: string | null;
 }
+
+export interface WorkspaceFileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  children?: WorkspaceFileEntry[] | null;
+}
+
+export interface GeminiKeyStatus {
+  has_key: boolean;
+  masked_key: string;
+  status_text: string;
+}
+
+export interface GroqKeyStatus {
+  has_key: boolean;
+  masked_key: string;
+  status_text: string;
+}
+
+export interface WorkspaceWorkerConfig {
+  worker_type: 'local' | 'groq';
+  groq_model: string;
+}
+
+export interface OllamaModelItem {
+  name: string;
+  size: string;
+  is_recommended: boolean;
+}
+
+export interface DependencyStatus {
+  name: string;
+  is_ready: boolean;
+  details: string;
+  fix_recommendation?: string | null;
+}
+
+export interface StartupCheckResult {
+  all_passed: boolean;
+  dependencies: DependencyStatus[];
+}
+
+export interface PriorExchange {
+  role: string;
+  content: string;
+  files_changed: string[];
+  summary?: string | null;
+}
+
+export interface ChatMessage {
+  id: string;
+  chat_id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  plan_json?: string | null;
+  worker_summary?: string | null;
+  files_changed_json?: string | null;
+  created_at: string;
+  commit_hash?: string | null;
+}
+
+
 

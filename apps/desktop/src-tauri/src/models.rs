@@ -18,6 +18,12 @@ pub struct ProjectState {
     pub detected_editor_configs: Vec<String>,
     #[serde(default)]
     pub has_commits: bool,
+    #[serde(default)]
+    pub just_initialized_git: bool,
+    #[serde(default)]
+    pub is_corrupted: bool,
+    #[serde(default)]
+    pub system_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,4 +105,18 @@ pub struct AdvisoryPreview {
     pub file_path: Option<String>,
     pub file_excerpt: String,
     pub preview_payload: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependencyStatus {
+    pub name: String,
+    pub is_ready: bool,
+    pub details: String,
+    pub fix_recommendation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartupCheckResult {
+    pub all_passed: bool,
+    pub dependencies: Vec<DependencyStatus>,
 }

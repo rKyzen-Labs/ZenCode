@@ -362,6 +362,49 @@ impl EngineSupervisor {
         format!("http://127.0.0.1:{}/event", self.port)
     }
 
+    pub fn health_url(&self) -> String {
+        format!("http://127.0.0.1:{}/global/health", self.port)
+    }
+
+    /// Checks if the underlying child process is still running.
+    pub fn check_process_alive(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(None) => true, // Still alive
+            Ok(Some(_status)) => false, // Exited
+            Err(_) => false,
+        }
+    }
+
+    /// Pings the OpenCode /global/health endpoint with a 1.5s timeout.
+    pub async fn ping_health(&self) -> bool {
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_millis(1500))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        match client
+            .get(self.health_url())
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    return false;
+                }
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    body.get("healthy").and_then(|h| h.as_bool()) == Some(true)
+                } else {
+                    false
+                }
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Creates a dedicated OpenCode session for local Ollama execution.
     pub async fn create_session(&self, directory: &str) -> Result<String, EngineError> {
         let client = reqwest::Client::new();

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type {
   ProjectState,
   SystemStatus,
@@ -9,17 +9,19 @@ import type {
   EngineHealth,
   QuotaUpdateEvent,
   ChangeInventory,
-  OrphanWorktree,
-  UncommittedFile,
-  MergeResult,
   CommandRequest,
   ProcessOutputEvent,
   ExecutionResult,
   AdvisoryPreview,
+  ChatSummaryRecord,
+  DependencyStatus,
+  ChatMessage,
 } from './types';
+import { isTaskState } from './types';
 import {
   openProject,
   getProjectState,
+  verifyStartupDependencies,
   previewPlanningContext,
   submitPlanRequest,
   startWorkerSession,
@@ -30,67 +32,132 @@ import {
   getQuotaState,
   setPinnedModel,
   subscribeToQuotaUpdates,
-  acceptTask,
-  rejectTask,
-  stashPrimaryChanges,
-  commitPrimaryChanges,
-  listActiveWorktrees,
-  recoverOrphanedWorktree,
+  undoTaskChanges,
   subscribeToInventoryReady,
-  requestCommandApproval,
+  subscribeToChatMessageAdded,
   approveAndRunCommand,
   cancelCommandExecution,
-  exportDiagnosticBundle,
   previewAdvisoryContext,
   submitAdvisoryRequest,
   sendAdvisoryToWorker,
   subscribeToExecOutput,
   subscribeToExecFinished,
   listWorkspaces,
-  listChats,
+  isWorkspaceContextPreviewTrusted,
+  setWorkspaceContextPreviewTrusted,
   saveChat,
   loadChat,
-  deleteChat,
+  addChatMessage,
+  getChatMessages,
   getChangeInventory,
   initGitRepo,
   createInitialEmptyCommit,
-  createStandardGitignore,
+  getGeminiKeyStatus,
 } from './lib/ipc';
-import { Sidebar, type StoredChatSummary } from './components/Sidebar';
-import { EmptyState } from './components/EmptyState';
-import { ChatHeader } from './components/ChatHeader';
-import { ChatInputDock } from './components/ChatInputDock';
-import { RightPanel } from './components/RightPanel';
-import { QuotaDashboard } from './components/QuotaDashboard';
-import { DirtyTreeDialog } from './components/DirtyTreeDialog';
-import { OrphanRecoveryDialog } from './components/OrphanRecoveryDialog';
+import { TopBar, type ChatTabItem } from './components/TopBar';
+import { FileTreePane } from './components/FileTreePane';
+import { LandingPage } from './components/LandingPage';
+import { ChatThread } from './components/ChatThread';
+import { SearchPage } from './components/SearchPage';
+import { SettingsPage } from './components/SettingsPage';
+import { OnboardingWizard } from './components/OnboardingWizard';
 import { AdvisoryPreviewModal } from './components/AdvisoryPreviewModal';
 import { ExecutionTerminal } from './components/ExecutionTerminal';
-import { StatusBar } from './components/StatusBar';
-import { TaskView } from './components/TaskView';
 
 export default function App() {
-  const [project, setProject] = useState<ProjectState | null>(null);
-  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
-  const [quotaState, setQuotaState] = useState<QuotaUpdateEvent | null>(null);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [isRightPanelOpen, setIsRightPanelOpen] = useState(false);
-  const [isQuotaModalOpen, setIsQuotaModalOpen] = useState(false);
-  const [isPinnedLoading, setIsPinnedLoading] = useState(false);
-  const [lastActiveModel, setLastActiveModel] = useState<string>('gemini-3.5-flash-lite');
-  const [lastSwitchReason, setLastSwitchReason] = useState<string | null>(null);
+  // Navigation View State: 'landing' | 'chat' | 'search' | 'settings'
+  const [activeView, setActiveView] = useState<'landing' | 'chat' | 'search' | 'settings'>('landing');
 
-  const [recentWorkspaces, setRecentWorkspaces] = useState<string[]>(() => {
+  // Step 3 Onboarding Wizard State
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState<1 | 2 | 3 | 4>(1);
+
+  // Open Chat Sessions (TitleBar Tabs)
+  const [openChatTabs, setOpenChatTabs] = useState<ChatTabItem[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const activeChatIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeChatIdRef.current = activeChatId;
+  }, [activeChatId]);
+
+  // Persistent Chat Messages for Active Session
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+
+  // Project / Workspace State
+  const [project, setProject] = useState<ProjectState | null>(null);
+
+  // File Tree Right Pane Toggle & Width State (Persisted per workspace)
+  const [isFilePaneOpen, setIsFilePaneOpen] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem('zencode_recent_workspaces');
-      return saved ? JSON.parse(saved) : ['A:\\ZenCode'];
+      const saved = localStorage.getItem('zencode_file_pane_open');
+      return saved !== null ? JSON.parse(saved) : true;
     } catch {
-      return ['A:\\ZenCode'];
+      return true;
     }
   });
-  const [storedChats, setStoredChats] = useState<StoredChatSummary[]>([]);
-  const [activeChatTitle, setActiveChatTitle] = useState<string>('New Task');
 
+  const [filePaneWidth, setFilePaneWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('zencode_file_pane_width');
+      return saved ? Math.max(200, Math.min(parseInt(saved, 10), 700)) : 280;
+    } catch {
+      return 280;
+    }
+  });
+
+  // Toggle file pane and persist
+  const handleToggleFilePane = () => {
+    setIsFilePaneOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('zencode_file_pane_open', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  // Horizontal resizing for right file pane
+  const handleResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = filePaneWidth;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      // Dragging cursor to the left expands the right pane
+      const delta = startX - moveEvent.clientX;
+      const newWidth = Math.max(200, Math.min(startWidth + delta, window.innerWidth * 0.6));
+      setFilePaneWidth(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      try {
+        localStorage.setItem('zencode_file_pane_width', String(filePaneWidth));
+      } catch {}
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
+
+  // System & Engine Status
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [quotaState, setQuotaState] = useState<QuotaUpdateEvent | null>(null);
+  const [lastActiveModel, setLastActiveModel] = useState<string>('gemini-3.5-flash-lite');
+
+  // Startup Dependency Check State
+  const [isStartupVerifying, setIsStartupVerifying] = useState<boolean>(true);
+  const [dependencyIssues, setDependencyIssues] = useState<DependencyStatus[]>([]);
+
+  // Fix 3: Git Auto-init Notice
+  const [gitAutoInitNotice, setGitAutoInitNotice] = useState<string | null>(null);
+
+  // Task & Planning State
+  const [activeChatTitle, setActiveChatTitle] = useState<string>('New Task');
+  const [activePromptText, setActivePromptText] = useState<string>('');
+  const [isPlanning, setIsPlanning] = useState<boolean>(false);
+  const [planningElapsedSeconds, setPlanningElapsedSeconds] = useState<number>(0);
   const [contextPreview, setContextPreview] = useState<ContextPreview | null>(null);
   const [plan, setPlan] = useState<ZencodePlan | null>(null);
   const [workerEvents, setWorkerEvents] = useState<WorkerEventPayload[]>([]);
@@ -98,53 +165,22 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Milestone 2 Git Isolation & Review State
+  // Milestone 2 Git Isolation & Auto-Apply / Undo State
   const [inventory, setInventory] = useState<ChangeInventory | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
-  const [dirtyFiles, setDirtyFiles] = useState<UncommittedFile[] | null>(null);
-  const [pendingPlanForDirty, setPendingPlanForDirty] = useState<ZencodePlan | null>(null);
-  const [pendingAcceptTaskId, setPendingAcceptTaskId] = useState<string | null>(null);
-  const [orphanedWorktrees, setOrphanedWorktrees] = useState<OrphanWorktree[]>([]);
-
-  // Automatically open right panel when inventory is ready with file changes
+  const activeTaskIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (inventory && inventory.files.length > 0) {
-      setIsRightPanelOpen(true);
-    }
-  }, [inventory]);
+    activeTaskIdRef.current = activeTaskId;
+  }, [activeTaskId]);
 
-  // Sync active task into storedChats summary list
-  useEffect(() => {
-    if (activeTaskId && project) {
-      setStoredChats((prev) => {
-        const title = activeChatTitle || 'Task Session';
-        const status: StoredChatSummary['status'] = inventory
-          ? 'review'
-          : systemStatus?.task_state === 'WorkerRunning'
-          ? 'active'
-          : 'idle';
-        const existing = prev.find((c) => c.id === activeTaskId);
-        if (existing) {
-          return prev.map((c) =>
-            c.id === activeTaskId
-              ? { ...c, title, status, files_count: inventory?.files.length }
-              : c
-          );
-        }
-        return [
-          {
-            id: activeTaskId,
-            workspace_path: project.path,
-            title,
-            created_at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            status,
-            files_count: inventory?.files.length,
-          },
-          ...prev,
-        ];
-      });
-    }
-  }, [activeTaskId, project, activeChatTitle, inventory, systemStatus?.task_state]);
+  // Open file diff in the right file reader pane
+  const [openDiffRequest, setOpenDiffRequest] = useState<{
+    path: string;
+    diffContent: string;
+    additions?: number;
+    deletions?: number;
+  } | null>(null);
+  const [isUndone, setIsUndone] = useState<boolean>(false);
 
   // Milestone 3 Permissions, Execution, and Diagnostics State
   const [pendingCommandApproval, setPendingCommandApproval] = useState<CommandRequest | null>(null);
@@ -157,14 +193,6 @@ export default function App() {
   const [commandOutputLines, setCommandOutputLines] = useState<ProcessOutputEvent[]>([]);
   const [executionResult, setExecutionResult] = useState<ExecutionResult | null>(null);
   const [verificationHistory, setVerificationHistory] = useState<ExecutionResult[]>([]);
-  const [diagnosticNotice, setDiagnosticNotice] = useState<string | null>(null);
-
-  // Step 3 Offer-Based Git and .gitignore State
-  const [isGitInitDeclined, setIsGitInitDeclined] = useState(false);
-  const [isGitignoreDeclined, setIsGitignoreDeclined] = useState(false);
-  const [gitignoreAddedNotice, setGitignoreAddedNotice] = useState<string | null>(null);
-  const [isUnbornHeadDeclined, setIsUnbornHeadDeclined] = useState(false);
-  const [initialCommitNotice, setInitialCommitNotice] = useState<string | null>(null);
 
   // Refresh status from Rust backend
   const refreshStatus = useCallback(async () => {
@@ -182,7 +210,6 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to get project state:', err);
-      // Fallback mock if running outside Tauri
       setSystemStatus({
         gemini_ready: true,
         gemini_status_text: 'Key present in Credential Manager',
@@ -195,30 +222,23 @@ export default function App() {
     }
   }, []);
 
-  // Global Keyboard Shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.altKey) {
-        const k = typeof e.key === 'string' ? e.key.toLowerCase() : '';
-        if (k === 'r') {
-          e.preventDefault();
-          setIsRightPanelOpen((prev) => !prev);
-        } else if (k === 'b') {
-          e.preventDefault();
-          setIsSidebarCollapsed((prev) => !prev);
-        } else if (k === 'q') {
-          e.preventDefault();
-          setIsQuotaModalOpen((prev) => !prev);
-        }
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
   // Subscribe to real-time events on mount
   useEffect(() => {
     refreshStatus();
+
+    // Fix 4: Startup Dependency Verification
+    verifyStartupDependencies()
+      .then((res) => {
+        const issues = res.dependencies.filter((d) => !d.is_ready);
+        setDependencyIssues(issues);
+      })
+      .catch((err) => console.warn('Could not verify startup dependencies:', err))
+      .finally(() => setIsStartupVerifying(false));
+
+    // Request desktop notification permission on launch (Step 8)
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
 
     // Fetch initial rate-limit telemetry
     getQuotaState()
@@ -230,20 +250,10 @@ export default function App() {
       })
       .catch((err) => console.warn('Could not fetch initial quota state:', err));
 
-    // Check for orphaned worktrees on startup before showing screens
-    listActiveWorktrees()
-      .then((orphans) => {
-        if (orphans && orphans.length > 0) {
-          setOrphanedWorktrees(orphans);
-        }
-      })
-      .catch((err) => console.warn('Could not check for orphaned worktrees on launch:', err));
-
-    // Step 4: Restore last opened workspace and its chat list automatically on launch
+    // Restore last opened workspace on launch
     listWorkspaces()
       .then(async (records) => {
         if (records && records.length > 0) {
-          setRecentWorkspaces(records.map((r) => r.path));
           const lastWorkspace = records[0].path;
           try {
             await handleOpenProject(lastWorkspace);
@@ -254,11 +264,22 @@ export default function App() {
       })
       .catch((err) => console.warn('Could not list workspaces from SQLite:', err));
 
+    // First-run onboarding check
+    getGeminiKeyStatus()
+      .then((status) => {
+        const completed = localStorage.getItem('zencode_onboarding_completed') === 'true';
+        if (!status?.has_key && !completed) {
+          setIsOnboardingOpen(true);
+        }
+      })
+      .catch((err) => console.warn('Could not check onboarding initial status:', err));
+
     let unlistenWorkerMsg: (() => void) | undefined;
     let unlistenWorkerStatus: (() => void) | undefined;
     let unlistenEngineHealth: (() => void) | undefined;
     let unlistenQuotaUpdate: (() => void) | undefined;
     let unlistenInventoryReady: (() => void) | undefined;
+    let unlistenChatMessageAdded: (() => void) | undefined;
     let unlistenExecOutput: (() => void) | undefined;
     let unlistenExecFinished: (() => void) | undefined;
 
@@ -268,12 +289,51 @@ export default function App() {
           setWorkerEvents((prev) => [...prev, payload]);
         });
 
-        unlistenWorkerStatus = await subscribeToWorkerStatus((taskState: TaskState) => {
+        unlistenWorkerStatus = await subscribeToWorkerStatus(async (taskState: TaskState) => {
           setSystemStatus((prev) => (prev ? { ...prev, task_state: taskState } : null));
+          if (!isTaskState(taskState, 'WorkerRunning')) {
+            setWorkerSessionId(null);
+            setIsLoading(false);
+          }
+          if (isTaskState(taskState, 'Complete')) {
+            const currentChatId = activeChatIdRef.current;
+            if (currentChatId) {
+              try {
+                const msgs = await getChatMessages(currentChatId);
+                setChatMessages(msgs || []);
+              } catch (e) {
+                console.warn('Could not refresh messages on task complete:', e);
+              }
+            }
+          }
+          if (isTaskState(taskState, 'Failed')) {
+            const errMsg = typeof taskState === 'object' && 'Failed' in taskState
+              ? (taskState as any).Failed
+              : typeof taskState === 'object' && 'detail' in taskState
+              ? (taskState as any).detail
+              : 'Worker execution terminated unexpectedly';
+            setError(errMsg);
+          }
+        });
+
+        unlistenChatMessageAdded = await subscribeToChatMessageAdded((msg: ChatMessage) => {
+          if (msg.chat_id === activeChatIdRef.current) {
+            setChatMessages((prev) => {
+              if (prev.some((m) => m.id === msg.id)) {
+                return prev.map((m) => (m.id === msg.id ? msg : m));
+              }
+              return [...prev, msg];
+            });
+          }
         });
 
         unlistenEngineHealth = await subscribeToEngineHealth((health: EngineHealth) => {
           setSystemStatus((prev) => (prev ? { ...prev, opencode_health: health } : null));
+          if (typeof health === 'object' && 'Failed' in health) {
+            setError((health as any).Failed || 'OpenCode worker engine stopped or crashed');
+            setWorkerSessionId(null);
+            setIsLoading(false);
+          }
         });
 
         unlistenQuotaUpdate = await subscribeToQuotaUpdates((qs: QuotaUpdateEvent) => {
@@ -281,15 +341,31 @@ export default function App() {
           if (qs.active_model) {
             setLastActiveModel(qs.active_model);
           }
-          if (qs.last_switch_reason) {
-            setLastSwitchReason(qs.last_switch_reason);
-          }
         });
 
-        unlistenInventoryReady = await subscribeToInventoryReady((inv: ChangeInventory) => {
+        unlistenInventoryReady = await subscribeToInventoryReady(async (inv: ChangeInventory) => {
           setInventory(inv);
-          // Automatically open right panel when inventory is received
-          setIsRightPanelOpen(true);
+          setWorkerSessionId(null);
+
+          // Desktop notification on completion
+          if ('Notification' in window && Notification.permission === 'granted') {
+            try {
+              new Notification('ZenCode Task Complete', {
+                body: `${inv.files.length} file(s) updated (+${inv.total_additions}/-${inv.total_deletions})`,
+              });
+            } catch {}
+          }
+
+          const currentId = activeChatIdRef.current || activeTaskIdRef.current;
+          if (currentId) {
+            try {
+              const msgs = await getChatMessages(currentId);
+              setChatMessages(msgs || []);
+            } catch (e) {
+              console.warn('Could not refresh messages on inventory ready:', e);
+            }
+            await refreshStatus();
+          }
         });
 
         unlistenExecOutput = await subscribeToExecOutput((ev: ProcessOutputEvent) => {
@@ -311,6 +387,7 @@ export default function App() {
     return () => {
       unlistenWorkerMsg?.();
       unlistenWorkerStatus?.();
+      unlistenChatMessageAdded?.();
       unlistenEngineHealth?.();
       unlistenQuotaUpdate?.();
       unlistenInventoryReady?.();
@@ -319,40 +396,33 @@ export default function App() {
     };
   }, [refreshStatus]);
 
-  // Handler: Pin / Unpin model (e.g. gemini-3.8-flash)
+  // Live real-time planning duration timer
+  useEffect(() => {
+    let timer: any = null;
+    if (isPlanning) {
+      setPlanningElapsedSeconds(1);
+      const start = Date.now();
+      timer = setInterval(() => {
+        setPlanningElapsedSeconds(Math.max(1, Math.floor((Date.now() - start) / 1000)));
+      }, 1000);
+    } else {
+      setPlanningElapsedSeconds(0);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [isPlanning]);
+
+  // Handler: Pin / Unpin model
   const handlePinModel = async (modelId: string | null) => {
-    setIsPinnedLoading(true);
     try {
       const updated = await setPinnedModel(modelId);
       setQuotaState(updated);
       setLastActiveModel(updated.active_model);
-      if (updated.last_switch_reason) {
-        setLastSwitchReason(updated.last_switch_reason);
-      }
     } catch (err: any) {
       console.error('Failed to pin model:', err);
-    } finally {
-      setIsPinnedLoading(false);
     }
   };
-
-  // Load stored chats from SQLite for current workspace
-  const loadStoredChats = useCallback(async (workspacePath: string) => {
-    try {
-      const records = await listChats(workspacePath);
-      const summaries: StoredChatSummary[] = records.map((r) => ({
-        id: r.id,
-        workspace_path: r.workspace_path,
-        title: r.title,
-        created_at: new Date(r.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        status: r.status as StoredChatSummary['status'],
-        files_count: r.files_count,
-      }));
-      setStoredChats(summaries);
-    } catch (err) {
-      console.warn('Could not load stored chats from SQLite:', err);
-    }
-  }, []);
 
   // Handler: Select and restore a previous chat
   const handleSelectChat = async (taskId: string) => {
@@ -362,14 +432,70 @@ export default function App() {
       const detail = await loadChat(taskId);
       if (!detail) return;
 
+      activeChatIdRef.current = detail.id;
+      activeTaskIdRef.current = detail.id;
       setActiveTaskId(detail.id);
+      setActiveChatId(detail.id);
       setActiveChatTitle(detail.title);
+      setActivePromptText(detail.title || '');
 
-      // Restore plan if present
+      try {
+        const msgs = await getChatMessages(detail.id);
+        if (msgs && msgs.length > 0) {
+          if (!msgs.some((m) => m.role === 'user') && detail.title) {
+            msgs.unshift({
+              id: `msg_init_${detail.id}`,
+              chat_id: detail.id,
+              role: 'user',
+              content: detail.title,
+              plan_json: null,
+              worker_summary: null,
+              files_changed_json: null,
+              created_at: detail.created_at || new Date().toISOString(),
+              commit_hash: null,
+            });
+          }
+          setChatMessages(msgs);
+        } else if (detail.title) {
+          setChatMessages([
+            {
+              id: `msg_init_${detail.id}`,
+              chat_id: detail.id,
+              role: 'user',
+              content: detail.title,
+              plan_json: null,
+              worker_summary: null,
+              files_changed_json: null,
+              created_at: detail.created_at || new Date().toISOString(),
+              commit_hash: null,
+            },
+          ]);
+        } else {
+          setChatMessages([]);
+        }
+      } catch {
+        if (detail.title) {
+          setChatMessages([
+            {
+              id: `msg_init_${detail.id}`,
+              chat_id: detail.id,
+              role: 'user',
+              content: detail.title,
+              plan_json: null,
+              worker_summary: null,
+              files_changed_json: null,
+              created_at: detail.created_at || new Date().toISOString(),
+              commit_hash: null,
+            },
+          ]);
+        } else {
+          setChatMessages([]);
+        }
+      }
+
       if (detail.plan_json) {
         try {
-          const parsedPlan = JSON.parse(detail.plan_json);
-          setPlan(parsedPlan);
+          setPlan(JSON.parse(detail.plan_json));
         } catch {
           setPlan(null);
         }
@@ -377,11 +503,9 @@ export default function App() {
         setPlan(null);
       }
 
-      // Restore worker events scrollback
       if (detail.events_json) {
         try {
-          const parsedEvents = JSON.parse(detail.events_json);
-          setWorkerEvents(parsedEvents);
+          setWorkerEvents(JSON.parse(detail.events_json));
         } catch {
           setWorkerEvents([]);
         }
@@ -389,11 +513,9 @@ export default function App() {
         setWorkerEvents([]);
       }
 
-      // Restore verification runs
       if (detail.verification_json) {
         try {
-          const parsedVer = JSON.parse(detail.verification_json);
-          setVerificationHistory(parsedVer);
+          setVerificationHistory(JSON.parse(detail.verification_json));
         } catch {
           setVerificationHistory([]);
         }
@@ -401,13 +523,11 @@ export default function App() {
         setVerificationHistory([]);
       }
 
-      // Restore exact diff state from authoritative Git worktree
       if (detail.status === 'review' || detail.status === 'active' || detail.worktree_path) {
         try {
           const inv = await getChangeInventory(detail.id);
           if (inv && inv.files.length > 0) {
             setInventory(inv);
-            setIsRightPanelOpen(true);
           } else {
             setInventory(null);
           }
@@ -424,33 +544,14 @@ export default function App() {
     }
   };
 
-  // Handler: Open Project
+  // Handler: Open Project / Workspace
   const handleOpenProject = async (path: string) => {
     setIsLoading(true);
     setError(null);
     try {
       const proj = await openProject(path);
       setProject(proj);
-      setRecentWorkspaces((prev) => {
-        const updated = [path, ...prev.filter((p) => p !== path)].slice(0, 8);
-        try {
-          localStorage.setItem('zencode_recent_workspaces', JSON.stringify(updated));
-        } catch {}
-        return updated;
-      });
       await refreshStatus();
-      await loadStoredChats(path);
-      setIsGitInitDeclined(false);
-      setIsGitignoreDeclined(false);
-      setGitignoreAddedNotice(null);
-      setIsUnbornHeadDeclined(false);
-      setInitialCommitNotice(null);
-
-      // Check for orphaned worktrees in this newly opened repository
-      const orphans = await listActiveWorktrees();
-      if (orphans && orphans.length > 0) {
-        setOrphanedWorktrees(orphans);
-      }
     } catch (err: any) {
       console.error('Error opening project:', err);
       setError(typeof err === 'string' ? err : err.message || 'Failed to open project folder');
@@ -459,69 +560,49 @@ export default function App() {
     }
   };
 
-  // Step 3: Handle explicit per-action Git Init
-  const handleInitGitRepo = async () => {
-    if (!project) return;
-    setIsLoading(true);
-    setError(null);
-    try {
-      const updated = await initGitRepo(project.path);
-      setProject(updated);
-      setIsGitInitDeclined(false);
-      await refreshStatus();
-    } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to initialize Git repository');
-    } finally {
-      setIsLoading(false);
+  const handleSelectWorkspaceDialog = () => {
+    const p = prompt('Enter workspace folder path:', project?.path || 'A:\\ZenCode');
+    if (p && p.trim()) {
+      handleOpenProject(p.trim());
     }
   };
 
-  // Step 3: Handle explicit per-action .gitignore creation
-  const handleCreateGitignore = async () => {
-    if (!project) return;
+  // Planning & Worker Session Handlers
+  const handlePreviewContext = async (taskDescription: string, chatId?: string | null) => {
     setIsLoading(true);
     setError(null);
-    try {
-      const msg = await createStandardGitignore(project.path, project.project_type);
-      setGitignoreAddedNotice(msg);
-      setProject((prev) => (prev ? { ...prev, has_gitignore: true } : null));
-    } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to create standard .gitignore');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    setIsUndone(false);
+    setContextPreview(null);
+    setPlan(null);
+    setWorkerEvents([]);
+    setWorkerSessionId(null);
+    setInventory(null);
+    setActivePromptText(taskDescription);
 
-  // Step 3: Handle explicit per-action initial empty commit on unborn/0-commit repo
-  const handleCreateInitialCommit = async () => {
-    if (!project) return;
-    setIsLoading(true);
-    setError(null);
-    try {
-      const updated = await createInitialEmptyCommit(project.path);
-      setProject(updated);
-      setIsUnbornHeadDeclined(false);
-      setInitialCommitNotice("Created initial empty commit. Repository is ready for isolated task branches.");
-      await refreshStatus();
-    } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to create initial commit');
-    } finally {
-      setIsLoading(false);
+    const targetChatId = chatId || activeChatIdRef.current;
+    if (targetChatId) {
+      activeChatIdRef.current = targetChatId;
+      activeTaskIdRef.current = targetChatId;
     }
-  };
 
-  // Handler: Generate Context Preview (No network call)
-  const handlePreviewContext = async (taskDescription: string) => {
-    setIsLoading(true);
-    setError(null);
     try {
-      const preview = await previewPlanningContext(taskDescription);
-      setContextPreview(preview);
-      setPlan(null);
-      setWorkerEvents([]);
-      setWorkerSessionId(null);
-      setInventory(null);
-      setActiveTaskId(null);
+      const preview = await previewPlanningContext(taskDescription, targetChatId);
+
+      // Context preview — trust once per workspace
+      const isTrusted = project?.path
+        ? await isWorkspaceContextPreviewTrusted(project.path)
+        : false;
+
+      if (isTrusted) {
+        // Workspace is trusted: proceed directly to planning with zero prompts!
+        setContextPreview(null);
+        await handleConfirmPlanRequest(preview.preview_id, targetChatId);
+      } else {
+        // Fix 5: First time in workspace: show preview inline for transparency as message sends,
+        // and proceed automatically into planning without requiring a second explicit button click!
+        setContextPreview(preview);
+        await handleConfirmPlanRequest(preview.preview_id, targetChatId);
+      }
     } catch (err: any) {
       console.error('Error previewing context:', err);
       setError(typeof err === 'string' ? err : err.message || 'Failed to assemble planning context');
@@ -530,18 +611,29 @@ export default function App() {
     }
   };
 
-  // Handler: Confirm & Send to Gemini Planner
-  const handleConfirmPlanRequest = async (previewId: string) => {
+  const handleConfirmPlanRequest = async (previewId: string, explicitChatId?: string | null) => {
+    const planStartTime = Date.now();
+    setIsPlanning(true);
     setIsLoading(true);
     setError(null);
     try {
+      // Store trust for this workspace so future tasks proceed automatically
+      if (project?.path) {
+        try {
+          await setWorkspaceContextPreviewTrusted(project.path, true);
+        } catch (e) {
+          console.warn('Could not persist workspace context preview trust:', e);
+        }
+      }
+
       const result = await submitPlanRequest(previewId, true);
+      const measuredSeconds = Math.max(1, Math.round((Date.now() - planStartTime) / 1000));
+      if (!result.plan.planning_duration_seconds) {
+        result.plan.planning_duration_seconds = measuredSeconds;
+      }
       setPlan(result.plan);
       if (result.active_model) {
         setLastActiveModel(result.active_model);
-      }
-      if (result.switch_reason) {
-        setLastSwitchReason(result.switch_reason);
       }
       setSystemStatus((prev) =>
         prev
@@ -552,15 +644,95 @@ export default function App() {
             }
           : null
       );
+
+      const tid = explicitChatId || activeChatIdRef.current || activeTaskIdRef.current || `task_${Date.now()}`;
+      activeChatIdRef.current = tid;
+      activeTaskIdRef.current = tid;
+      setActiveTaskId(tid);
+      setActiveChatId(tid);
+
+      // Fix 2: Check if this is an actionable coding task vs conversational message / question / small talk
+      if (result.plan.is_actionable === false) {
+        // Non-actionable conversational message:
+        // Do NOT create a worktree, do NOT start an OpenCode session, do NOT touch Git at all!
+        const reply = result.plan.conversational_reply || result.plan.task_summary || '';
+        try {
+          const asstMsg = await addChatMessage(tid, 'assistant', reply, JSON.stringify(result.plan), reply, []);
+          setChatMessages((prev) => [...prev, asstMsg]);
+        } catch (e) {
+          console.warn('Could not save assistant conversational message to db:', e);
+        }
+
+        if (project) {
+          try {
+            await saveChat({
+              id: tid,
+              workspace_path: project.path,
+              title: activeChatTitle,
+              status: 'idle',
+              branch_name: null,
+              worktree_path: null,
+              plan_json: JSON.stringify(result.plan),
+              worker_summary: reply,
+              events_json: null,
+              verification_json: null,
+            });
+          } catch (e) {
+            console.warn('Could not save conversational chat record:', e);
+          }
+        }
+      } else {
+        // Actionable coding task: record plan and proceed with the full existing pipeline!
+        const summary = result.plan.task_summary || 'Implementation Plan';
+        try {
+          const asstMsg = await addChatMessage(
+            tid,
+            'assistant',
+            summary,
+            JSON.stringify(result.plan),
+            summary,
+            []
+          );
+          setChatMessages((prev) => [...prev, asstMsg]);
+        } catch (e) {
+          console.warn('Could not record plan message in db:', e);
+        }
+
+        await handleStartWorkerSession(result.plan, tid);
+      }
     } catch (err: any) {
       console.error('Error submitting plan request:', err);
       setError(typeof err === 'string' ? err : err.message || 'Planning request failed');
+    } finally {
+      setIsPlanning(false);
+      setIsLoading(false);
+    }
+  };
+
+  const handleCancelPlanRequest = () => {
+    setContextPreview(null);
+  };
+
+  // Undo task changes: Reverts changes made by a specific prompt using git revert
+  const handleUndoTask = async (taskId: string, commitHash?: string, messageId?: string) => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      await undoTaskChanges(taskId, commitHash, messageId);
+      setIsUndone(true);
+      await refreshStatus();
+      if (activeChatIdRef.current) {
+        const msgs = await getChatMessages(activeChatIdRef.current);
+        setChatMessages(msgs);
+      }
+    } catch (err: any) {
+      console.error('Error undoing task:', err);
+      setError(typeof err === 'string' ? err : err.message || 'Failed to undo task changes');
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Handler: Execute Plan with Local Worker inside isolated Git worktree
   const handleStartWorkerSession = async (
     planToExecute: ZencodePlan,
     taskId?: string,
@@ -568,8 +740,8 @@ export default function App() {
   ) => {
     setIsLoading(true);
     setError(null);
+    const tid = taskId || activeTaskId || `task_${Date.now()}`;
     try {
-      const tid = taskId || `task_${Date.now()}`;
       setActiveTaskId(tid);
       if (project) {
         await saveChat({
@@ -584,7 +756,6 @@ export default function App() {
           events_json: null,
           verification_json: null,
         });
-        await loadStoredChats(project.path);
       }
       const sessionId = await startWorkerSession(planToExecute, tid, acknowledgeDirty);
       setWorkerSessionId(sessionId);
@@ -593,304 +764,98 @@ export default function App() {
       );
     } catch (err: any) {
       console.error('Error starting worker session:', err);
-      if (err?.error_type === 'DIRTY_PRIMARY_TREE' || err?.uncommitted_files) {
-        setDirtyFiles(err.uncommitted_files || []);
-        setPendingPlanForDirty(planToExecute);
-      } else if (err?.error_type === 'UNBORN_HEAD') {
-        setIsUnbornHeadDeclined(false);
-        setError('This repository has no commits yet. Create an initial commit to proceed.');
-      } else {
-        setError(typeof err === 'string' ? err : err.message || 'Failed to start worker session');
-      }
+      setError(typeof err === 'string' ? err : err.message || 'Failed to start worker session');
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Dirty Tree Resolution: Stash
-  const handleStashDirty = async (msg?: string) => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      await stashPrimaryChanges(msg);
-      setDirtyFiles(null);
-      if (pendingAcceptTaskId) {
-        const tid = pendingAcceptTaskId;
-        setPendingAcceptTaskId(null);
-        await handleAcceptTask(tid, false);
-      } else if (pendingPlanForDirty) {
-        const p = pendingPlanForDirty;
-        setPendingPlanForDirty(null);
-        await handleStartWorkerSession(p, undefined, false);
-      }
-    } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to stash changes');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Dirty Tree Resolution: Commit
-  const handleCommitDirty = async (msg: string) => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      await commitPrimaryChanges(msg);
-      setDirtyFiles(null);
-      if (pendingAcceptTaskId) {
-        const tid = pendingAcceptTaskId;
-        setPendingAcceptTaskId(null);
-        await handleAcceptTask(tid, false);
-      } else if (pendingPlanForDirty) {
-        const p = pendingPlanForDirty;
-        setPendingPlanForDirty(null);
-        await handleStartWorkerSession(p, undefined, false);
-      }
-    } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to commit changes');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Dirty Tree Resolution: Acknowledge & proceed anyway
-  const handleProceedAnywayDirty = async () => {
-    setDirtyFiles(null);
-    if (pendingAcceptTaskId) {
-      const tid = pendingAcceptTaskId;
-      setPendingAcceptTaskId(null);
-      await handleAcceptTask(tid, true);
-    } else if (pendingPlanForDirty) {
-      const p = pendingPlanForDirty;
-      setPendingPlanForDirty(null);
-      await handleStartWorkerSession(p, undefined, true);
-    }
-  };
-
-  const handleCancelDirty = () => {
-    setDirtyFiles(null);
-    setPendingPlanForDirty(null);
-    setPendingAcceptTaskId(null);
-  };
-
-  // Handler: Accept Task Changes
-  const handleAcceptTask = async (tid: string, acknowledgeDirty?: boolean): Promise<MergeResult> => {
+  const handleStopWorkerSession = async (sessionId?: string) => {
+    const idToStop = workerSessionId || sessionId;
+    if (!idToStop) return;
     setIsLoading(true);
     try {
-      const res = await acceptTask(tid, acknowledgeDirty);
-      if ('Success' in res || (res as any).status === 'Success') {
-        if (project) {
-          await saveChat({
-            id: tid,
-            workspace_path: project.path,
-            title: activeChatTitle,
-            status: 'merged',
-            branch_name: null,
-            worktree_path: null,
-            plan_json: plan ? JSON.stringify(plan) : null,
-            worker_summary: null,
-            events_json: workerEvents.length > 0 ? JSON.stringify(workerEvents) : null,
-            verification_json: verificationHistory.length > 0 ? JSON.stringify(verificationHistory) : null,
-          });
-          await loadStoredChats(project.path);
-        }
-        setInventory(null);
-        setActiveTaskId(null);
-        setIsRightPanelOpen(false);
-        await refreshStatus();
-      }
-      return res;
-    } catch (err: any) {
-      if (err?.error_type === 'DIRTY_PRIMARY_TREE' || err?.uncommitted_files) {
-        setDirtyFiles(err.uncommitted_files || []);
-        setPendingAcceptTaskId(tid);
-      }
-      throw err;
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Handler: Reject Task Changes
-  const handleRejectTask = async (tid: string): Promise<void> => {
-    setIsLoading(true);
-    try {
-      await rejectTask(tid);
-      if (project) {
-        await saveChat({
-          id: tid,
-          workspace_path: project.path,
-          title: activeChatTitle,
-          status: 'rejected',
-          branch_name: null,
-          worktree_path: null,
-          plan_json: plan ? JSON.stringify(plan) : null,
-          worker_summary: null,
-          events_json: workerEvents.length > 0 ? JSON.stringify(workerEvents) : null,
-          verification_json: verificationHistory.length > 0 ? JSON.stringify(verificationHistory) : null,
-        });
-        await loadStoredChats(project.path);
-      }
-      setInventory(null);
-      setActiveTaskId(null);
-      setIsRightPanelOpen(false);
-      await refreshStatus();
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Handler: Delete Stored Chat
-  const handleDeleteChat = async (tid: string) => {
-    try {
-      await deleteChat(tid);
-      if (activeTaskId === tid) {
-        handleNewChat();
-      }
-      if (project) {
-        await loadStoredChats(project.path);
-      }
-    } catch (err) {
-      console.warn('Failed to delete chat:', err);
-    }
-  };
-
-  // Orphan Worktree Recovery Handlers
-  const handleReviewOrphan = async (tid: string) => {
-    setIsLoading(true);
-    try {
-      const inv = await recoverOrphanedWorktree(tid, 'review');
-      if (inv) {
-        setInventory(inv);
-        setActiveTaskId(tid);
-        setIsRightPanelOpen(true);
-        setOrphanedWorktrees((prev) => prev.filter((o) => o.task_id !== tid));
-      }
-    } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to review orphaned worktree');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleRejectOrphan = async (tid: string) => {
-    setIsLoading(true);
-    try {
-      await recoverOrphanedWorktree(tid, 'reject');
-      setOrphanedWorktrees((prev) => prev.filter((o) => o.task_id !== tid));
-    } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to reject orphaned worktree');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleIgnoreOrphans = () => {
-    setOrphanedWorktrees([]);
-  };
-
-  // Handler: Stop Worker Session
-  const handleStopWorkerSession = async (sessionId: string) => {
-    try {
-      const sid = workerSessionId || sessionId;
-      if (sid) {
-        await stopWorkerSession(sid);
-      }
+      await stopWorkerSession(idToStop);
+      setWorkerSessionId(null);
       setSystemStatus((prev) =>
         prev ? { ...prev, task_state: 'Idle' } : null
       );
     } catch (err: any) {
       console.error('Error stopping worker session:', err);
-      setError(typeof err === 'string' ? err : err.message || 'Failed to stop worker');
+    } finally {
+      setIsLoading(false);
     }
   };
 
-
-
-  // Milestone 3 & Refinement Pass Command Handlers (Step 5 Allowlist + Session Memory)
-  const handleTriggerCommand = async (
-    program: string,
-    args: string[],
-    cwd?: string,
-    description?: string
-  ) => {
+  // Command Approvals & Execution
+  const handleApproveCommand = async (req: CommandRequest) => {
+    setPendingCommandApproval(null);
+    setActiveCommandId(req.id);
+    setActiveProgram(req.program);
+    setActiveArgs(req.args);
+    setActiveCwd(req.cwd);
+    setCommandOutputLines([]);
+    setExecutionResult(null);
+    setIsTerminalOpen(true);
+    setIsCommandRunning(true);
     try {
-      setError(null);
-      const req = await requestCommandApproval(program, args, cwd, description);
-      if (req.auto_approved) {
-        // Step 5: Safe allowlisted or already approved in this session: execute immediately without re-prompt
-        await handleApproveCommand(req);
-      } else {
-        setPendingCommandApproval(req);
-      }
+      await approveAndRunCommand(req.id);
     } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to request command approval');
+      setIsCommandRunning(false);
+      setError(typeof err === 'string' ? err : err.message || 'Failed to approve command execution');
     }
   };
 
-  // Step 6: Advisory Error Consultation with Gemini (Opt-in only, capped at 5 local repairs)
+  const handleDenyCommand = async (req: CommandRequest) => {
+    setPendingCommandApproval(null);
+    try {
+      await cancelCommandExecution(req.id);
+    } catch (err: any) {
+      console.warn('Failed to send denial:', err);
+    }
+  };
+
+  const handleCancelCommand = async (commandId: string) => {
+    try {
+      await cancelCommandExecution(commandId);
+      setIsCommandRunning(false);
+    } catch (err: any) {
+      console.warn('Failed to cancel running command:', err);
+    }
+  };
+
+  // Advisory Consultation
   const [advisoryPreview, setAdvisoryPreview] = useState<AdvisoryPreview | null>(null);
   const [isAdvisoryModalOpen, setIsAdvisoryModalOpen] = useState(false);
   const [isAdvisoryLoading, setIsAdvisoryLoading] = useState(false);
   const [advisorySuggestion, setAdvisorySuggestion] = useState<string | null>(null);
 
   const handleTriggerAdvisory = async (errorText: string, filePath?: string) => {
-    // Check quota availability before attempting to generate preview or request advice
-    const isPinned = Boolean(quotaState?.pinned_model);
-    const relevantModels = isPinned
-      ? quotaState?.models.filter(m => m.model_id === quotaState.pinned_model)
-      : quotaState?.models;
-    const isQuotaExhausted = Boolean(
-      relevantModels && relevantModels.length > 0 && relevantModels.every(m => !m.is_available)
-    );
-    if (isQuotaExhausted) {
-      const reason = relevantModels?.find(m => !m.is_available)?.unavailability_reason || 'Rate limit capacity reached';
-      setError(`Cannot request Gemini advisory: Free-tier quota is currently exhausted (${reason}). Please wait for the quota window to reset.`);
-      return;
-    }
-
+    setIsAdvisoryLoading(true);
+    setError(null);
     try {
-      setIsAdvisoryLoading(true);
-      setError(null);
       const preview = await previewAdvisoryContext(errorText, filePath);
       setAdvisoryPreview(preview);
       setIsAdvisoryModalOpen(true);
     } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to generate advisory context preview');
+      setError(typeof err === 'string' ? err : err.message || 'Failed to assemble advisory context preview');
     } finally {
       setIsAdvisoryLoading(false);
     }
   };
 
   const handleConfirmAdvisory = async (previewId: string) => {
+    setIsAdvisoryLoading(true);
+    setError(null);
     try {
-      setIsAdvisoryLoading(true);
-      setError(null);
       const suggestion = await submitAdvisoryRequest(previewId, true);
       setAdvisorySuggestion(suggestion);
       setIsAdvisoryModalOpen(false);
       setAdvisoryPreview(null);
-
-      // Forward advisory guidance to the running local worker session
-      if (workerSessionId) {
-        await sendAdvisoryToWorker(workerSessionId, suggestion);
-      }
     } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to obtain Gemini advisory suggestion');
+      setError(typeof err === 'string' ? err : err.message || 'Advisory request failed');
     } finally {
       setIsAdvisoryLoading(false);
-    }
-  };
-
-  const handleApplyAdvisoryToWorker = async (suggestionText: string) => {
-    if (!workerSessionId) return;
-    setIsLoading(true);
-    try {
-      await sendAdvisoryToWorker(workerSessionId, suggestionText);
-    } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to dispatch advisory advice to worker');
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -899,104 +864,373 @@ export default function App() {
     setAdvisoryPreview(null);
   };
 
-  const handleApproveCommand = async (req: CommandRequest) => {
-    setPendingCommandApproval(null);
-    setActiveCommandId(req.id);
-    setActiveProgram(req.program);
-    setActiveArgs(req.args);
-    setActiveCwd(req.cwd);
-    setIsCommandRunning(true);
-    setCommandOutputLines([]);
-    setExecutionResult(null);
-    setIsTerminalOpen(true);
-
+  const handleApplyAdvisoryToWorker = async (suggestion: string) => {
+    if (!workerSessionId) return;
+    setIsLoading(true);
     try {
-      const res = await approveAndRunCommand(req.id);
-      setExecutionResult(res);
-      setVerificationHistory((prev) => [...prev.filter((r) => r.command_id !== res.command_id), res]);
-      setIsCommandRunning(false);
+      await sendAdvisoryToWorker(workerSessionId, suggestion);
+      setAdvisorySuggestion(null);
     } catch (err: any) {
-      setIsCommandRunning(false);
-      setError(typeof err === 'string' ? err : err.message || 'Command execution failed');
+      setError(typeof err === 'string' ? err : err.message || 'Failed to deliver advisory to local worker');
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const handleDenyCommand = (_req: CommandRequest) => {
-    setPendingCommandApproval(null);
+  // TitleBar Chat Tab Management
+  const handleSelectTab = (chatId: string) => {
+    setActiveChatId(chatId);
+    setActiveView('chat');
+    handleSelectChat(chatId);
   };
 
-  const handleCancelCommand = async () => {
-    if (activeCommandId) {
-      try {
-        await cancelCommandExecution(activeCommandId);
-        setIsCommandRunning(false);
-      } catch (err: any) {
-        console.error('Failed to cancel command:', err);
+  const handleCloseTab = (chatId: string) => {
+    setOpenChatTabs((prev) => {
+      const nextTabs = prev.filter((t) => t.id !== chatId);
+      if (activeChatId === chatId) {
+        if (nextTabs.length > 0) {
+          const nextActive = nextTabs[nextTabs.length - 1];
+          setActiveChatId(nextActive.id);
+          setActiveView('chat');
+          handleSelectChat(nextActive.id);
+        } else {
+          setActiveChatId(null);
+          setActiveView('landing');
+        }
       }
-    }
+      return nextTabs;
+    });
   };
 
-  const handleExportDiagnostics = async () => {
-    try {
-      setError(null);
-      const bundle = await exportDiagnosticBundle(activeTaskId || undefined);
-      setDiagnosticNotice(
-        `[ok]: Diagnostic bundle exported to .zencode-diagnostics/ with zero credentials leaked. Files changed: ${bundle.files_changed}`
-      );
-    } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'Failed to export diagnostics');
-    }
-  };
-
-  // New Chat / Task reset
   const handleNewChat = () => {
-    setActiveTaskId(null);
-    setActiveChatTitle('New Task');
+    setActiveView('landing');
     setContextPreview(null);
     setPlan(null);
     setWorkerEvents([]);
     setWorkerSessionId(null);
     setInventory(null);
-    setVerificationHistory([]);
-    setDiagnosticNotice(null);
-    setError(null);
+    setActiveTaskId(null);
+    setActiveChatTitle('New Task');
+    setActivePromptText('');
+    setActiveChatId(null);
+    setChatMessages([]);
   };
 
+  // Landing Page Submissions (Start New Chat Session)
+  const handleLandingSubmitPrompt = async (promptText: string) => {
+    // Auto-manage Git: auto-init repo if missing, or auto-create initial commit if 0-commit repo
+    if (project && !project.is_git_repo) {
+      try {
+        const updated = await initGitRepo(project.path);
+        setProject(updated);
+        setGitAutoInitNotice('Initialized a new Git repository for this workspace');
+        await refreshStatus();
+      } catch (e) {
+        console.warn('Failed to auto-init git:', e);
+      }
+    } else if (project && project.is_git_repo && !project.has_commits) {
+      try {
+        const updated = await createInitialEmptyCommit(project.path);
+        setProject(updated);
+        await refreshStatus();
+      } catch (e) {
+        console.warn('Failed to auto-create initial commit:', e);
+      }
+    } else {
+      setGitAutoInitNotice(null);
+    }
+
+    const newChatId = `task_${Date.now()}`;
+    const title = promptText.length > 35 ? promptText.slice(0, 32) + '...' : promptText;
+
+    // Synchronously assign active refs
+    activeChatIdRef.current = newChatId;
+    activeTaskIdRef.current = newChatId;
+
+    setOpenChatTabs((prev) => {
+      if (prev.some((t) => t.id === newChatId)) return prev;
+      return [...prev, { id: newChatId, title, workspacePath: project?.path || '' }];
+    });
+    setActiveChatId(newChatId);
+    setActiveTaskId(newChatId);
+    setActiveChatTitle(title);
+    setActivePromptText(promptText);
+    setActiveView('chat');
+
+    // Pre-save chat in SQLite so parent record exists
+    if (project) {
+      try {
+        await saveChat({
+          id: newChatId,
+          workspace_path: project.path,
+          title,
+          status: 'idle',
+          branch_name: null,
+          worktree_path: null,
+          plan_json: null,
+          worker_summary: null,
+          events_json: null,
+          verification_json: null,
+        });
+      } catch (e) {
+        console.warn('Failed to pre-save chat in handleLandingSubmitPrompt:', e);
+      }
+    }
+
+    const fallbackUserMessage: ChatMessage = {
+      id: `msg_${Date.now()}`,
+      chat_id: newChatId,
+      role: 'user',
+      content: promptText,
+      plan_json: null,
+      worker_summary: null,
+      files_changed_json: null,
+      created_at: new Date().toISOString(),
+      commit_hash: null,
+    };
+
+    // Create user message in SQLite
+    try {
+      const userMsg = await addChatMessage(newChatId, 'user', promptText);
+      setChatMessages([userMsg]);
+    } catch (e) {
+      console.warn('Failed to record initial user message:', e);
+      setChatMessages([fallbackUserMessage]);
+    }
+
+    await handlePreviewContext(promptText, newChatId);
+  };
+
+  // Chat Thread Submissions (Follow-up message in active chat)
+  const handleChatThreadSubmitPrompt = async (promptText: string) => {
+    const currentChatId = activeChatIdRef.current || `task_${Date.now()}`;
+    activeChatIdRef.current = currentChatId;
+    activeTaskIdRef.current = currentChatId;
+    setActiveChatId(currentChatId);
+    setActiveTaskId(currentChatId);
+    setActivePromptText(promptText);
+
+    const fallbackUserMsg: ChatMessage = {
+      id: `msg_${Date.now()}`,
+      chat_id: currentChatId,
+      role: 'user',
+      content: promptText,
+      plan_json: null,
+      worker_summary: null,
+      files_changed_json: null,
+      created_at: new Date().toISOString(),
+      commit_hash: null,
+    };
+
+    try {
+      const userMsg = await addChatMessage(currentChatId, 'user', promptText);
+      setChatMessages((prev) => [...prev, userMsg]);
+    } catch (e) {
+      console.warn('Failed to record follow-up user message:', e);
+      setChatMessages((prev) => [...prev, fallbackUserMsg]);
+    }
+
+    await handlePreviewContext(promptText, currentChatId);
+  };
+
+  const handleSelectRecentChat = async (chat: ChatSummaryRecord) => {
+    if (chat.workspace_path && (!project || project.path !== chat.workspace_path)) {
+      await handleOpenProject(chat.workspace_path);
+    }
+
+    setOpenChatTabs((prev) => {
+      if (prev.some((t) => t.id === chat.id)) return prev;
+      return [...prev, { id: chat.id, title: chat.title || 'Untitled Chat', workspacePath: chat.workspace_path }];
+    });
+
+    setActiveChatId(chat.id);
+    setActiveView('chat');
+    await handleSelectChat(chat.id);
+  };
+
+  const isWorkerRunning =
+    isTaskState(systemStatus?.task_state, 'WorkerRunning') &&
+    !isTaskState(systemStatus?.task_state, 'Failed') &&
+    !isTaskState(systemStatus?.task_state, 'Complete') &&
+    !isTaskState(systemStatus?.task_state, 'AwaitingReview');
+  const isTaskActive = isWorkerRunning || isPlanning;
+  const runningChatId = isTaskActive ? (activeTaskId || activeChatId) : null;
+
   return (
-    <div className="flex h-screen w-screen flex-col bg-[#09090b] text-[#e4e4e7] overflow-hidden font-sans select-none">
-      {/* Dirty Tree Modal (Step 4 Policy) */}
-      {dirtyFiles && dirtyFiles.length > 0 && (
-        <DirtyTreeDialog
-          uncommittedFiles={dirtyFiles}
-          onStash={handleStashDirty}
-          onCommit={handleCommitDirty}
-          onCancel={handleCancelDirty}
-          onProceedAnyway={handleProceedAnywayDirty}
-          isLoading={isLoading}
-          error={error}
-        />
-      )}
+    <div className="flex flex-col h-screen w-screen bg-[#faf9f5] text-[#141413] overflow-hidden select-none font-sans">
+      {/* Title Bar (with Tabs, Home, Search, Settings on Left, Quota & Window Controls on Right) */}
+      <TopBar
+        activeView={activeView}
+        activeChatId={activeChatId}
+        openChatTabs={openChatTabs}
+        onSelectTab={handleSelectTab}
+        onCloseTab={handleCloseTab}
+        onNewChat={handleNewChat}
+        onGoHome={() => setActiveView('landing')}
+        onGoSearch={() => setActiveView('search')}
+        onGoSettings={() => setActiveView('settings')}
+        quotaState={quotaState}
+        isTaskRunning={isTaskActive}
+        runningChatId={runningChatId}
+      />
 
-      {/* Orphan Recovery Modal (Step 6) */}
-      {orphanedWorktrees.length > 0 && (
-        <OrphanRecoveryDialog
-          orphans={orphanedWorktrees}
-          onReview={handleReviewOrphan}
-          onReject={handleRejectOrphan}
-          onIgnore={handleIgnoreOrphans}
-          isLoading={isLoading}
-        />
-      )}
+      {/* Main Layout: Center Pane in the middle, File Tree Pane on the RIGHT side */}
+      <div className="flex-1 flex flex-row overflow-hidden relative">
+        {/* Center Pane: Landing, Primary Chat Thread, Search, or Settings */}
+        <main className="flex-1 flex flex-col h-full overflow-hidden bg-[#faf9f5] relative min-w-0">
+          {activeView === 'landing' && (
+            <LandingPage
+              currentProject={project}
+              onOpenWorkspace={handleOpenProject}
+              onSubmitPrompt={handleLandingSubmitPrompt}
+              onSelectRecentChat={handleSelectRecentChat}
+              selectedModel={lastActiveModel}
+              onSelectModel={handlePinModel}
+              onOpenOnboarding={(step) => {
+                setOnboardingStep(step || 1);
+                setIsOnboardingOpen(true);
+              }}
+              isLoading={isLoading}
+              dependencyIssues={dependencyIssues}
+              isStartupVerifying={isStartupVerifying}
+            />
+          )}
 
-      {/* Advisory Context Preview Modal (Step 6 Opt-In Escalation) */}
-      {advisoryPreview && (() => {
-        const isPinned = Boolean(quotaState?.pinned_model);
-        const relevantModels = isPinned
-          ? quotaState?.models.filter(m => m.model_id === quotaState.pinned_model)
-          : quotaState?.models;
-        const isQuotaExhausted = Boolean(
-          relevantModels && relevantModels.length > 0 && relevantModels.every(m => !m.is_available)
+          {activeView === 'chat' && (
+            <div className="flex-1 flex flex-col h-full overflow-hidden relative">
+              <ChatThread
+                chatId={activeChatId || 'new'}
+                chatTitle={activeChatTitle}
+                userPromptText={activePromptText}
+                project={project}
+                contextPreview={contextPreview}
+                plan={plan}
+                workerEvents={workerEvents}
+                isWorkerRunning={
+                  isTaskState(systemStatus?.task_state, 'WorkerRunning') &&
+                  !isTaskState(systemStatus?.task_state, 'Failed') &&
+                  !isTaskState(systemStatus?.task_state, 'Complete') &&
+                  !isTaskState(systemStatus?.task_state, 'AwaitingReview')
+                }
+                isPlanning={isPlanning}
+                planningElapsedSeconds={planningElapsedSeconds}
+                inventory={inventory}
+                verificationHistory={verificationHistory}
+                pendingCommandApproval={pendingCommandApproval}
+                onConfirmPlanRequest={handleConfirmPlanRequest}
+                onCancelPlanRequest={handleCancelPlanRequest}
+                onStopWorkerSession={handleStopWorkerSession}
+                onApproveCommand={handleApproveCommand}
+                onDenyCommand={handleDenyCommand}
+                onTriggerAdvisory={handleTriggerAdvisory}
+                advisorySuggestion={advisorySuggestion}
+                onApplyAdvisoryToWorker={handleApplyAdvisoryToWorker}
+                quotaState={quotaState}
+                chatMessages={chatMessages}
+                onSubmitPrompt={handleChatThreadSubmitPrompt}
+                selectedModel={lastActiveModel}
+                onSelectModel={handlePinModel}
+                onOpenOnboarding={(step) => {
+                  setOnboardingStep(step || 1);
+                  setIsOnboardingOpen(true);
+                }}
+                onUndoTask={handleUndoTask}
+                onOpenFileDiff={(file) => {
+                  setOpenDiffRequest(file);
+                  setIsFilePaneOpen(true);
+                }}
+                isUndone={isUndone}
+                gitAutoInitNotice={gitAutoInitNotice}
+                isLoading={isLoading}
+                error={error}
+              />
+
+              {/* Terminal if active */}
+              {isTerminalOpen && (
+                <div className="px-4 pb-4 max-w-5xl 2xl:max-w-6xl mx-auto w-full">
+                  <ExecutionTerminal
+                    isOpen={isTerminalOpen}
+                    commandId={activeCommandId}
+                    program={activeProgram}
+                    args={activeArgs}
+                    cwd={activeCwd}
+                    isRunning={isCommandRunning}
+                    outputLines={commandOutputLines}
+                    result={executionResult}
+                    onCancel={() => {
+                      if (activeCommandId) handleCancelCommand(activeCommandId);
+                    }}
+                    onClose={() => setIsTerminalOpen(false)}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeView === 'search' && (
+            <SearchPage
+              onSelectChat={handleSelectRecentChat}
+              onSwitchWorkspace={async (path) => {
+                await handleOpenProject(path);
+                setActiveView('landing');
+              }}
+              onNewSession={handleNewChat}
+              onGoSettings={() => setActiveView('settings')}
+              currentWorkspacePath={project?.path}
+            />
+          )}
+
+          {activeView === 'settings' && (
+            <SettingsPage
+              quotaState={quotaState}
+              onPinModel={handlePinModel}
+              onOpenWorkspace={async (path) => {
+                await handleOpenProject(path);
+                setActiveView('landing');
+              }}
+              onReviewWorktree={async (taskId) => {
+                try {
+                  const inv = await getChangeInventory(taskId);
+                  if (inv) {
+                    setInventory(inv);
+                    setActiveTaskId(taskId);
+                    setActiveChatTitle(`Task: ${taskId}`);
+                    setActiveView('chat');
+                  }
+                } catch (e) {
+                  console.error('Failed to load inventory for task:', e);
+                }
+              }}
+              currentWorkspacePath={project?.path}
+              onOpenOnboarding={(step) => {
+                setOnboardingStep(step || 1);
+                setIsOnboardingOpen(true);
+              }}
+            />
+          )}
+        </main>
+
+        {/* Right Pane: ONLY shown when activeView === 'chat' (Step 1 Pane Visibility Scope) */}
+        {activeView === 'chat' && (
+          <FileTreePane
+            workspacePath={project?.path || null}
+            workspaceName={project?.name}
+            isOpen={isFilePaneOpen}
+            onToggleOpen={handleToggleFilePane}
+            width={filePaneWidth}
+            onResizeStart={handleResizeStart}
+            onOpenWorkspaceFolder={handleSelectWorkspaceDialog}
+            openDiffRequest={openDiffRequest}
+          />
+        )}
+      </div>
+
+      {/* Milestone 3 Advisory Confirmation Modal */}
+      {(() => {
+        const relevantModels = quotaState?.models.filter(m =>
+          m.model_id === 'gemini-3.5-flash-lite' || m.model_id === 'gemini-3.8-flash'
         );
+        const isQuotaExhausted = Boolean(relevantModels && relevantModels.length > 0 && relevantModels.every(m => !m.is_available));
         const exhaustionReason = relevantModels?.find(m => !m.is_available)?.unavailability_reason || undefined;
 
         return (
@@ -1012,200 +1246,18 @@ export default function App() {
         );
       })()}
 
-      {/* Quota Dashboard Modal */}
-      {isQuotaModalOpen && quotaState && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="max-w-2xl w-full h-[80vh] bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden shadow-2xl flex flex-col font-mono text-xs">
-            <div className="h-10 px-4 border-b border-zinc-800 flex items-center justify-between bg-zinc-900 shrink-0">
-              <span className="font-semibold text-zinc-100">Rate Limits &amp; Waterfall Cascade</span>
-              <button
-                type="button"
-                onClick={() => setIsQuotaModalOpen(false)}
-                className="text-zinc-400 hover:text-white"
-              >
-                [close]
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto">
-              <QuotaDashboard
-                quotaState={quotaState}
-                onClose={() => setIsQuotaModalOpen(false)}
-                onPinModel={handlePinModel}
-                isPinnedActionLoading={isPinnedLoading}
-              />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Main Persistent Three-Pane Shell */}
-      <div className="flex-1 flex overflow-hidden relative">
-        {/* Left Sidebar: Workspace switcher + Projects / Chats tree + Engine status */}
-        <Sidebar
-          currentWorkspace={project}
-          workspaces={recentWorkspaces}
-          chats={storedChats}
-          activeChatId={activeTaskId}
-          onSelectChat={handleSelectChat}
-          onNewChat={handleNewChat}
-          onSwitchWorkspace={handleOpenProject}
-          onOpenProjectDialog={() => {
-            const p = prompt('Enter project path:', 'A:\\ZenCode');
-            if (p) handleOpenProject(p);
-          }}
-          status={systemStatus}
-          quotaState={quotaState}
-          onOpenQuota={() => setIsQuotaModalOpen(true)}
-          onDeleteChat={handleDeleteChat}
-          isCollapsed={isSidebarCollapsed}
-          onToggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-        />
-
-        {/* Center Panel: Primary Chat/Agent Thread */}
-        <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#09090b] relative">
-          {!project ? (
-            <EmptyState
-              status={systemStatus}
-              recentWorkspaces={recentWorkspaces}
-              onOpenProject={handleOpenProject}
-              isLoading={isLoading}
-              error={error}
-            />
-          ) : (
-            <>
-              {/* Center Panel Top Header */}
-              <ChatHeader
-                project={project}
-                taskState={systemStatus?.task_state || 'Idle'}
-                activeChatTitle={activeChatTitle}
-                activePlannerModel={quotaState?.pinned_model ? '3.8 Flash' : lastActiveModel}
-                isPinned={Boolean(quotaState?.pinned_model)}
-                onOpenQuota={() => setIsQuotaModalOpen(true)}
-                isRightPanelOpen={isRightPanelOpen}
-                onToggleRightPanel={() => setIsRightPanelOpen(!isRightPanelOpen)}
-                changesCount={inventory?.files.length ?? 0}
-              />
-
-              {/* Chat Thread Container */}
-              <div className="flex-1 overflow-y-auto">
-                <TaskView
-                  project={project}
-                  onInitGitRepo={handleInitGitRepo}
-                  onCreateGitignore={handleCreateGitignore}
-                  gitignoreAddedNotice={gitignoreAddedNotice}
-                  isGitInitDeclined={isGitInitDeclined}
-                  onDeclineGitInit={() => setIsGitInitDeclined(true)}
-                  isGitignoreDeclined={isGitignoreDeclined}
-                  onDeclineGitignore={() => setIsGitignoreDeclined(true)}
-                  isUnbornHeadDeclined={isUnbornHeadDeclined}
-                  onDeclineInitialCommit={() => setIsUnbornHeadDeclined(true)}
-                  onCreateInitialCommit={handleCreateInitialCommit}
-                  initialCommitNotice={initialCommitNotice}
-                  contextPreview={contextPreview}
-                  plan={plan}
-                  taskState={systemStatus?.task_state || 'Idle'}
-                  workerEvents={workerEvents}
-                  workerSessionId={workerSessionId}
-                  activePlannerModel={lastActiveModel}
-                  switchReason={lastSwitchReason}
-                  inventory={inventory}
-                  activeTaskId={activeTaskId}
-                  pendingCommandApproval={pendingCommandApproval}
-                  onApproveCommand={handleApproveCommand}
-                  onDenyCommand={handleDenyCommand}
-                  onConfirmPlanRequest={handleConfirmPlanRequest}
-                  onStartWorkerSession={handleStartWorkerSession}
-                  onStopWorkerSession={handleStopWorkerSession}
-                  onAcceptTask={handleAcceptTask}
-                  onRejectTask={handleRejectTask}
-                  onResetTask={handleNewChat}
-                  verificationHistory={verificationHistory}
-                  onOpenReviewPane={() => setIsRightPanelOpen(true)}
-                  onTriggerCommand={handleTriggerCommand}
-                  onExportDiagnostics={handleExportDiagnostics}
-                  onTriggerAdvisory={handleTriggerAdvisory}
-                  advisorySuggestion={advisorySuggestion}
-                  onApplyAdvisoryToWorker={handleApplyAdvisoryToWorker}
-                  quotaState={quotaState}
-                  diagnosticNotice={diagnosticNotice}
-                  isLoading={isLoading}
-                  error={error}
-                />
-
-                {/* Inline Process Execution Terminal if running */}
-                {isTerminalOpen && (
-                  <div className="px-4 pb-4 max-w-4xl mx-auto w-full">
-                    <ExecutionTerminal
-                      isOpen={isTerminalOpen}
-                      commandId={activeCommandId}
-                      program={activeProgram}
-                      args={activeArgs}
-                      cwd={activeCwd}
-                      isRunning={isCommandRunning}
-                      outputLines={commandOutputLines}
-                      result={executionResult}
-                      onCancel={handleCancelCommand}
-                      onClose={() => setIsTerminalOpen(false)}
-                      onExportDiagnostics={handleExportDiagnostics}
-                    />
-                  </div>
-                )}
-              </div>
-
-              {/* Center Bottom Chat Input Dock */}
-              <ChatInputDock
-                onSubmit={(text) => {
-                  if (project && !project.is_git_repo) {
-                    setError('Task creation is blocked: initialize a Git repository to enable safe worktree branch isolation.');
-                    return;
-                  }
-                  if (project && project.is_git_repo && project.has_commits === false) {
-                    setError('Task creation is blocked: repository has no commits yet. Create an initial commit to enable worktree branch isolation.');
-                    return;
-                  }
-                  if (!plan) {
-                    setActiveChatTitle(text.slice(0, 32));
-                    handlePreviewContext(text);
-                  } else {
-                    handleStartWorkerSession(plan);
-                  }
-                }}
-                disabled={Boolean(project && (!project.is_git_repo || project.has_commits === false))}
-                placeholder={
-                  project && !project.is_git_repo
-                    ? 'Task creation blocked: Git is required to safely isolate and review AI changes.'
-                    : project && project.is_git_repo && project.has_commits === false
-                    ? 'Task creation blocked: repository has no commits yet. Create an initial commit first.'
-                    : undefined
-                }
-                isLoading={isLoading}
-                activeModelName={quotaState?.pinned_model ? '3.8 Flash' : lastActiveModel}
-                isPinned={Boolean(quotaState?.pinned_model)}
-                onSelectModel={handlePinModel}
-              />
-            </>
-          )}
-        </div>
-
-        {/* Right Panel: Context-Sensitive Diff & Changes Viewer / Explorer */}
-        <RightPanel
-          inventory={inventory}
-          taskId={activeTaskId}
-          onAccept={handleAcceptTask}
-          onReject={handleRejectTask}
-          isLoading={isLoading}
-          isOpen={isRightPanelOpen}
-          onClose={() => setIsRightPanelOpen(false)}
-          project={project}
-        />
-      </div>
-
-      {/* Sticky Bottom Status Bar (M3 Invariants Preserved) */}
-      <StatusBar
-        project={project}
-        status={systemStatus}
-        quotaState={quotaState}
-        onOpenQuotaDashboard={() => setIsQuotaModalOpen(true)}
+      {/* Step 3 First-Run & Settings Onboarding Wizard */}
+      <OnboardingWizard
+        isOpen={isOnboardingOpen}
+        onClose={() => setIsOnboardingOpen(false)}
+        onComplete={() => {
+          setIsOnboardingOpen(false);
+          try {
+            localStorage.setItem('zencode_onboarding_completed', 'true');
+          } catch {}
+          refreshStatus();
+        }}
+        initialStep={onboardingStep}
       />
     </div>
   );

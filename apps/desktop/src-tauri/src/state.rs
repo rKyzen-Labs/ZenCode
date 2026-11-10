@@ -24,6 +24,7 @@ pub struct AppState {
     pub current_task_id: Arc<Mutex<Option<String>>>,
     pub execution_service: Arc<ExecutionService>,
     pub db: Arc<DatabaseService>,
+    pub worker_model: Arc<Mutex<String>>,
 }
 
 impl AppState {
@@ -50,6 +51,7 @@ impl AppState {
             current_task_id: Arc::new(Mutex::new(None)),
             execution_service: Arc::new(ExecutionService::new()),
             db: Arc::new(db),
+            worker_model: Arc::new(Mutex::new("granite4.1:8b".to_string())),
         }
     }
 
