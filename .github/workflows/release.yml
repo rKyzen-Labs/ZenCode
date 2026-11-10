@@ -56,18 +56,21 @@ jobs:
         run: pnpm --filter zencode-desktop build
 
       - name: Build Tauri app
-        run: pnpm --filter zencode-desktop tauri build ${{ matrix.args }}
+        working-directory: apps/desktop
+        run: pnpm tauri build ${{ matrix.args }}
 
       - name: Prepare Linux ELF binary
         if: matrix.platform == 'ubuntu-22.04'
         run: |
-          if [ -f "target/release/zencode-desktop" ]; then
-            cp target/release/zencode-desktop target/release/zencode-linux-x86_64
-          elif [ -f "apps/desktop/src-tauri/target/release/zencode-desktop" ]; then
-            mkdir -p target/release
-            cp apps/desktop/src-tauri/target/release/zencode-desktop target/release/zencode-linux-x86_64
+          mkdir -p target/release
+          ELF_BIN=$(find . -type f -name "zencode-desktop" ! -path "*/target/debug/*" | head -n 1)
+          if [ -n "$ELF_BIN" ]; then
+            echo "Found Linux ELF binary at $ELF_BIN"
+            cp "$ELF_BIN" target/release/zencode-linux-x86_64
+            chmod +x target/release/zencode-linux-x86_64
+          else
+            echo "Warning: zencode-desktop binary not found"
           fi
-          chmod +x target/release/zencode-linux-x86_64 || true
 
       - name: Publish Release Assets
         uses: softprops/action-gh-release@v2
