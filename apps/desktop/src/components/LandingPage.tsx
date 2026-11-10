@@ -41,7 +41,7 @@ export const LandingPage: FC<LandingPageProps> = ({
   onSelectRecentChat,
   selectedModel,
   onSelectModel,
-  onOpenOnboarding: _onOpenOnboarding,
+  onOpenOnboarding,
   isLoading = false,
   dependencyIssues = [],
   isStartupVerifying = false,
@@ -148,9 +148,16 @@ export const LandingPage: FC<LandingPageProps> = ({
 
   return (
     <div className="flex-1 flex flex-col items-center justify-start pt-14 pb-8 px-6 max-w-2xl mx-auto w-full select-none h-full overflow-y-auto font-sans">
-      {/* Centered ZenCode Wordmark: matching PDF Page 1 */}
-      <div className="flex flex-col items-center mb-7 shrink-0 text-center">
-        <h1 className="text-[52px] leading-tight font-serif tracking-tight select-none">
+      {/* Centered ZenCode Logo & Wordmark */}
+      <div className="flex flex-col items-center mb-6 shrink-0 text-center animate-fade-in">
+        <img
+          src="/logo.png"
+          alt="ZenCode"
+          className="w-16 h-16 rounded-2xl shadow-md mb-2.5 border border-[#dad9d4]/60 cursor-pointer hover:scale-105 transition-transform"
+          onClick={() => onOpenOnboarding?.(1)}
+          title="Click to replay ZenCode Welcome Tour & Setup"
+        />
+        <h1 className="text-[46px] leading-tight font-serif tracking-tight select-none">
           <span className="text-[#141413]">Zen</span>
           <span className="text-[#c96442]">Code</span>
         </h1>

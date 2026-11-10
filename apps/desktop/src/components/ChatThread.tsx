@@ -21,6 +21,7 @@ import {
   Check,
   CheckCircle2,
   Paperclip,
+  RotateCcw,
 } from 'lucide-react';
 import {
   pickFile,
@@ -94,6 +95,7 @@ interface ChatThreadProps {
   activeCommandArgs?: string[];
   commandOutputLines?: ProcessOutputEvent[];
   onOpenTerminalTab?: () => void;
+  onResetChat?: () => void;
 }
 
 const AVAILABLE_DIRECTOR_MODELS = [
@@ -1092,6 +1094,7 @@ export const ChatThread: FC<ChatThreadProps> = ({
   activeCommandArgs = [],
   commandOutputLines: _commandOutputLines = [],
   onOpenTerminalTab,
+  onResetChat,
 }) => {
   // Worker selection state per workspace (Local vs Groq BYOK)
   const [workerType, setWorkerType] = useState<'local' | 'groq'>('local');
@@ -1918,6 +1921,19 @@ export const ChatThread: FC<ChatThreadProps> = ({
                   <span>{selectedExecutionMode}</span>
                   <ChevronDown className="w-2.5 h-2.5 text-[#83827d]" />
                 </button>
+
+                {/* Reset Chat Session Button */}
+                {onResetChat && (
+                  <button
+                    type="button"
+                    onClick={onResetChat}
+                    title="Reset active chat session (Ctrl+Shift+Backspace)"
+                    className="h-6 px-2 rounded-md bg-[#ede9de] hover:bg-[#dad9d4] border border-[#dad9d4] text-[11px] text-[#535146] hover:text-[#b5523f] flex items-center gap-1 transition-colors cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3 text-[#83827d]" />
+                    <span>Reset</span>
+                  </button>
+                )}
               </div>
 
               {/* Send Button: Terracotta accent matching PDF Page 2 & 3 */}

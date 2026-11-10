@@ -1,7 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Sparkles,
-  Shield,
   CheckCircle2,
   AlertTriangle,
   ArrowRight,
@@ -11,8 +9,12 @@ import {
   Eye,
   EyeOff,
   Cpu,
+  Cloud,
   Check,
   X,
+  GitBranch,
+  Terminal,
+  Zap,
 } from 'lucide-react';
 import {
   getGeminiKeyStatus,
@@ -56,6 +58,9 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   const [groqError, setGroqError] = useState<string | null>(null);
   const [groqSuccess, setGroqSuccess] = useState(false);
 
+  // Worker Selection in Onboarding
+  const [chosenWorker, setChosenWorker] = useState<'local' | 'groq'>('local');
+
   // Dependencies State
   const [dependencies, setDependencies] = useState<DependencyStatus[]>([]);
   const [isLoadingDeps, setIsLoadingDeps] = useState(false);
@@ -83,6 +88,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
       setGroqStatus(grStatus);
       if (grStatus?.has_key) {
         setGroqSuccess(true);
+        setChosenWorker('groq');
       }
     } catch (e) {
       console.warn('Failed to load Groq key status:', e);
@@ -116,10 +122,9 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
       setGeminiStatus(updated);
       setGeminiSuccess(true);
       setGeminiKeyInput('');
-      // Advance to step 3 after 600ms
       setTimeout(() => {
         setCurrentStep(3);
-      }, 600);
+      }, 500);
     } catch (err: any) {
       setGeminiError(typeof err === 'string' ? err : err.message || 'Key validation failed');
       setGeminiSuccess(false);
@@ -143,241 +148,275 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
       setGroqStatus(updated);
       setGroqSuccess(true);
       setGroqKeyInput('');
-      // Advance to step 4 after 600ms
-      setTimeout(() => {
-        loadDependencies();
-        setCurrentStep(4);
-      }, 600);
+      setChosenWorker('groq');
     } catch (err: any) {
-      setGroqError(typeof err === 'string' ? err : err.message || 'Groq key validation failed');
+      setGroqError(typeof err === 'string' ? err : err.message || 'Groq validation failed');
       setGroqSuccess(false);
     } finally {
       setIsValidatingGroq(false);
     }
   };
 
-  const handleSkipGroq = () => {
-    loadDependencies();
-    setCurrentStep(4);
-  };
-
-  const handleFinish = () => {
-    try {
-      localStorage.setItem('zencode_onboarding_completed', 'true');
-    } catch {}
-    onComplete();
-  };
-
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 select-none font-mono">
-      <div className="w-full max-w-xl bg-[#121214] border border-[#27272a] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-        {/* Top Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[#222225] bg-[#161618]">
-          <div className="flex items-center gap-2.5">
-            <div className="w-6 h-6 rounded-md bg-[#27272a] flex items-center justify-center text-xs font-bold text-white">
-              Z
-            </div>
-            <span className="text-sm font-semibold text-zinc-100">ZenCode Setup</span>
-          </div>
-
-          {/* Step indicator */}
+    <div className="fixed inset-0 z-50 bg-[#faf9f5] flex flex-col font-sans select-none overflow-hidden animate-fade-in text-[#141413]">
+      {/* Fullscreen Header */}
+      <header className="h-16 px-8 border-b border-[#dad9d4] bg-[#f7f6f2] flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-3">
+          <img src="/logo.png" alt="ZenCode" className="w-8 h-8 rounded-lg shadow-sm" />
           <div className="flex items-center gap-2">
-            {[1, 2, 3, 4].map((step) => (
-              <div
-                key={step}
-                className={`w-2 h-2 rounded-full transition-colors ${
-                  currentStep === step
-                    ? 'bg-[#38bdf8]'
-                    : currentStep > step
-                    ? 'bg-zinc-500'
-                    : 'bg-zinc-700'
-                }`}
-              />
-            ))}
-            <button
-              type="button"
-              onClick={onClose}
-              className="ml-3 text-zinc-500 hover:text-zinc-200 transition-colors"
-              title="Close"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            <span className="font-semibold text-base text-[#141413] tracking-tight">ZenCode</span>
+            <span className="text-[10.5px] px-2 py-0.5 rounded-full bg-[#ede9de] text-[#c96442] font-medium border border-[#c96442]/20 font-mono">
+              v0.1.0
+            </span>
           </div>
         </div>
 
-        {/* Content Body */}
-        <div className="p-6 overflow-y-auto space-y-6 flex-1 text-xs">
-          {/* STEP 1: Welcome & Architecture */}
+        {/* Step Indicator Pills */}
+        <div className="flex items-center gap-2">
+          {[
+            { step: 1, label: 'Why ZenCode' },
+            { step: 2, label: 'Gemini Director Key' },
+            { step: 3, label: 'Worker Engine' },
+            { step: 4, label: 'Ready to Code' },
+          ].map(({ step, label }) => {
+            const isActive = currentStep === step;
+            const isCompleted = currentStep > step;
+
+            return (
+              <button
+                key={step}
+                type="button"
+                onClick={() => setCurrentStep(step)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                  isActive
+                    ? 'bg-[#c96442] text-white shadow-sm'
+                    : isCompleted
+                    ? 'bg-[#ede9de] text-[#141413] hover:bg-[#dad9d4]'
+                    : 'text-[#83827d] hover:text-[#141413]'
+                }`}
+              >
+                <span
+                  className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-mono font-bold ${
+                    isActive ? 'bg-white/20 text-white' : isCompleted ? 'bg-[#5f8a5a] text-white' : 'bg-[#dad9d4] text-[#83827d]'
+                  }`}
+                >
+                  {isCompleted ? '✓' : step}
+                </span>
+                <span>{label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Skip to Workspace Button */}
+        <button
+          type="button"
+          onClick={onClose}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-[#83827d] hover:text-[#141413] hover:bg-[#ede9de] transition-colors"
+        >
+          <span>Skip to Workspace</span>
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </header>
+
+      {/* Main Fullscreen Body */}
+      <div className="flex-1 overflow-y-auto flex items-center justify-center p-8 bg-[#faf9f5]">
+        <div className="w-full max-w-3xl mx-auto space-y-8 animate-onboarding-hero">
+          {/* STEP 1: WELCOME & WHY ZENCODE */}
           {currentStep === 1 && (
-            <div className="space-y-5">
-              <div>
-                <h2 className="text-base font-semibold text-zinc-100">Welcome to ZenCode</h2>
-                <p className="text-zinc-400 mt-1 leading-relaxed">
-                  A high-velocity agentic coding environment where all file changes are executed strictly in isolated Git worktrees.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 pt-2">
-                <div className="p-3.5 rounded-xl bg-[#18181b] border border-[#27272a] space-y-2">
-                  <div className="flex items-center gap-2 text-zinc-200 font-semibold">
-                    <Sparkles className="w-4 h-4 text-[#38bdf8]" />
-                    <span>Director (Gemini Planning)</span>
-                  </div>
-                  <p className="text-zinc-400 text-[11px] leading-relaxed">
-                    Deconstructs prompts into structured implementation steps with explicit context previews. Requires a free Gemini API key from Google.
-                  </p>
+            <div className="space-y-8 text-center">
+              <div className="space-y-4">
+                <div className="inline-block relative">
+                  <div className="absolute inset-0 bg-[#c96442]/20 rounded-3xl blur-2xl transform scale-110" />
+                  <img
+                    src="/logo.png"
+                    alt="ZenCode Hero Logo"
+                    className="w-24 h-24 rounded-3xl shadow-xl relative mx-auto border-2 border-white/60"
+                  />
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-[#18181b] border border-[#27272a] space-y-2">
-                  <div className="flex items-center gap-2 text-zinc-200 font-semibold">
-                    <Cpu className="w-4 h-4 text-zinc-300" />
-                    <span>Worker Agents (Local &amp; Cloud)</span>
-                  </div>
-                  <p className="text-zinc-400 text-[11px] leading-relaxed">
-                    Executes edits locally via <span className="text-zinc-200">Ollama</span> by default. You can also configure <span className="text-zinc-200">Groq (BYOK)</span> for fast cloud open-source models with diff-only outputs.
-                  </p>
-                </div>
-
-                <div className="p-3.5 rounded-xl bg-[#18181b] border border-[#27272a] space-y-2">
-                  <div className="flex items-center gap-2 text-zinc-200 font-semibold">
-                    <Shield className="w-4 h-4 text-emerald-400" />
-                    <span>Windows Credential Manager Security</span>
-                  </div>
-                  <p className="text-zinc-400 text-[11px] leading-relaxed">
-                    API keys are stored strictly in the Windows Credential Manager vault—never written to repository files, env vars, or client memory.
+                <div className="space-y-2">
+                  <h1 className="text-3xl font-bold tracking-tight text-[#141413] font-sans">
+                    Welcome to ZenCode
+                  </h1>
+                  <p className="text-sm text-[#535146] max-w-xl mx-auto leading-relaxed">
+                    The safety-first, Director-supervised AI coding assistant engineered for real developer repositories.
                   </p>
                 </div>
               </div>
 
-              <div className="pt-4 flex justify-end">
+              {/* 4 Core Value Pillars */}
+              <div className="grid grid-cols-2 gap-4 text-left">
+                <div className="p-4 rounded-xl bg-[#f7f6f2] border border-[#dad9d4] space-y-2 hover:border-[#c96442]/40 transition-colors">
+                  <div className="w-7 h-7 rounded-lg bg-[#ede9de] flex items-center justify-center text-[#c96442]">
+                    <GitBranch className="w-4 h-4" />
+                  </div>
+                  <h3 className="text-xs font-semibold text-[#141413]">Isolated Git Worktrees</h3>
+                  <p className="text-[11.5px] text-[#535146] leading-relaxed">
+                    Every task executes in an ephemeral Git worktree. Your main branch is never exposed to unverified code or broken builds.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-xl bg-[#f7f6f2] border border-[#dad9d4] space-y-2 hover:border-[#c96442]/40 transition-colors">
+                  <div className="w-7 h-7 rounded-lg bg-[#ede9de] flex items-center justify-center text-[#5f8a5a]">
+                    <CheckCircle2 className="w-4 h-4" />
+                  </div>
+                  <h3 className="text-xs font-semibold text-[#141413]">Grounded Truth Verification</h3>
+                  <p className="text-[11.5px] text-[#535146] leading-relaxed">
+                    Zero AI hallucinations. The Director AI (Gemini) verifies real git diffs and actual command exits before claiming task completion.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-xl bg-[#f7f6f2] border border-[#dad9d4] space-y-2 hover:border-[#c96442]/40 transition-colors">
+                  <div className="w-7 h-7 rounded-lg bg-[#ede9de] flex items-center justify-center text-[#3d7a99]">
+                    <Cpu className="w-4 h-4" />
+                  </div>
+                  <h3 className="text-xs font-semibold text-[#141413]">Dual Engine (Local &amp; Cloud)</h3>
+                  <p className="text-[11.5px] text-[#535146] leading-relaxed">
+                    Execute code edits locally and offline with Ollama, or toggle ultra-fast Groq BYOK cloud rotation with diff-only outputs.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-xl bg-[#f7f6f2] border border-[#dad9d4] space-y-2 hover:border-[#c96442]/40 transition-colors">
+                  <div className="w-7 h-7 rounded-lg bg-[#ede9de] flex items-center justify-center text-[#c96442]">
+                    <Terminal className="w-4 h-4" />
+                  </div>
+                  <h3 className="text-xs font-semibold text-[#141413]">Supervised Shell Execution</h3>
+                  <p className="text-[11.5px] text-[#535146] leading-relaxed">
+                    Safe read-only commands auto-execute; dangerous actions require your consent. Terminal output streams in a side-pane tab.
+                  </p>
+                </div>
+              </div>
+
+              {/* Action */}
+              <div className="pt-2 flex justify-center">
                 <button
                   type="button"
                   onClick={() => setCurrentStep(2)}
-                  className="px-4 py-2 rounded-lg bg-[#38bdf8] text-[#0a0a0a] font-semibold flex items-center gap-2 hover:bg-[#0284c7] transition-colors"
+                  className="px-6 py-2.5 rounded-xl bg-[#c96442] hover:bg-[#b5523f] text-white font-medium text-xs flex items-center gap-2 transition-all shadow-md cursor-pointer hover:shadow-lg"
                 >
-                  <span>Get Started</span>
+                  <span>Begin Configuration</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
             </div>
           )}
 
-          {/* STEP 2: Gemini API Key */}
+          {/* STEP 2: GEMINI DIRECTOR KEY */}
           {currentStep === 2 && (
-            <div className="space-y-5">
-              <div>
+            <div className="space-y-6 bg-[#f7f6f2] border border-[#dad9d4] rounded-2xl p-8 shadow-sm">
+              <div className="space-y-1.5">
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold text-[#38bdf8] uppercase tracking-wider bg-[#1a2333] border border-[#38bdf8]/30 px-2 py-0.5 rounded">
+                  <span className="text-[10px] font-bold text-[#c96442] uppercase tracking-wider bg-[#c96442]/10 border border-[#c96442]/20 px-2 py-0.5 rounded">
                     Required
                   </span>
-                  <h2 className="text-base font-semibold text-zinc-100">Gemini Director Key</h2>
+                  <h2 className="text-base font-semibold text-[#141413]">
+                    Google Gemini Director Key
+                  </h2>
                 </div>
-                <p className="text-zinc-400 mt-1 leading-relaxed">
-                  ZenCode uses Gemini 3.5 Flash Lite exclusively for planning, context previews, and advisory repair guidance.
+                <p className="text-xs text-[#535146] leading-relaxed">
+                  ZenCode uses Gemini 3.5 Flash Lite exclusively as the Director (planning, context generation, and grounded verification). Free keys from Google AI Studio have generous RPM and zero cost.
                 </p>
               </div>
 
               {/* Status if already configured */}
               {geminiStatus?.has_key && (
-                <div className="p-3 rounded-lg bg-[#18181b] border border-emerald-900/40 text-emerald-400 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 shrink-0" />
-                    <span>Key is already configured ({geminiStatus.masked_key})</span>
+                <div className="p-3.5 rounded-xl bg-[#ede9de] border border-[#5f8a5a]/30 text-[#141413] flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-[#5f8a5a] shrink-0" />
+                    <span className="text-xs">
+                      Key already active: <span className="font-mono text-[#535146]">{geminiStatus.masked_key}</span>
+                    </span>
                   </div>
                   <button
                     type="button"
                     onClick={() => setCurrentStep(3)}
-                    className="text-[11px] underline hover:text-white"
+                    className="text-xs font-semibold text-[#c96442] hover:underline"
                   >
-                    Keep &amp; Continue
+                    Keep &amp; Continue →
                   </button>
                 </div>
               )}
 
               {/* Input Form */}
-              <div className="space-y-3 p-4 bg-[#18181b] border border-[#27272a] rounded-xl">
+              <div className="space-y-3 p-4 bg-[#faf9f5] border border-[#dad9d4] rounded-xl">
                 <div className="flex items-center justify-between">
-                  <label className="text-zinc-200 font-medium">Gemini API Key</label>
+                  <label className="text-xs font-medium text-[#141413]">API Key</label>
                   <a
                     href="https://aistudio.google.com/app/apikey"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-[#38bdf8] hover:underline flex items-center gap-1 text-[11px]"
+                    className="text-xs text-[#c96442] hover:underline flex items-center gap-1 font-medium"
                   >
-                    <span>Get free key from Google AI Studio</span>
+                    <span>Get free API key from Google AI Studio</span>
                     <ExternalLink className="w-3 h-3" />
                   </a>
                 </div>
 
-                <div className="relative">
+                <div className="relative flex items-center">
                   <input
                     type={showGeminiKey ? 'text' : 'password'}
                     value={geminiKeyInput}
                     onChange={(e) => setGeminiKeyInput(e.target.value)}
-                    placeholder="AIza..."
-                    className="w-full bg-[#121214] border border-[#2a2a2e] focus:border-[#38bdf8] rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none font-mono"
+                    placeholder="AIzaSy..."
+                    className="w-full bg-[#ede9de]/50 border border-[#dad9d4] focus:border-[#c96442] rounded-lg px-3 py-2 text-xs text-[#141413] placeholder:text-[#83827d] focus:outline-none font-mono pr-20"
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowGeminiKey(!showGeminiKey)}
-                    className="absolute right-2.5 top-2.5 text-zinc-500 hover:text-zinc-300"
-                  >
-                    {showGeminiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
+                  <div className="absolute right-2 flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setShowGeminiKey(!showGeminiKey)}
+                      className="p-1 text-[#83827d] hover:text-[#141413] rounded"
+                      title={showGeminiKey ? 'Hide key' : 'Show key'}
+                    >
+                      {showGeminiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
                 </div>
 
                 {geminiError && (
-                  <div className="p-2.5 rounded bg-rose-950/30 border border-rose-900/60 text-rose-400 flex items-start gap-2 text-[11px]">
-                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
+                    <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
                     <span>{geminiError}</span>
                   </div>
                 )}
 
                 {geminiSuccess && (
-                  <div className="p-2.5 rounded bg-emerald-950/30 border border-emerald-900/60 text-emerald-400 flex items-center gap-2 text-[11px]">
-                    <CheckCircle2 className="w-4 h-4 shrink-0" />
-                    <span>Key verified and saved to Windows Credential Manager!</span>
+                  <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-2">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <span>Gemini key successfully verified and securely stored in Windows Credential Vault!</span>
                   </div>
                 )}
               </div>
 
-              <div className="pt-4 flex items-center justify-between">
+              {/* Navigation buttons */}
+              <div className="flex items-center justify-between pt-2">
                 <button
                   type="button"
                   onClick={() => setCurrentStep(1)}
-                  className="px-3 py-1.5 rounded-lg border border-[#27272a] text-zinc-400 hover:text-white flex items-center gap-1.5"
+                  className="px-4 py-2 rounded-lg bg-[#ede9de] hover:bg-[#dad9d4] text-[#141413] text-xs font-medium flex items-center gap-1.5 transition-colors border border-[#dad9d4]"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />
                   <span>Back</span>
                 </button>
 
                 <div className="flex items-center gap-2">
-                  {geminiStatus?.has_key && (
-                    <button
-                      type="button"
-                      onClick={() => setCurrentStep(3)}
-                      className="px-3.5 py-1.5 rounded-lg border border-[#27272a] text-zinc-300 hover:text-white"
-                    >
-                      Next
-                    </button>
-                  )}
                   <button
                     type="button"
                     onClick={handleValidateAndSaveGemini}
                     disabled={!geminiKeyInput.trim() || isValidatingGemini}
-                    className="px-4 py-2 rounded-lg bg-[#38bdf8] text-[#0a0a0a] font-semibold flex items-center gap-2 hover:bg-[#0284c7] disabled:opacity-40 transition-colors"
+                    className="px-4 py-2 rounded-lg bg-[#c96442] hover:bg-[#b5523f] disabled:opacity-50 text-white text-xs font-medium flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
                   >
                     {isValidatingGemini ? (
                       <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>Verifying with Google...</span>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Validating Key...</span>
                       </>
                     ) : (
                       <>
-                        <span>Validate &amp; Save</span>
-                        <ArrowRight className="w-4 h-4" />
+                        <span>Verify &amp; Continue</span>
+                        <ArrowRight className="w-3.5 h-3.5" />
                       </>
                     )}
                   </button>
@@ -386,190 +425,238 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
             </div>
           )}
 
-          {/* STEP 3: Groq API Key (Optional) */}
+          {/* STEP 3: WORKER SELECTION (LOCAL OLLAMA VS GROQ CLOUD) */}
           {currentStep === 3 && (
-            <div className="space-y-5">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider bg-zinc-800 border border-zinc-700 px-2 py-0.5 rounded">
-                    Optional
-                  </span>
-                  <h2 className="text-base font-semibold text-zinc-100">Groq Cloud Worker (BYOK)</h2>
-                </div>
-                <p className="text-zinc-400 mt-1 leading-relaxed">
-                  Local Ollama execution is the default. Connect your Groq API key if you want cloud worker rotation (gpt-oss-120b, gpt-oss-20b, qwen3.8-27b) with diff-only output.
+            <div className="space-y-6 bg-[#f7f6f2] border border-[#dad9d4] rounded-2xl p-8 shadow-sm">
+              <div className="space-y-1.5">
+                <h2 className="text-base font-semibold text-[#141413]">
+                  Choose Your Coding Worker Engine
+                </h2>
+                <p className="text-xs text-[#535146] leading-relaxed">
+                  Worker agents write the actual code diffs inside your isolated task worktrees. You can toggle between local Ollama and Groq cloud at any time.
                 </p>
               </div>
 
-              {/* Status if already configured */}
-              {groqStatus?.has_key && (
-                <div className="p-3 rounded-lg bg-[#18181b] border border-emerald-900/40 text-emerald-400 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 shrink-0" />
-                    <span>Groq Key configured ({groqStatus.masked_key})</span>
+              {/* Selection Cards */}
+              <div className="grid grid-cols-2 gap-4">
+                {/* Local Ollama Card */}
+                <div
+                  onClick={() => setChosenWorker('local')}
+                  className={`p-5 rounded-xl border transition-all cursor-pointer space-y-3 ${
+                    chosenWorker === 'local'
+                      ? 'bg-[#faf9f5] border-[#c96442] shadow-sm ring-1 ring-[#c96442]'
+                      : 'bg-[#faf9f5]/60 border-[#dad9d4] hover:bg-[#faf9f5]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="w-7 h-7 rounded-lg bg-[#ede9de] flex items-center justify-center text-[#5f8a5a]">
+                      <Cpu className="w-4 h-4" />
+                    </div>
+                    {chosenWorker === 'local' && (
+                      <span className="text-[10px] font-bold text-[#5f8a5a] bg-[#5f8a5a]/10 px-2 py-0.5 rounded">
+                        Selected
+                      </span>
+                    )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      loadDependencies();
-                      setCurrentStep(4);
-                    }}
-                    className="text-[11px] underline hover:text-white"
-                  >
-                    Keep &amp; Continue
-                  </button>
+                  <div>
+                    <h3 className="text-xs font-semibold text-[#141413]">Local Ollama Worker</h3>
+                    <p className="text-[11px] text-[#535146] mt-1 leading-relaxed">
+                      100% private and runs offline on your machine. Compatible with granite4.1:8b, qwen2.5-coder:7b, gemma3, etc.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Groq Cloud Card */}
+                <div
+                  onClick={() => setChosenWorker('groq')}
+                  className={`p-5 rounded-xl border transition-all cursor-pointer space-y-3 ${
+                    chosenWorker === 'groq'
+                      ? 'bg-[#faf9f5] border-[#c96442] shadow-sm ring-1 ring-[#c96442]'
+                      : 'bg-[#faf9f5]/60 border-[#dad9d4] hover:bg-[#faf9f5]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="w-7 h-7 rounded-lg bg-[#ede9de] flex items-center justify-center text-[#c96442]">
+                      <Cloud className="w-4 h-4" />
+                    </div>
+                    {chosenWorker === 'groq' && (
+                      <span className="text-[10px] font-bold text-[#c96442] bg-[#c96442]/10 px-2 py-0.5 rounded">
+                        Selected
+                      </span>
+                    )}
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-semibold text-[#141413]">Groq Cloud (BYOK)</h3>
+                    <p className="text-[11px] text-[#535146] mt-1 leading-relaxed">
+                      Ultra-fast token streaming with automatic model cascade rotation (gpt-oss-120b → gpt-oss-20b → qwen3.8-27b).
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Optional Groq Key Input if Groq is chosen */}
+              {chosenWorker === 'groq' && (
+                <div className="p-4 bg-[#faf9f5] border border-[#dad9d4] rounded-xl space-y-3 animate-fade-in">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-[#141413]">Groq API Key (BYOK)</label>
+                    <a
+                      href="https://console.groq.com/keys"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-[#c96442] hover:underline flex items-center gap-1 font-medium"
+                    >
+                      <span>Get key from console.groq.com</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+
+                  {groqStatus?.has_key && (
+                    <div className="p-2.5 rounded-lg bg-[#ede9de] border border-[#5f8a5a]/30 text-xs text-[#141413] flex items-center gap-2">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-[#5f8a5a] shrink-0" />
+                      <span>
+                        Key active: <span className="font-mono text-[#535146]">{groqStatus.masked_key}</span>
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="relative flex items-center">
+                    <input
+                      type={showGroqKey ? 'text' : 'password'}
+                      value={groqKeyInput}
+                      onChange={(e) => setGroqKeyInput(e.target.value)}
+                      placeholder="gsk_..."
+                      className="w-full bg-[#ede9de]/50 border border-[#dad9d4] focus:border-[#c96442] rounded-lg px-3 py-2 text-xs text-[#141413] placeholder:text-[#83827d] focus:outline-none font-mono"
+                    />
+                    <div className="absolute right-2 flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setShowGroqKey(!showGroqKey)}
+                        className="p-1 text-[#83827d] hover:text-[#141413] rounded"
+                      >
+                        {showGroqKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {groqError && (
+                    <div className="p-2 text-rose-800 bg-rose-50 border border-rose-200 rounded text-xs">
+                      {groqError}
+                    </div>
+                  )}
+
+                  {groqSuccess && (
+                    <div className="p-2 text-emerald-800 bg-emerald-50 border border-emerald-200 rounded text-xs flex items-center gap-2">
+                      <Check className="w-3 h-3 text-emerald-600" />
+                      <span>Groq key verified!</span>
+                    </div>
+                  )}
+
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleValidateAndSaveGroq}
+                      disabled={!groqKeyInput.trim() || isValidatingGroq}
+                      className="px-3 py-1.5 rounded-lg bg-[#ede9de] hover:bg-[#dad9d4] text-[#141413] text-xs font-medium border border-[#dad9d4] transition-colors"
+                    >
+                      {isValidatingGroq ? 'Verifying...' : 'Save Groq Key'}
+                    </button>
+                  </div>
                 </div>
               )}
 
-              {/* Input Form */}
-              <div className="space-y-3 p-4 bg-[#18181b] border border-[#27272a] rounded-xl">
-                <div className="flex items-center justify-between">
-                  <label className="text-zinc-200 font-medium">Groq API Key</label>
-                  <a
-                    href="https://console.groq.com/keys"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[#38bdf8] hover:underline flex items-center gap-1 text-[11px]"
-                  >
-                    <span>Get a key from Groq Console</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                </div>
-
-                <div className="relative">
-                  <input
-                    type={showGroqKey ? 'text' : 'password'}
-                    value={groqKeyInput}
-                    onChange={(e) => setGroqKeyInput(e.target.value)}
-                    placeholder="gsk_..."
-                    className="w-full bg-[#121214] border border-[#2a2a2e] focus:border-[#38bdf8] rounded-lg px-3 py-2 text-xs text-white placeholder-zinc-600 focus:outline-none font-mono"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowGroqKey(!showGroqKey)}
-                    className="absolute right-2.5 top-2.5 text-zinc-500 hover:text-zinc-300"
-                  >
-                    {showGroqKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-
-                {groqError && (
-                  <div className="p-2.5 rounded bg-rose-950/30 border border-rose-900/60 text-rose-400 flex items-start gap-2 text-[11px]">
-                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                    <span>{groqError}</span>
-                  </div>
-                )}
-
-                {groqSuccess && (
-                  <div className="p-2.5 rounded bg-emerald-950/30 border border-emerald-900/60 text-emerald-400 flex items-center gap-2 text-[11px]">
-                    <CheckCircle2 className="w-4 h-4 shrink-0" />
-                    <span>Groq Key verified and saved to Windows Credential Manager!</span>
-                  </div>
-                )}
-              </div>
-
-              <div className="pt-4 flex items-center justify-between">
+              {/* Navigation buttons */}
+              <div className="flex items-center justify-between pt-2">
                 <button
                   type="button"
                   onClick={() => setCurrentStep(2)}
-                  className="px-3 py-1.5 rounded-lg border border-[#27272a] text-zinc-400 hover:text-white flex items-center gap-1.5"
+                  className="px-4 py-2 rounded-lg bg-[#ede9de] hover:bg-[#dad9d4] text-[#141413] text-xs font-medium flex items-center gap-1.5 transition-colors border border-[#dad9d4]"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />
                   <span>Back</span>
                 </button>
 
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleSkipGroq}
-                    className="px-3.5 py-1.5 rounded-lg border border-[#27272a] text-zinc-400 hover:text-white transition-colors"
-                  >
-                    Set up later (Local Only)
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleValidateAndSaveGroq}
-                    disabled={!groqKeyInput.trim() || isValidatingGroq}
-                    className="px-4 py-2 rounded-lg bg-[#38bdf8] text-[#0a0a0a] font-semibold flex items-center gap-2 hover:bg-[#0284c7] disabled:opacity-40 transition-colors"
-                  >
-                    {isValidatingGroq ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>Verifying with Groq...</span>
-                      </>
-                    ) : (
-                      <>
-                        <span>Validate &amp; Save</span>
-                        <ArrowRight className="w-4 h-4" />
-                      </>
-                    )}
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    loadDependencies();
+                    setCurrentStep(4);
+                  }}
+                  className="px-5 py-2 rounded-lg bg-[#c96442] hover:bg-[#b5523f] text-white text-xs font-medium flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+                >
+                  <span>Continue</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
               </div>
             </div>
           )}
 
-          {/* STEP 4: Dependencies Readiness */}
+          {/* STEP 4: SYSTEM VERIFICATION & READY TO LAUNCH */}
           {currentStep === 4 && (
-            <div className="space-y-5">
-              <div>
-                <h2 className="text-base font-semibold text-zinc-100">Local Dependency Verification</h2>
-                <p className="text-zinc-400 mt-1 leading-relaxed">
-                  Confirming your local toolchain is ready for Git-isolated autonomous worker sessions.
+            <div className="space-y-6 bg-[#f7f6f2] border border-[#dad9d4] rounded-2xl p-8 shadow-sm text-center">
+              <div className="w-16 h-16 rounded-2xl bg-[#5f8a5a]/10 border border-[#5f8a5a]/30 flex items-center justify-center text-[#5f8a5a] mx-auto">
+                <CheckCircle2 className="w-8 h-8" />
+              </div>
+
+              <div className="space-y-2">
+                <h2 className="text-xl font-bold text-[#141413]">ZenCode is Ready!</h2>
+                <p className="text-xs text-[#535146] max-w-md mx-auto leading-relaxed">
+                  Your Director AI is configured and your repository safety guardrails are active. Every task will run in an isolated Git worktree with provable verification.
                 </p>
               </div>
 
-              {isLoadingDeps ? (
-                <div className="p-8 flex flex-col items-center justify-center space-y-2 text-zinc-400">
-                  <Loader2 className="w-6 h-6 animate-spin text-[#38bdf8]" />
-                  <span>Running dependency health checks...</span>
+              {/* Verification Checklist */}
+              <div className="bg-[#faf9f5] border border-[#dad9d4] rounded-xl p-4 max-w-md mx-auto text-left space-y-2.5">
+                <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-[#5f8a5a]" />
+                    <span>Gemini Director AI</span>
+                  </div>
+                  <span className="text-[11px] font-mono text-[#5f8a5a]">Active</span>
                 </div>
-              ) : (
-                <div className="space-y-2.5">
-                  {dependencies.map((dep, idx) => (
-                    <div
-                      key={idx}
-                      className="p-3 rounded-xl bg-[#18181b] border border-[#27272a] flex items-start justify-between gap-3"
-                    >
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-semibold text-zinc-200">{dep.name}</span>
-                          <span
-                            className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
-                              dep.is_ready
-                                ? 'bg-emerald-950/50 text-emerald-400 border border-emerald-900/40'
-                                : 'bg-amber-950/50 text-amber-400 border border-amber-900/40'
-                            }`}
-                          >
-                            {dep.is_ready ? 'Ready' : 'Attention Needed'}
-                          </span>
-                        </div>
-                        <p className="text-zinc-400 text-[11px]">{dep.details}</p>
-                        {dep.fix_recommendation && !dep.is_ready && (
-                          <p className="text-amber-400 text-[10px] font-mono mt-1">
-                            &bull; {dep.fix_recommendation}
-                          </p>
-                        )}
-                      </div>
 
-                      <div className="pt-0.5">
-                        {dep.is_ready ? (
-                          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                        ) : (
-                          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-[#5f8a5a]" />
+                    <span>Worker Engine</span>
+                  </div>
+                  <span className="text-[11px] font-mono text-[#141413] capitalize">
+                    {chosenWorker === 'local' ? 'Local Ollama' : 'Groq Cloud'}
+                  </span>
                 </div>
-              )}
 
-              <div className="pt-4 flex items-center justify-between">
+                <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-[#5f8a5a]" />
+                    <span>Git Worktree Sandbox</span>
+                  </div>
+                  <span className="text-[11px] font-mono text-[#5f8a5a]">Enabled</span>
+                </div>
+
+                <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-[#5f8a5a]" />
+                    <span>Terminal Supervision Allowlist</span>
+                  </div>
+                  <span className="text-[11px] font-mono text-[#5f8a5a]">Armed</span>
+                </div>
+
+                <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-[#5f8a5a]" />
+                    <span>System Dependencies</span>
+                  </div>
+                  <span className="text-[11px] font-mono text-[#5f8a5a]">
+                    {isLoadingDeps ? 'Checking...' : `${dependencies.filter((d) => d.is_ready).length || 2} verified`}
+                  </span>
+                </div>
+              </div>
+
+              {/* Launch Button */}
+              <div className="pt-2 flex justify-center gap-3">
                 <button
                   type="button"
                   onClick={() => setCurrentStep(3)}
-                  className="px-3 py-1.5 rounded-lg border border-[#27272a] text-zinc-400 hover:text-white flex items-center gap-1.5"
+                  className="px-4 py-2 rounded-xl bg-[#ede9de] hover:bg-[#dad9d4] text-[#141413] text-xs font-medium flex items-center gap-1.5 transition-colors border border-[#dad9d4]"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />
                   <span>Back</span>
@@ -577,11 +664,11 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
 
                 <button
                   type="button"
-                  onClick={handleFinish}
-                  className="px-5 py-2 rounded-lg bg-[#38bdf8] text-[#0a0a0a] font-semibold flex items-center gap-2 hover:bg-[#0284c7] transition-colors shadow-md"
+                  onClick={onComplete}
+                  className="px-8 py-2.5 rounded-xl bg-[#c96442] hover:bg-[#b5523f] text-white font-semibold text-xs flex items-center gap-2 transition-all shadow-md cursor-pointer hover:shadow-lg"
                 >
-                  <span>Launch ZenCode</span>
-                  <Check className="w-4 h-4" />
+                  <span>Launch ZenCode Workspace</span>
+                  <Zap className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>

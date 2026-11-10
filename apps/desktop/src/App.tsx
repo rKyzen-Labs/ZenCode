@@ -72,7 +72,13 @@ export default function App() {
   const [activeView, setActiveView] = useState<'landing' | 'chat' | 'search' | 'settings'>('landing');
 
   // Step 3 Onboarding Wizard State
-  const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(() => {
+    try {
+      return localStorage.getItem('zencode_onboarding_completed') !== 'true';
+    } catch {
+      return true;
+    }
+  });
   const [onboardingStep, setOnboardingStep] = useState<1 | 2 | 3 | 4>(1);
 
   // Keyboard Shortcuts Modal State
@@ -1436,6 +1442,7 @@ function parseShellCommand(input: string): { program: string; args: string[] } |
                   setIsFilePaneOpen(true);
                   setRequestedPaneTab('terminal');
                 }}
+                onResetChat={handleNewChat}
               />
             </div>
           )}

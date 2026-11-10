@@ -144,9 +144,9 @@ export const TopBar: FC<TopBarProps> = ({
               key={tab.id}
               data-testid={`chat-tab-${tab.id}`}
               onClick={() => onSelectTab(tab.id)}
-              className={`group flex items-center gap-2 h-7 px-3 rounded-md text-[12.5px] transition-colors cursor-pointer max-w-[220px] shrink-0 ${
+              className={`group flex items-center gap-2 h-7 px-3 rounded-md text-[12.5px] transition-all cursor-pointer max-w-[220px] shrink-0 animate-tab-expressive ${
                 isActive
-                  ? 'text-[#141413] font-medium bg-[#ede9de]'
+                  ? 'text-[#141413] font-medium bg-[#ede9de] shadow-xs'
                   : 'text-[#535146] hover:text-[#141413] hover:bg-[#ede9de]/60'
               }`}
             >
@@ -154,7 +154,7 @@ export const TopBar: FC<TopBarProps> = ({
               {(isRunningThis || tab.id === activeChatId) && (
                 <span
                   data-testid="tab-indicator-dot"
-                  className={`w-2 h-2 rounded-full shrink-0 ${
+                  className={`w-2 h-2 rounded-full shrink-0 animate-dot-pop ${
                     isRunningThis ? 'bg-[#c96442] animate-pulse' : 'bg-[#c96442]'
                   }`}
                 />

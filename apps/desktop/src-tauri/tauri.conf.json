@@ -28,7 +28,35 @@
     }
   },
   "bundle": {
-    "active": false,
-    "externalBin": ["binaries/opencode"]
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Director-supervised, safety-first autonomous coding assistant",
+    "longDescription": "ZenCode is a safety-first autonomous AI coding assistant that executes tasks in isolated Git worktrees with provable verification and director-supervised command execution.",
+    "linux": {
+      "deb": {
+        "depends": ["curl", "git"]
+      },
+      "rpm": {
+        "depends": ["curl", "git"]
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/128x128.png"
+      }
+    },
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "10.15"
+    }
   }
 }
