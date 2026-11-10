@@ -34,8 +34,6 @@ jobs:
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -49,10 +47,12 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev rpm
 
       - name: Install Node dependencies
-        run: pnpm install
+        working-directory: apps/desktop
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build frontend
-        run: pnpm --dir apps/desktop build
+        working-directory: apps/desktop
+        run: pnpm build
 
       - name: Build Tauri app (.exe, .deb, .rpm, .dmg)
         uses: tauri-apps/tauri-action@v0
@@ -81,7 +81,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cp target/release/zencode-desktop target/release/zencode-linux-x86_64 || cp apps/desktop/src-tauri/target/release/zencode-desktop target/release/zencode-linux-x86_64
+          if [ -f "target/release/zencode-desktop" ]; then
+            cp target/release/zencode-desktop target/release/zencode-linux-x86_64
+          elif [ -f "apps/desktop/src-tauri/target/release/zencode-desktop" ]; then
+            mkdir -p target/release
+            cp apps/desktop/src-tauri/target/release/zencode-desktop target/release/zencode-linux-x86_64
+          fi
           chmod +x target/release/zencode-linux-x86_64
           gh release upload ${{ github.ref_name }} target/release/zencode-linux-x86_64 --clobber || true
 
@@ -94,3 +99,5 @@ jobs:
             target/release/zencode-linux-x86_64
             target/release/bundle/deb/*.deb
             target/release/bundle/appimage/*.AppImage
+            apps/desktop/src-tauri/target/release/bundle/deb/*.deb
+            apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
