@@ -1,0 +1,9 @@
+{
+  "name": "zencode-workspace",
+  "private": true,
+  "scripts": {
+    "build": "pnpm --dir apps/desktop build",
+    "dev": "pnpm --dir apps/desktop dev",
+    "tauri": "pnpm --dir apps/desktop tauri"
+  }
+}

@@ -16,11 +16,11 @@ jobs:
       matrix:
         include:
           - platform: 'windows-latest'
-            args: '--target x86_64-pc-windows-msvc'
+            args: '--bundles nsis'
           - platform: 'ubuntu-22.04'
-            args: ''
+            args: '--bundles deb,appimage'
           - platform: 'macos-latest'
-            args: '--target universal-apple-darwin'
+            args: '--bundles dmg --target universal-apple-darwin'
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -60,16 +60,37 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: apps/desktop
-          tauriScript: pnpm --dir apps/desktop tauri
+          tauriScript: pnpm tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'ZenCode ${{ github.ref_name }}'
           releaseBody: |
             ZenCode: The director-supervised, safety-first autonomous AI coding assistant.
             
-            ### Included Platform Installers (with Auto-Resolved Dependencies):
+            ### Included Release Assets:
+            - **Linux ELF Binary**: `zencode-linux-x86_64` (Native 64-bit ELF standalone executable)
+            - **Debian / Ubuntu**: `zencode_${{ github.ref_name }}_amd64.deb` (Debian package with auto-resolved dependencies)
+            - **Universal Linux**: `zencode_${{ github.ref_name }}_amd64.AppImage`
             - **Windows**: `Zencode_${{ github.ref_name }}_x64-setup.exe` (NSIS Installer with automatic WebView2 Bootstrapper download)
-            - **Linux**: `zencode_${{ github.ref_name }}_amd64.deb` & `zencode-${{ github.ref_name }}-1.x86_64.rpm` (Package dependencies automatically installed: `git`, `curl`, `libwebkit2gtk-4.1`, `gtk3`, `libappindicator`)
             - **macOS**: `Zencode_${{ github.ref_name }}_universal.dmg` (Universal binary for both Apple Silicon M-series & Intel Macs)
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Upload Linux ELF binary and artifacts
+        if: matrix.platform == 'ubuntu-22.04'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp target/release/zencode-desktop target/release/zencode-linux-x86_64 || cp apps/desktop/src-tauri/target/release/zencode-desktop target/release/zencode-linux-x86_64
+          chmod +x target/release/zencode-linux-x86_64
+          gh release upload ${{ github.ref_name }} target/release/zencode-linux-x86_64 --clobber || true
+
+      - name: Archive Linux ELF and Debian package
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: zencode-linux-x86_64-binaries
+          path: |
+            target/release/zencode-linux-x86_64
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
