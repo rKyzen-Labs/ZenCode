@@ -807,7 +807,8 @@ const CodeBlock: FC<{ code: string; language?: string }> = ({ code, language }) 
 
 /** Inline Markdown renderer: bold (**text**, __text__), code (`text`), italic (*text*, _text_), links ([text](url)) */
 const renderInlineMarkdown = (text: string): ReactNode => {
-  const tokens = text.split(/(\[.*?\]\(.*?\)|\*\*.*?\*\*|__.*?__|`.*?`|\*.*?\*|_.*?_)/g);
+  if (!text) return null;
+  const tokens = text.split(/(\[.*?\]\(.*?\)|\*\*\*.*?\*\*\*|___.*?___|\*\*.*?\*\*|__.*?__|`[^`\n]+`|\*[^*\n]+\*|_[^_\n]+_)/g);
   return tokens.map((part, pIdx) => {
     if (!part) return null;
 
@@ -827,17 +828,32 @@ const renderInlineMarkdown = (text: string): ReactNode => {
       );
     }
 
+    // Bold + Italic: ***text*** or ___text___
+    if (
+      ((part.startsWith('***') && part.endsWith('***')) || (part.startsWith('___') && part.endsWith('___'))) &&
+      part.length > 6
+    ) {
+      return (
+        <strong key={pIdx} className="font-semibold italic text-[#141413]">
+          {renderInlineMarkdown(part.slice(3, -3))}
+        </strong>
+      );
+    }
+
     // Bold: **text** or __text__
-    if ((part.startsWith('**') && part.endsWith('**')) || (part.startsWith('__') && part.endsWith('__'))) {
+    if (
+      ((part.startsWith('**') && part.endsWith('**')) || (part.startsWith('__') && part.endsWith('__'))) &&
+      part.length > 4
+    ) {
       return (
         <strong key={pIdx} className="font-semibold text-[#141413]">
-          {part.slice(2, -2)}
+          {renderInlineMarkdown(part.slice(2, -2))}
         </strong>
       );
     }
 
     // Inline code: `text`
-    if (part.startsWith('`') && part.endsWith('`')) {
+    if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
       return (
         <code
           key={pIdx}
@@ -849,10 +865,13 @@ const renderInlineMarkdown = (text: string): ReactNode => {
     }
 
     // Italic: *text* or _text_
-    if ((part.startsWith('*') && part.endsWith('*')) || (part.startsWith('_') && part.endsWith('_'))) {
+    if (
+      ((part.startsWith('*') && part.endsWith('*')) || (part.startsWith('_') && part.endsWith('_'))) &&
+      part.length > 2
+    ) {
       return (
         <em key={pIdx} className="italic text-[#535146]">
-          {part.slice(1, -1)}
+          {renderInlineMarkdown(part.slice(1, -1))}
         </em>
       );
     }
@@ -958,40 +977,36 @@ const renderMarkdownContent = (content: string): ReactNode => {
       continue;
     }
 
-    // 4. Headings
-    if (trimmed.startsWith('#### ')) {
-      elements.push(
-        <h5 key={`h4-${i}`} className="text-xs font-semibold uppercase tracking-wider text-[#83827d] pt-2 pb-0.5">
-          {renderInlineMarkdown(trimmed.slice(5))}
-        </h5>
-      );
-      i++;
-      continue;
-    }
-    if (trimmed.startsWith('### ')) {
-      elements.push(
-        <h4 key={`h3-${i}`} className="text-sm font-semibold text-[#141413] pt-2.5 pb-0.5">
-          {renderInlineMarkdown(trimmed.slice(4))}
-        </h4>
-      );
-      i++;
-      continue;
-    }
-    if (trimmed.startsWith('## ')) {
-      elements.push(
-        <h3 key={`h2-${i}`} className="text-base font-bold text-[#141413] pt-3 pb-1">
-          {renderInlineMarkdown(trimmed.slice(3))}
-        </h3>
-      );
-      i++;
-      continue;
-    }
-    if (trimmed.startsWith('# ')) {
-      elements.push(
-        <h2 key={`h1-${i}`} className="text-lg font-bold text-[#141413] pt-3.5 pb-1 border-b border-[#dad9d4]">
-          {renderInlineMarkdown(trimmed.slice(2))}
-        </h2>
-      );
+    // 4. Headings: support #, ##, ###, ####, #####, ###### with or without space (e.g. '# Heading' and '#Heading')
+    const headingMatch = trimmed.match(/^(#{1,6})\s*(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const headingText = headingMatch[2];
+      if (level === 1) {
+        elements.push(
+          <h2 key={`h1-${i}`} className="text-lg font-bold text-[#141413] pt-3 pb-1 border-b border-[#dad9d4]">
+            {renderInlineMarkdown(headingText)}
+          </h2>
+        );
+      } else if (level === 2) {
+        elements.push(
+          <h3 key={`h2-${i}`} className="text-base font-bold text-[#141413] pt-2.5 pb-1">
+            {renderInlineMarkdown(headingText)}
+          </h3>
+        );
+      } else if (level === 3) {
+        elements.push(
+          <h4 key={`h3-${i}`} className="text-sm font-semibold text-[#141413] pt-2 pb-0.5">
+            {renderInlineMarkdown(headingText)}
+          </h4>
+        );
+      } else {
+        elements.push(
+          <h5 key={`h4-${i}`} className="text-xs font-semibold uppercase tracking-wider text-[#83827d] pt-1.5 pb-0.5">
+            {renderInlineMarkdown(headingText)}
+          </h5>
+        );
+      }
       i++;
       continue;
     }
@@ -1026,10 +1041,13 @@ const renderMarkdownContent = (content: string): ReactNode => {
       continue;
     }
 
-    // 7. Unordered list
-    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+    // 7. Unordered list (- item, * item, + item)
+    if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed.startsWith('+ ')) {
       const items: string[] = [];
-      while (i < lines.length && (lines[i].trim().startsWith('- ') || lines[i].trim().startsWith('* '))) {
+      while (
+        i < lines.length &&
+        (lines[i].trim().startsWith('- ') || lines[i].trim().startsWith('* ') || lines[i].trim().startsWith('+ '))
+      ) {
         items.push(lines[i].trim().slice(2));
         i++;
       }
@@ -1640,8 +1658,30 @@ export const ChatThread: FC<ChatThreadProps> = ({
 
                   {/* Conversational small talk reply or task content */}
                   {parsedPlan && parsedPlan.is_actionable === false ? (
-                    <div className="whitespace-pre-wrap text-[#3d3929] leading-relaxed text-[13.5px]">
-                      {parsedPlan.conversational_reply || msg.content}
+                    <div className="space-y-2">
+                      <div className="text-[#3d3929] leading-relaxed text-[13.5px]">
+                        {renderMarkdownContent(parsedPlan.conversational_reply || msg.content || '')}
+                      </div>
+                      {/* Copy Output Button */}
+                      <div className="flex items-center justify-end pr-1 pt-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleCopyOutput(
+                              msg.id || `asst_${idx}`,
+                              parsedPlan.conversational_reply || msg.content || ''
+                            )
+                          }
+                          className="p-1.5 rounded-md text-[#83827d] hover:text-[#141413] hover:bg-[#ede9de]/60 transition-colors cursor-pointer select-none"
+                          title={copiedOutputId === (msg.id || `asst_${idx}`) ? 'Copied response!' : 'Copy response'}
+                        >
+                          {copiedOutputId === (msg.id || `asst_${idx}`) ? (
+                            <Check className="w-3.5 h-3.5 text-[#5f8a5a]" />
+                          ) : (
+                            <Copy className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <div className="space-y-2">
