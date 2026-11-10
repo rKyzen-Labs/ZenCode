@@ -59,15 +59,17 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          projectPath: apps/desktop
+          tauriScript: pnpm --dir apps/desktop tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'ZenCode ${{ github.ref_name }}'
           releaseBody: |
             ZenCode: The director-supervised, safety-first autonomous AI coding assistant.
             
-            ### Downloads
-            - **Windows**: `.exe` (NSIS Installer)
-            - **Linux**: `.deb` (Debian/Ubuntu) & `.rpm` (Fedora/RHEL)
-            - **macOS**: `.dmg` (Apple Silicon & Intel Universal)
+            ### Included Platform Installers (with Auto-Resolved Dependencies):
+            - **Windows**: `Zencode_${{ github.ref_name }}_x64-setup.exe` (NSIS Installer with automatic WebView2 Bootstrapper download)
+            - **Linux**: `zencode_${{ github.ref_name }}_amd64.deb` & `zencode-${{ github.ref_name }}-1.x86_64.rpm` (Package dependencies automatically installed: `git`, `curl`, `libwebkit2gtk-4.1`, `gtk3`, `libappindicator`)
+            - **macOS**: `Zencode_${{ github.ref_name }}_universal.dmg` (Universal binary for both Apple Silicon M-series & Intel Macs)
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

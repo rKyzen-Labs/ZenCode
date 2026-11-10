@@ -42,16 +42,30 @@
     "longDescription": "ZenCode is a safety-first autonomous AI coding assistant that executes tasks in isolated Git worktrees with provable verification and director-supervised command execution.",
     "linux": {
       "deb": {
-        "depends": ["curl", "git"]
+        "depends": [
+          "curl",
+          "git",
+          "libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37",
+          "libgtk-3-0",
+          "libappindicator3-1"
+        ]
       },
       "rpm": {
-        "depends": ["curl", "git"]
+        "depends": [
+          "curl",
+          "git",
+          "webkit2gtk4.1",
+          "gtk3",
+          "libappindicator-gtk3"
+        ]
       }
     },
     "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
       "nsis": {
-        "installerIcon": "icons/icon.ico",
-        "headerImage": "icons/128x128.png"
+        "installerIcon": "icons/icon.ico"
       }
     },
     "macOS": {
