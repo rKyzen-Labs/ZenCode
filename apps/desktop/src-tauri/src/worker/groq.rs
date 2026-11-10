@@ -344,7 +344,7 @@ MOVE: old/path/to/file.ext -> new/path/to/file.ext
 or:
 RMDIR: relative/path/to/folder
 
-7. For executing terminal commands (such as installing dependencies, running build/tests, ollama commands, or running scripts):
+7. For executing terminal commands (such as running environment inspection/discovery like `ollama list` or `docker ps`, installing dependencies, running build/tests, or running scripts):
 <<<<<<< COMMAND
 pip install requests
 >>>>>>>
@@ -716,7 +716,8 @@ pub fn extract_commands_for_session(
     // 2. Extract from plan steps if not already covered
     let known_binaries = [
         "pip", "pip3", "npm", "npx", "pnpm", "yarn", "cargo", "pytest",
-        "python", "python3", "node", "make", "poetry", "uv"
+        "python", "python3", "node", "make", "poetry", "uv", "ollama",
+        "docker", "git", "rustc", "go", "deno"
     ];
 
     for step in steps {
@@ -726,6 +727,30 @@ pub fn extract_commands_for_session(
 
         for candidate in candidates {
             let trimmed = candidate.trim();
+
+            // First check if step explicitly wrote COMMAND: <cmd>
+            if let Some(cmd) = trimmed.strip_prefix("COMMAND:").or_else(|| trimmed.strip_prefix("Command:")) {
+                let clean = cmd.trim().trim_matches('`').trim_start_matches('$').trim().to_string();
+                if !clean.is_empty() && seen.insert(clean.clone()) {
+                    commands.push(clean);
+                }
+                continue;
+            }
+
+            // Check if step quoted a command in backticks: `ollama list`
+            if let Some(start_bt) = trimmed.find('`') {
+                if let Some(end_bt) = trimmed[start_bt + 1..].find('`') {
+                    let inside = trimmed[start_bt + 1..start_bt + 1 + end_bt].trim();
+                    let first_word = inside.split_whitespace().next().unwrap_or("");
+                    if known_binaries.contains(&first_word) {
+                        let clean = inside.trim_start_matches('$').trim().to_string();
+                        if !clean.is_empty() && seen.insert(clean.clone()) {
+                            commands.push(clean);
+                        }
+                    }
+                }
+            }
+
             for bin in &known_binaries {
                 // Check if candidate starts with binary or contains "$ <bin>" or "run <bin>"
                 let match_idx = if trimmed.starts_with(bin) {

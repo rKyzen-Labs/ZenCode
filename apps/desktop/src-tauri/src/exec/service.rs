@@ -103,6 +103,23 @@ impl ExecutionService {
             return CommandSecurityClass::SafeAutoApproved;
         }
 
+        // Read-only discovery and inspection commands (e.g. `ollama list`, `docker ps`, `python --version`, etc.)
+        let is_inspection = !args.is_empty()
+            && args.iter().all(|a| {
+                let al = a.to_lowercase();
+                al == "list"
+                    || al == "ps"
+                    || al == "status"
+                    || al == "--version"
+                    || al == "-v"
+                    || al == "version"
+                    || al == "info"
+                    || al == "images"
+            });
+        if is_inspection && (prog_base == "ollama" || prog_base == "docker" || prog_base == "python" || prog_base == "python3" || prog_base == "node" || prog_base == "pip" || prog_base == "npm") {
+            return CommandSecurityClass::SafeAutoApproved;
+        }
+
         // 3. Otherwise: rememberable for this session once approved
         CommandSecurityClass::SessionRememberable
     }

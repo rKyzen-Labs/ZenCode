@@ -442,24 +442,6 @@ pub async fn execute_preview_planning_context(
         }
     }
 
-    // Inspect local Ollama environment so director/planner is aware of installed models on this machine
-    if let Ok(ollama_models) = list_installed_ollama_models().await {
-        if !ollama_models.is_empty() {
-            let names: Vec<String> = ollama_models
-                .iter()
-                .map(|m| format!("{} ({})", m.name, m.size))
-                .collect();
-            manifest_summaries.push(format!(
-                "System & Local AI Environment:\nOllama is available on this machine.\nCurrently installed Ollama models: {}",
-                names.join(", ")
-            ));
-        } else {
-            manifest_summaries.push(
-                "System & Local AI Environment:\nOllama daemon is reachable, but no models are currently installed.".to_string(),
-            );
-        }
-    }
-
     let git_branch_and_status = format!(
         "Branch: {}, Status: {}",
         active_project.current_branch.unwrap_or_else(|| "none".into()),

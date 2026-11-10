@@ -219,9 +219,9 @@ impl PlanningContext {
         out.push_str("CLASSIFICATION & CONTEXT INSTRUCTION:\n");
         out.push_str("1. If PRIOR CONVERSATION exists, evaluate the CURRENT FOLLOW-UP REQUEST in the full context of what was previously requested, created, or modified. If the user refers back to previous files, functions, or concepts (e.g. 'also add input validation to that function', 'now write tests for it'), link directly to the relevant files and functions from prior turns.\n");
         out.push_str("2. Classify if the current prompt is an actionable task (coding, creating/deleting files, creating/moving folders, running commands, inspecting environment) versus general small talk or greeting.\n");
-        out.push_str("3. If the user asks about the local machine, installed tools, or installed Ollama models, use the provided System & Local AI Environment findings to answer directly, accurately, and concisely in conversational_reply without telling the user to manually run terminal commands unless they explicitly asked how to run one.\n");
-        out.push_str("4. If NOT an actionable task: set is_actionable: false, provide a direct, helpful conversational reply in conversational_reply, provide a brief task_summary, and leave steps as an empty array [].\n");
-        out.push_str("5. If it IS an actionable task (including file creation, editing, deleting, folder operations, moving files, package installation, running tests, or terminal commands): set is_actionable: true, set conversational_reply: null, and provide a concrete task_summary with detailed implementation steps in the steps array. The worker has full native capabilities to create files, edit files, delete files, make folders, move files, and execute terminal commands.\n");
+        out.push_str("3. DYNAMIC ENVIRONMENT DISCOVERY VIA COMMANDS: Do not assume or guess environment details, and NEVER tell the user to manually open their terminal and run commands themselves. If the user asks about the local machine, installed tools, runtimes, package managers, services, or models (e.g. 'what models are installed in ollama', 'what version of python do I have', 'is docker running', 'check git branch', 'list packages'), treat it as an ACTIONABLE task (is_actionable: true). Formulate a plan step with instructions to execute the appropriate CLI command (e.g. `COMMAND: ollama list`, `COMMAND: python --version`, `COMMAND: docker ps`, `COMMAND: git status`, `COMMAND: pip list`). The worker will execute the command and display the live output in the Terminal tab.\n");
+        out.push_str("4. If NOT an actionable task (pure greetings like 'hi', 'hello', or small talk): set is_actionable: false, provide a direct, helpful conversational reply in conversational_reply, provide a brief task_summary, and leave steps as an empty array [].\n");
+        out.push_str("5. If it IS an actionable task (including file creation, editing, deleting, folder operations, moving files, package installation, running tests, environment inspection, or terminal commands): set is_actionable: true, set conversational_reply: null, and provide a concrete task_summary with detailed implementation steps in the steps array. The worker has full native capabilities to create files, edit files, delete files, make folders, move files, and execute terminal commands.\n");
 
         out
     }
@@ -257,7 +257,7 @@ impl GeminiPlannerClient {
             "properties": {
                 "is_actionable": {
                     "type": "boolean",
-                    "description": "True if the user prompt requests code changes, file creations, refactorings, or project actions. False if it is a general question, small talk, greeting (e.g. 'hi'), or conversation."
+                    "description": "True if the user prompt requests code changes, file creations, refactorings, terminal commands, or environment/tool inspection (e.g. 'what models are installed in ollama', 'run pip install requests', 'check git status', 'list docker containers'). False ONLY for general small talk or greetings (e.g. 'hi', 'thank you')."
                 },
                 "conversational_reply": {
                     "type": "string",
