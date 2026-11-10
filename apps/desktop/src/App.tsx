@@ -64,7 +64,6 @@ import { SearchPage } from './components/SearchPage';
 import { SettingsPage } from './components/SettingsPage';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { AdvisoryPreviewModal } from './components/AdvisoryPreviewModal';
-import { ExecutionTerminal } from './components/ExecutionTerminal';
 
 export default function App() {
   // Navigation View State: 'landing' | 'chat' | 'search' | 'settings'
@@ -186,7 +185,7 @@ export default function App() {
 
   // Milestone 3 Permissions, Execution, and Diagnostics State
   const [pendingCommandApproval, setPendingCommandApproval] = useState<CommandRequest | null>(null);
-  const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+  const [requestedPaneTab, setRequestedPaneTab] = useState<string | null>(null);
   const [activeCommandId, setActiveCommandId] = useState<string | null>(null);
   const [activeProgram, setActiveProgram] = useState<string>('');
   const [activeArgs, setActiveArgs] = useState<string[]>([]);
@@ -804,7 +803,6 @@ export default function App() {
     setActiveCwd(req.cwd);
     setCommandOutputLines([]);
     setExecutionResult(null);
-    setIsTerminalOpen(true);
     setIsCommandRunning(true);
     try {
       const res = await approveAndRunCommand(req.id);
@@ -1314,27 +1312,11 @@ function parseShellCommand(input: string): { program: string; args: string[] } |
                 activeCommandProgram={activeProgram}
                 activeCommandArgs={activeArgs}
                 commandOutputLines={commandOutputLines}
+                onOpenTerminalTab={() => {
+                  setIsFilePaneOpen(true);
+                  setRequestedPaneTab('terminal');
+                }}
               />
-
-              {/* Terminal if active */}
-              {isTerminalOpen && (
-                <div className="px-4 pb-4 max-w-5xl 2xl:max-w-6xl mx-auto w-full">
-                  <ExecutionTerminal
-                    isOpen={isTerminalOpen}
-                    commandId={activeCommandId}
-                    program={activeProgram}
-                    args={activeArgs}
-                    cwd={activeCwd}
-                    isRunning={isCommandRunning}
-                    outputLines={commandOutputLines}
-                    result={executionResult}
-                    onCancel={() => {
-                      if (activeCommandId) handleCancelCommand(activeCommandId);
-                    }}
-                    onClose={() => setIsTerminalOpen(false)}
-                  />
-                </div>
-              )}
             </div>
           )}
 
@@ -1392,6 +1374,27 @@ function parseShellCommand(input: string): { program: string; args: string[] } |
             onResizeStart={handleResizeStart}
             onOpenWorkspaceFolder={handleSelectWorkspaceDialog}
             openDiffRequest={openDiffRequest}
+            terminalState={(activeProgram || isCommandRunning || commandOutputLines.length > 0) ? {
+              program: activeProgram,
+              args: activeArgs,
+              cwd: activeCwd,
+              commandId: activeCommandId || undefined,
+              outputLines: commandOutputLines,
+              isRunning: isCommandRunning,
+              result: executionResult,
+              onCancel: () => {
+                if (activeCommandId) handleCancelCommand(activeCommandId);
+              },
+            } : null}
+            requestedTab={requestedPaneTab}
+            onClearRequestedTab={() => setRequestedPaneTab(null)}
+            onCloseTerminalTab={() => {
+              setActiveCommandId(null);
+              setActiveProgram('');
+              setActiveArgs([]);
+              setCommandOutputLines([]);
+              setExecutionResult(null);
+            }}
           />
         )}
       </div>

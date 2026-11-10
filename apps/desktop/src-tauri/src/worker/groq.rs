@@ -231,7 +231,13 @@ impl GroqWorkerClient {
         let mut likely_files_set = std::collections::HashSet::new();
         for step in steps {
             for lf in &step.likely_files {
-                likely_files_set.insert(lf.clone());
+                let clean = lf.trim().trim_matches('`').trim_start_matches("./").replace('\\', "/");
+                for part in clean.split(',') {
+                    let p = part.trim().to_lowercase();
+                    if !p.is_empty() {
+                        likely_files_set.insert(p);
+                    }
+                }
             }
         }
 
@@ -241,13 +247,30 @@ impl GroqWorkerClient {
             collect_worktree_files(worktree_path, entries, &mut files_to_scan, 0);
         }
 
-        shredded_files_summary.push_str("=== WORKSPACE STRUCTURAL SUMMARY (AST-SHREDDED) ===\n");
+        shredded_files_summary.push_str("=== WORKSPACE STRUCTURAL SUMMARY ===\n");
         for fpath in &files_to_scan {
             let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
             let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+            let rel_str_lower = rel_str.to_lowercase();
+            let file_base = Path::new(&rel_str_lower)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(&rel_str_lower);
 
-            if likely_files_set.contains(&rel_str) {
-                // For target implementation file: send full content
+            let is_target = likely_files_set.contains(&rel_str_lower)
+                || likely_files_set.contains(file_base)
+                || likely_files_set.iter().any(|lf| lf == file_base || rel_str_lower.ends_with(lf) || lf.ends_with(file_base));
+
+            // Small source/markup files (< 40KB) receive full content so the model generates surgical diffs without SEARCH mismatches
+            let file_len = std::fs::metadata(fpath).map(|m| m.len()).unwrap_or(0);
+            let is_small_project_file = file_len < 40_000 && (
+                rel_str_lower.ends_with(".html") || rel_str_lower.ends_with(".css") || rel_str_lower.ends_with(".js") ||
+                rel_str_lower.ends_with(".ts") || rel_str_lower.ends_with(".py") || rel_str_lower.ends_with(".json") ||
+                rel_str_lower.ends_with(".rs")
+            );
+
+            if is_target || is_small_project_file {
+                // For target and project implementation files: send full content
                 if let Ok(full_code) = std::fs::read_to_string(fpath) {
                     shredded_files_summary.push_str(&format!(
                         "\n--- Target File (Full Content): {rel_str} ---\n{full_code}\n"

@@ -764,9 +764,9 @@ pub fn analyze_execution_grounding(
 
         // 1. Check if step was file-modification oriented
         let mut file_matched = false;
-        let target_files = &step.likely_files;
+        let has_target_files = !step.likely_files.is_empty();
 
-        for tf in target_files {
+        for tf in &step.likely_files {
             let tflow = tf.to_lowercase().replace('\\', "/");
             let tf_basename = tflow.split('/').last().unwrap_or(&tflow);
             if modified_files.iter().any(|mf| mf.contains(tf_basename)) {
@@ -781,18 +781,16 @@ pub fn analyze_execution_grounding(
             || goal_lower.contains("restart")
             || goal_lower.contains("serve")
             || goal_lower.contains("build")
-            || goal_lower.contains("run")
+            || goal_lower.contains("run ")
+            || goal_lower.starts_with("run")
             || goal_lower.contains("install")
-            || goal_lower.contains("pip")
-            || goal_lower.contains("npm")
-            || goal_lower.contains("dependenc")
-            || !step.acceptance_checks.is_empty()
+            || goal_lower.contains("pip ")
+            || goal_lower.contains("npm ")
             || instructions_lower.contains("restart")
             || instructions_lower.contains("run ")
             || instructions_lower.contains("install")
-            || instructions_lower.contains("pip")
-            || instructions_lower.contains("npm")
-            || checks_lower.contains("test");
+            || instructions_lower.contains("pip ")
+            || instructions_lower.contains("npm ");
 
         if is_command_oriented {
             for cmd in captured_commands {
@@ -829,11 +827,21 @@ pub fn analyze_execution_grounding(
             }
         }
 
-        // If it's command-oriented and no command matched: unperformed!
-        if is_command_oriented && !command_matched {
+        // A step is verified as performed if:
+        // - It modified its intended target files, OR
+        // - It executed its intended terminal command, OR
+        // - Files were modified in the workspace and this was a code change step
+        if has_target_files && file_matched {
+            // Target file modifications verified!
+        } else if is_command_oriented && command_matched {
+            // Command execution verified!
+        } else if is_command_oriented && !has_target_files {
             unperformed_steps.push(format!("{step_desc} (no command execution detected)"));
-        } else if !is_command_oriented && !file_matched {
-            // If it was file-oriented but no file matched: unperformed!
+        } else if has_target_files && !file_matched {
+            unperformed_steps.push(format!("{step_desc} (no file modifications detected)"));
+        } else if !file_matched && !command_matched && !modified_files.is_empty() {
+            // General code modifications occurred in workspace
+        } else if !file_matched && !command_matched {
             unperformed_steps.push(format!("{step_desc} (no file modifications detected)"));
         }
     }

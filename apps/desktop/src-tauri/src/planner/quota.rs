@@ -49,7 +49,7 @@ impl ModelLimits {
         } else if match_str(id, MODEL_TERTIARY) {
             Self { rpm: 30, tpm: 16_000, rpd: 14_400, tpd: 1_000_000 }
         } else if match_str(id, MODEL_PINNED_ADVANCED) {
-            Self { rpm: 5, tpm: 250_000, rpd: 20, tpd: 1_000_000 }
+            Self { rpm: 15, tpm: 1_000_000, rpd: 1_500, tpd: 4_000_000 }
         } else if match_str(id, GROQ_MODEL_120B)
             || match_str(id, GROQ_MODEL_20B)
             || match_str(id, GROQ_MODEL_QWEN)
