@@ -199,7 +199,8 @@ impl ExecutionService {
         }
     }
 
-    /// Cancels a running command process and terminates its entire process tree.
+    /// Cancels a running command process and terminates its entire process tree,
+    /// or cancels a pending approval request.
     pub async fn cancel_execution(&self, command_id: &str) -> bool {
         let process_opt = {
             let mut active = self.active_processes.lock().await;
@@ -211,7 +212,74 @@ impl ExecutionService {
             proc.job.terminate();
             true
         } else {
-            false
+            let pending_opt = {
+                let mut pending = self.pending_approvals.lock().await;
+                pending.remove(command_id)
+            };
+            if let Some(req) = pending_opt {
+                let result = ExecutionResult {
+                    command_id: command_id.to_string(),
+                    program: req.program,
+                    args: req.args,
+                    cwd: req.cwd,
+                    exit_code: None,
+                    success: false,
+                    duration_ms: 0,
+                    stdout_tail: Vec::new(),
+                    stderr_tail: Vec::new(),
+                    cancelled: true,
+                    error_message: Some("Execution approval was denied or cancelled by the user.".into()),
+                };
+                let mut hist = self.execution_history.lock().await;
+                hist.push(result);
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /// Waits for an approved or denied command to finish executing, up to `timeout_secs`.
+    pub async fn wait_for_command_result(
+        &self,
+        command_id: &str,
+        timeout_secs: u64,
+    ) -> Result<ExecutionResult, String> {
+        let start = Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+        loop {
+            // 1. Check if execution result is already recorded
+            {
+                let hist = self.execution_history.lock().await;
+                if let Some(res) = hist.iter().find(|r| r.command_id == command_id) {
+                    return Ok(res.clone());
+                }
+            }
+
+            // 2. Check if still in pending approvals or active processes
+            let is_pending = {
+                let pending = self.pending_approvals.lock().await;
+                pending.contains_key(command_id)
+            };
+            let is_active = {
+                let active = self.active_processes.lock().await;
+                active.contains_key(command_id)
+            };
+
+            if !is_pending && !is_active {
+                // Not pending, not active, and not in history: check history one last time
+                let hist = self.execution_history.lock().await;
+                if let Some(res) = hist.iter().find(|r| r.command_id == command_id) {
+                    return Ok(res.clone());
+                }
+                return Err("Command was denied or cancelled by user.".to_string());
+            }
+
+            if start.elapsed() > timeout {
+                return Err(format!("Command approval or execution timed out after {timeout_secs}s"));
+            }
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 

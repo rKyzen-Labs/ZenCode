@@ -757,21 +757,34 @@ pub fn analyze_execution_grounding(
             }
         }
 
-        // 2. Check if step was command/execution oriented (e.g. tests, build, server restart, exec)
+        // 2. Check if step was command/execution oriented (e.g. tests, build, dependencies, server restart, exec)
         let mut command_matched = false;
         let is_command_oriented = goal_lower.contains("test")
             || goal_lower.contains("restart")
             || goal_lower.contains("serve")
             || goal_lower.contains("build")
             || goal_lower.contains("run")
+            || goal_lower.contains("install")
+            || goal_lower.contains("pip")
+            || goal_lower.contains("npm")
+            || goal_lower.contains("dependenc")
             || !step.acceptance_checks.is_empty()
             || instructions_lower.contains("restart")
             || instructions_lower.contains("run ")
+            || instructions_lower.contains("install")
+            || instructions_lower.contains("pip")
+            || instructions_lower.contains("npm")
             || checks_lower.contains("test");
 
         if is_command_oriented {
             for cmd in captured_commands {
                 let cmd_lower = cmd.to_lowercase();
+                if (goal_lower.contains("install") || instructions_lower.contains("install") || goal_lower.contains("dependenc"))
+                    && (cmd_lower.contains("pip") || cmd_lower.contains("npm") || cmd_lower.contains("cargo") || cmd_lower.contains("install"))
+                {
+                    command_matched = true;
+                    break;
+                }
                 if (goal_lower.contains("test") || checks_lower.contains("test"))
                     && (cmd_lower.contains("test") || cmd_lower.contains("pytest") || cmd_lower.contains("cargo test") || cmd_lower.contains("npm test"))
                 {
@@ -787,6 +800,11 @@ pub fn analyze_execution_grounding(
                 if (goal_lower.contains("build") || checks_lower.contains("build"))
                     && (cmd_lower.contains("build") || cmd_lower.contains("cargo check") || cmd_lower.contains("tsc"))
                 {
+                    command_matched = true;
+                    break;
+                }
+                // Generic command match: if any command was executed and goal mentions run/command
+                if (goal_lower.contains("run") || instructions_lower.contains("run")) && !cmd_lower.is_empty() {
                     command_matched = true;
                     break;
                 }
@@ -955,6 +973,7 @@ pub async fn start_worker_session(
         let task_state_arc = state.task_state.clone();
         let db_arc = state.db.clone();
         let planner_client_groq = state.planner_client.clone();
+        let exec_service_groq = state.execution_service.clone();
 
         // Update state to WorkerRunning
         {
@@ -980,11 +999,12 @@ pub async fn start_worker_session(
                     &plan_summary,
                     &plan_steps,
                     preferred_groq_model.as_deref(),
+                    exec_service_groq.clone(),
                     app_clone.clone(),
                 )
                 .await
             {
-                Ok(inventory) => {
+                Ok((inventory, executed_commands)) => {
                     let mut inv_map = active_task_inventories.lock().await;
                     inv_map.insert(tid_clone.clone(), inventory.clone());
 
@@ -1038,7 +1058,7 @@ pub async fn start_worker_session(
 
                     let (files_summary, diff_excerpts) = format_inventory_for_summary(&inventory);
                     let (verified_cmds, unperformed_summary, unperformed_list) =
-                        analyze_execution_grounding(&plan_steps, &inventory, &[]);
+                        analyze_execution_grounding(&plan_steps, &inventory, &executed_commands);
 
                     // Ask Gemini (Director model) to summarize what happened with grounded verified outcomes
                     let summary = match CredentialService::get_gemini_api_key() {
@@ -1060,26 +1080,28 @@ pub async fn start_worker_session(
                                     zencode_core::verify_and_reconcile_summary(
                                         &gemini_sum,
                                         &files_modified,
-                                        &[],
+                                        &executed_commands,
                                         &unperformed_list,
                                     )
                                 }
                                 Err(e) => {
                                     eprintln!("Gemini summarization failed ({e}), falling back to inventory stats");
                                     format!(
-                                        "Completed task with Groq worker: {} file(s) modified (+{}/-{})",
+                                        "Completed task with Groq worker: {} file(s) modified (+{}/-{}) across {} executed command(s)",
                                         inventory.files.len(),
                                         inventory.total_additions,
-                                        inventory.total_deletions
+                                        inventory.total_deletions,
+                                        executed_commands.len()
                                     )
                                 }
                             }
                         }
                         Err(_) => format!(
-                            "Completed task with Groq worker: {} file(s) modified (+{}/-{})",
+                            "Completed task with Groq worker: {} file(s) modified (+{}/-{}) across {} executed command(s)",
                             inventory.files.len(),
                             inventory.total_additions,
-                            inventory.total_deletions
+                            inventory.total_deletions,
+                            executed_commands.len()
                         ),
                     };
 

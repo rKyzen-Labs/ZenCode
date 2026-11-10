@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use zencode_core::shred_file_context;
 
+use crate::exec::service::ExecutionService;
 use crate::git::{ChangeInventory, GitService};
 use crate::models::{TaskState, WorkerEventPayload};
 use crate::worker::diff::apply_diff_blocks;
@@ -185,8 +186,9 @@ impl GroqWorkerClient {
         plan_summary: &str,
         steps: &[zencode_core::PlanStep],
         preferred_model: Option<&str>,
+        execution_service: Arc<ExecutionService>,
         app_handle: AppHandle,
-    ) -> Result<ChangeInventory, String> {
+    ) -> Result<(ChangeInventory, Vec<String>), String> {
         // Pre-flight check: ensure Groq capacity is not completely exhausted
         {
             let tracker = self.quota_tracker.lock().await;
@@ -283,11 +285,10 @@ impl GroqWorkerClient {
             }
         }
 
-        // 3. System Prompt Enforcing SEARCH/REPLACE Diff-Only Output
-        let system_prompt = r#"You are an expert autonomous software engineer executing code changes in an isolated Git repository.
+        // 3. System Prompt Supporting SEARCH/REPLACE Diffs and Terminal Commands
+        let system_prompt = r#"You are an expert autonomous software engineer executing code changes and terminal commands in an isolated Git repository.
 Rules:
-1. ONLY produce targeted, surgical SEARCH/REPLACE diff blocks. DO NOT output entire rewritten files.
-2. For modifying existing files, use this exact syntax:
+1. For modifying existing files, use targeted, surgical SEARCH/REPLACE diff blocks:
 FILE: relative/path/to/file.ext
 <<<<<<< SEARCH
 [exact existing lines from the file to replace]
@@ -295,10 +296,17 @@ FILE: relative/path/to/file.ext
 [replacement lines]
 >>>>>>> REPLACE
 
-3. For creating a new file, use:
+2. For creating a new file, use:
 <<<<<<< CREATE: relative/path/to/new_file.ext
 [file content]
 >>>>>>>
+
+3. For executing terminal commands (such as installing dependencies, running build/tests, or running scripts), use:
+<<<<<<< COMMAND
+pip install requests
+>>>>>>>
+or:
+COMMAND: pip install requests
 
 4. Keep changes focused and minimal to conserve token budget.
 5. Provide a brief explanation before the diff blocks."#;
@@ -456,7 +464,94 @@ FILE: relative/path/to/file.ext
             tokio::time::sleep(Duration::from_millis(80)).await;
         }
 
-        // 6. Compute Git change inventory in worktree
+        // 6. Extract and Execute Terminal Commands (Dependencies, Builds, Tests)
+        let commands_to_run = extract_commands_for_session(&response_text, steps);
+        let mut executed_commands = Vec::new();
+
+        for cmd_line in commands_to_run {
+            if let Some((prog, args)) = tokenize_command(&cmd_line) {
+                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                let desc = format!("Run {} {}", prog, args.join(" "));
+                let req = execution_service
+                    .create_approval_request(&prog, &arg_refs, worktree_path, &desc, Some(session_id))
+                    .await;
+
+                if req.auto_approved {
+                    // Safe auto-approved: run immediately with line-by-line output streaming
+                    let _ = app_handle.emit(
+                        "worker:message",
+                        &WorkerEventPayload {
+                            session_id: session_id.to_string(),
+                            event_type: "message.part.updated".into(),
+                            content: serde_json::json!({
+                                "type": "message.part.updated",
+                                "properties": {
+                                    "part": {
+                                        "type": "tool",
+                                        "tool": "terminal",
+                                        "callID": format!("exec_{}", req.id),
+                                        "state": {
+                                            "input": { "command": format!("{} {}", req.program, req.args.join(" ")) }
+                                        }
+                                    }
+                                }
+                            }).to_string(),
+                            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                        },
+                    );
+
+                    match execution_service.execute_command(&req.id, Some(&app_handle), None).await {
+                        Ok(res) => {
+                            let exit_str = match res.exit_code {
+                                Some(0) => "exit code 0 (success)".to_string(),
+                                Some(c) => format!("exit code {c}"),
+                                None => "completed".to_string(),
+                            };
+                            executed_commands.push(format!("$ {} {} ({})", req.program, req.args.join(" "), exit_str));
+                        }
+                        Err(e) => {
+                            executed_commands.push(format!("$ {} {} (failed: {})", req.program, req.args.join(" "), e));
+                        }
+                    }
+                } else {
+                    // Requires user approval: emit permissions:approval_required for in-chat popup
+                    let _ = app_handle.emit("permissions:approval_required", &req);
+                    let _ = app_handle.emit(
+                        "worker:message",
+                        &WorkerEventPayload {
+                            session_id: session_id.to_string(),
+                            event_type: "message.part.updated".into(),
+                            content: serde_json::json!({
+                                "type": "message.part.updated",
+                                "properties": {
+                                    "part": {
+                                        "type": "reasoning",
+                                        "text": format!("Awaiting user approval to run command: {} {}", req.program, req.args.join(" "))
+                                    }
+                                }
+                            }).to_string(),
+                            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                        },
+                    );
+
+                    match execution_service.wait_for_command_result(&req.id, 180).await {
+                        Ok(res) => {
+                            let exit_str = match res.exit_code {
+                                Some(0) => "exit code 0 (success)".to_string(),
+                                Some(c) => format!("exit code {c}"),
+                                None => "completed".to_string(),
+                            };
+                            executed_commands.push(format!("$ {} {} ({})", req.program, req.args.join(" "), exit_str));
+                        }
+                        Err(e) => {
+                            executed_commands.push(format!("$ {} {} (skipped: {})", req.program, req.args.join(" "), e));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 7. Compute Git change inventory in worktree
         let inventory = GitService::get_worktree_diff(worktree_path)
             .unwrap_or_else(|_| ChangeInventory {
                 worktree_path: worktree_path.to_string_lossy().to_string(),
@@ -479,8 +574,159 @@ FILE: relative/path/to/file.ext
         // Emit session complete
         let _ = app_handle.emit("worker:status", &TaskState::AwaitingReview);
 
-        Ok(inventory)
+        Ok((inventory, executed_commands))
     }
+}
+
+/// Tokenizes a shell command string into program and arguments, respecting quotes.
+pub fn tokenize_command(cmd_str: &str) -> Option<(String, Vec<String>)> {
+    let trimmed = cmd_str.trim().trim_start_matches('$').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+
+    for c in trimmed.chars() {
+        if let Some(q) = in_quote {
+            if c == q {
+                in_quote = None;
+            } else {
+                current.push(c);
+            }
+        } else if c == '"' || c == '\'' {
+            in_quote = Some(c);
+        } else if c.is_whitespace() {
+            if !current.is_empty() {
+                tokens.push(current.clone());
+                current.clear();
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let program = tokens.remove(0);
+    Some((program, tokens))
+}
+
+/// Extracts commands from model response text (COMMAND blocks or COMMAND: lines)
+/// and also checks plan steps for explicit command requirements.
+pub fn extract_commands_for_session(
+    response_text: &str,
+    steps: &[zencode_core::PlanStep],
+) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // 1. Extract from model response text
+    let lines: Vec<&str> = response_text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+
+        // Check for <<<<<<< COMMAND block
+        if line.starts_with("<<<<<<< COMMAND") {
+            i += 1;
+            let mut cmd_lines = Vec::new();
+            while i < lines.len() && !lines[i].trim().starts_with(">>>>>>>") {
+                let cl = lines[i].trim();
+                if !cl.is_empty() {
+                    cmd_lines.push(cl);
+                }
+                i += 1;
+            }
+            if i < lines.len() && lines[i].trim().starts_with(">>>>>>>") {
+                i += 1;
+            }
+            for cmd in cmd_lines {
+                let clean_cmd = cmd.trim_start_matches('$').trim().to_string();
+                if !clean_cmd.is_empty() && seen.insert(clean_cmd.clone()) {
+                    commands.push(clean_cmd);
+                }
+            }
+            continue;
+        }
+
+        // Check for COMMAND: line
+        if let Some(rest) = line.strip_prefix("COMMAND:").or_else(|| line.strip_prefix("Command:")) {
+            let clean_cmd = rest.trim().trim_matches('`').trim_start_matches('$').trim().to_string();
+            if !clean_cmd.is_empty() && seen.insert(clean_cmd.clone()) {
+                commands.push(clean_cmd);
+            }
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    // 2. Extract from plan steps if not already covered
+    let known_binaries = [
+        "pip", "pip3", "npm", "npx", "pnpm", "yarn", "cargo", "pytest",
+        "python", "python3", "node", "make", "poetry", "uv"
+    ];
+
+    for step in steps {
+        let candidates: Vec<&str> = step.instructions.iter().map(|s| s.as_str())
+            .chain(std::iter::once(step.goal.as_str()))
+            .collect();
+
+        for candidate in candidates {
+            let trimmed = candidate.trim();
+            for bin in &known_binaries {
+                // Check if candidate starts with binary or contains "$ <bin>" or "run <bin>"
+                let match_idx = if trimmed.starts_with(bin) {
+                    Some(0)
+                } else if let Some(pos) = trimmed.find(&format!("$ {bin}")) {
+                    Some(pos + 2)
+                } else if let Some(pos) = trimmed.to_lowercase().find(&format!("run {bin}")) {
+                    Some(pos + 4)
+                } else if let Some(pos) = trimmed.to_lowercase().find(&format!("execute {bin}")) {
+                    Some(pos + 8)
+                } else {
+                    None
+                };
+
+                if let Some(start) = match_idx {
+                    let cmd_slice = trimmed[start..].trim();
+                    let end_pos = cmd_slice.find('\n').or_else(|| cmd_slice.find(';')).unwrap_or(cmd_slice.len());
+                    let mut cmd = cmd_slice[..end_pos].trim().trim_matches('`').trim_matches('"').trim_matches('\'').to_string();
+                    if cmd.ends_with('.') {
+                        cmd.pop();
+                    }
+
+                    // Clean natural language suffixes
+                    let trailing_patterns = [
+                        " in terminal", " in console", " for me", " in the background",
+                        " in this project", " in the workspace", " please"
+                    ];
+                    for tp in &trailing_patterns {
+                        if let Some(pos) = cmd.to_lowercase().find(tp) {
+                            cmd = cmd[..pos].trim().to_string();
+                        }
+                    }
+
+                    let clean = cmd.trim().to_string();
+                    if !clean.is_empty() && seen.insert(clean.clone()) {
+                        commands.push(clean);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    commands
 }
 
 fn collect_worktree_files(
@@ -533,5 +779,48 @@ mod tests {
         // Preferred model respects rate limits
         let preferred = quota.select_available_model(Some(GROQ_MODELS_ROTATION[0])).await;
         assert_eq!(preferred, GROQ_MODELS_ROTATION[2]); // preferred is in cooldown, stays on tertiary
+    }
+
+    #[test]
+    fn test_tokenize_command_basic_and_quotes() {
+        let (prog, args) = tokenize_command("pip install requests").unwrap();
+        assert_eq!(prog, "pip");
+        assert_eq!(args, vec!["install", "requests"]);
+
+        let (prog2, args2) = tokenize_command("$ cargo test --lib -- \"custom filter\"").unwrap();
+        assert_eq!(prog2, "cargo");
+        assert_eq!(args2, vec!["test", "--lib", "--", "custom filter"]);
+
+        assert!(tokenize_command("").is_none());
+        assert!(tokenize_command("   ").is_none());
+    }
+
+    #[test]
+    fn test_extract_commands_for_session_from_diff_and_steps() {
+        let response_text = r#"
+Here is what we will do:
+<<<<<<< COMMAND
+pip install requests
+>>>>>>>
+
+And also:
+COMMAND: pytest tests/test_calc.py
+"#;
+
+        let steps = vec![
+            zencode_core::PlanStep {
+                id: "step-1".into(),
+                goal: "Install dependencies".into(),
+                likely_files: vec![],
+                instructions: vec!["Run pip install -r requirements.txt in terminal".into()],
+                depends_on: vec![],
+                acceptance_checks: vec![],
+            },
+        ];
+
+        let cmds = extract_commands_for_session(response_text, &steps);
+        assert!(cmds.contains(&"pip install requests".to_string()));
+        assert!(cmds.contains(&"pytest tests/test_calc.py".to_string()));
+        assert!(cmds.contains(&"pip install -r requirements.txt".to_string()));
     }
 }
