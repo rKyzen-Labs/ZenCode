@@ -18,7 +18,7 @@ jobs:
           - platform: 'windows-latest'
             args: '--bundles nsis'
           - platform: 'ubuntu-22.04'
-            args: '--bundles deb,appimage'
+            args: '--bundles deb'
           - platform: 'macos-latest'
             args: '--bundles dmg --target universal-apple-darwin'
 
@@ -47,7 +47,7 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev rpm
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libfuse2
 
       - name: Install Node dependencies
         run: pnpm install
@@ -55,32 +55,11 @@ jobs:
       - name: Build frontend
         run: pnpm --filter zencode-desktop build
 
-      - name: Build Tauri app (.exe, .deb, .rpm, .dmg)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: apps/desktop
-          tauriScript: pnpm tauri
-          tagName: ${{ github.ref_name }}
-          releaseName: 'ZenCode ${{ github.ref_name }}'
-          releaseBody: |
-            ZenCode: The director-supervised, safety-first autonomous AI coding assistant.
-            
-            ### Included Release Assets:
-            - **Linux ELF Binary**: `zencode-linux-x86_64` (Native 64-bit ELF standalone executable)
-            - **Debian / Ubuntu**: `zencode_${{ github.ref_name }}_amd64.deb` (Debian package with auto-resolved dependencies)
-            - **Universal Linux**: `zencode_${{ github.ref_name }}_amd64.AppImage`
-            - **Windows**: `Zencode_${{ github.ref_name }}_x64-setup.exe` (NSIS Installer with automatic WebView2 Bootstrapper download)
-            - **macOS**: `Zencode_${{ github.ref_name }}_universal.dmg` (Universal binary for both Apple Silicon M-series & Intel Macs)
-          releaseDraft: false
-          prerelease: false
-          args: ${{ matrix.args }}
+      - name: Build Tauri app
+        run: pnpm --filter zencode-desktop tauri build ${{ matrix.args }}
 
-      - name: Upload Linux ELF binary and artifacts
+      - name: Prepare Linux ELF binary
         if: matrix.platform == 'ubuntu-22.04'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -f "target/release/zencode-desktop" ]; then
             cp target/release/zencode-desktop target/release/zencode-linux-x86_64
@@ -88,17 +67,42 @@ jobs:
             mkdir -p target/release
             cp apps/desktop/src-tauri/target/release/zencode-desktop target/release/zencode-linux-x86_64
           fi
-          chmod +x target/release/zencode-linux-x86_64
-          gh release upload ${{ github.ref_name }} target/release/zencode-linux-x86_64 --clobber || true
+          chmod +x target/release/zencode-linux-x86_64 || true
 
-      - name: Archive Linux ELF and Debian package
-        if: matrix.platform == 'ubuntu-22.04'
+      - name: Publish Release Assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: 'ZenCode ${{ github.ref_name }}'
+          body: |
+            ZenCode: The director-supervised, safety-first autonomous AI coding assistant.
+            
+            ### Included Release Assets:
+            - **Linux ELF Binary**: `zencode-linux-x86_64` (Native 64-bit ELF standalone executable)
+            - **Debian / Ubuntu**: `zencode_${{ github.ref_name }}_amd64.deb` (Debian package with auto-resolved dependencies)
+            - **Windows**: `Zencode_${{ github.ref_name }}_x64-setup.exe` (NSIS Installer with automatic WebView2 Bootstrapper download)
+            - **macOS**: `Zencode_${{ github.ref_name }}_universal.dmg` (Universal binary for both Apple Silicon M-series & Intel Macs)
+          files: |
+            target/release/zencode-linux-x86_64
+            target/release/bundle/deb/*.deb
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/release/bundle/deb/*.deb
+            apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
+
+      - name: Archive Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: zencode-linux-x86_64-binaries
+          name: zencode-${{ matrix.platform }}-build
           path: |
             target/release/zencode-linux-x86_64
             target/release/bundle/deb/*.deb
-            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/dmg/*.dmg
             apps/desktop/src-tauri/target/release/bundle/deb/*.deb
-            apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+            apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+            apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
