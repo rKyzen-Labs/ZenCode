@@ -972,50 +972,88 @@ export default function App() {
     setChatMessages([]);
   };
 
-// Shell command detector helper: recognizes $ prefix or common CLI tools
+// Shell command detector helper: recognizes $ prefix, direct CLI tools, or natural language run requests
 function parseShellCommand(input: string): { program: string; args: string[] } | null {
   const trimmed = input.trim();
   if (!trimmed || trimmed.includes('\n')) return null;
 
-  const startsWithDollar = trimmed.startsWith('$');
-  const cleanCmd = startsWithDollar ? trimmed.replace(/^\$\s*/, '') : trimmed;
+  const knownBinaries = new Set([
+    'pip', 'pip3', 'cargo', 'npm', 'npx', 'pnpm', 'yarn', 'git', 'python',
+    'python3', 'node', 'pytest', 'make', 'docker', 'cmd', 'echo', 'poetry',
+    'uv', 'pipenv', 'flask'
+  ]);
 
-  const tokens: string[] = [];
-  let current = '';
-  let inQuote: string | null = null;
-  for (let i = 0; i < cleanCmd.length; i++) {
-    const char = cleanCmd[i];
-    if (inQuote) {
-      if (char === inQuote) {
-        inQuote = null;
+  const tokenize = (cmdStr: string): string[] => {
+    const tokens: string[] = [];
+    let current = '';
+    let inQuote: string | null = null;
+    for (let i = 0; i < cmdStr.length; i++) {
+      const char = cmdStr[i];
+      if (inQuote) {
+        if (char === inQuote) {
+          inQuote = null;
+        } else {
+          current += char;
+        }
+      } else if (char === '"' || char === "'") {
+        inQuote = char;
+      } else if (/\s/.test(char)) {
+        if (current.length > 0) {
+          tokens.push(current);
+          current = '';
+        }
       } else {
         current += char;
       }
-    } else if (char === '"' || char === "'") {
-      inQuote = char;
-    } else if (/\s/.test(char)) {
-      if (current.length > 0) {
-        tokens.push(current);
-        current = '';
-      }
-    } else {
-      current += char;
+    }
+    if (current.length > 0) tokens.push(current);
+    return tokens;
+  };
+
+  // 1. Direct command or $ command
+  const startsWithDollar = trimmed.startsWith('$');
+  const directCandidate = startsWithDollar ? trimmed.replace(/^\$\s*/, '') : trimmed;
+  const directTokens = tokenize(directCandidate);
+  if (directTokens.length > 0) {
+    const firstProg = directTokens[0].toLowerCase();
+    if (startsWithDollar || knownBinaries.has(firstProg)) {
+      return {
+        program: directTokens[0],
+        args: directTokens.slice(1),
+      };
     }
   }
-  if (current.length > 0) tokens.push(current);
-  if (tokens.length === 0) return null;
 
-  const prog = tokens[0].toLowerCase();
-  const knownBinaries = new Set([
-    'pip', 'pip3', 'cargo', 'npm', 'npx', 'pnpm', 'yarn', 'git', 'python',
-    'python3', 'node', 'pytest', 'make', 'docker', 'cmd', 'echo'
-  ]);
+  // 2. Natural language wrapper (e.g. 'In this project, run pip install requests for me.')
+  const naturalPattern = /(?:run|execute|install|start|launch)\s+(?:the\s+command\s+|command\s+)?([`'"]?[a-zA-Z0-9_\-./\\]+[^\n]+)/i;
+  const match = naturalPattern.exec(trimmed);
+  if (match) {
+    let candidate = match[1].replace(/[`'"]/g, '').trim();
+    candidate = candidate.replace(/\s+for\s+me[.!?;]*$/i, '');
+    candidate = candidate.replace(/\s+please[.!?;]*$/i, '');
+    candidate = candidate.replace(/[!?;]+$/, '');
+    candidate = candidate.replace(/\.$/, '');
 
-  if (startsWithDollar || knownBinaries.has(prog)) {
-    return {
-      program: tokens[0],
-      args: tokens.slice(1),
-    };
+    const candidateTokens = tokenize(candidate);
+    if (candidateTokens.length > 0 && knownBinaries.has(candidateTokens[0].toLowerCase())) {
+      return {
+        program: candidateTokens[0],
+        args: candidateTokens.slice(1),
+      };
+    }
+
+    for (const bin of knownBinaries) {
+      const idx = candidate.toLowerCase().indexOf(`${bin} `);
+      if (idx !== -1) {
+        const subTokens = tokenize(candidate.slice(idx));
+        if (subTokens.length > 0 && subTokens[0].toLowerCase() === bin) {
+          return {
+            program: subTokens[0],
+            args: subTokens.slice(1),
+          };
+        }
+      }
+    }
   }
 
   return null;
@@ -1272,6 +1310,10 @@ function parseShellCommand(input: string): { program: string; args: string[] } |
                 gitAutoInitNotice={gitAutoInitNotice}
                 isLoading={isLoading}
                 error={error}
+                isCommandRunning={isCommandRunning}
+                activeCommandProgram={activeProgram}
+                activeCommandArgs={activeArgs}
+                commandOutputLines={commandOutputLines}
               />
 
               {/* Terminal if active */}

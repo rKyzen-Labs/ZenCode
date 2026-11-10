@@ -38,6 +38,7 @@ import type {
   CommandRequest,
   QuotaUpdateEvent,
   ChatMessage,
+  ProcessOutputEvent,
 } from '../types';
 
 interface ActivityItem {
@@ -88,6 +89,10 @@ interface ChatThreadProps {
   isLoading?: boolean;
   error?: string | null;
   onOpenOnboarding?: (step?: 1 | 2 | 3 | 4) => void;
+  isCommandRunning?: boolean;
+  activeCommandProgram?: string;
+  activeCommandArgs?: string[];
+  commandOutputLines?: ProcessOutputEvent[];
 }
 
 const AVAILABLE_DIRECTOR_MODELS = [
@@ -404,9 +409,11 @@ const ConversationStepsCard: FC<ConversationStepsProps> = ({
         <div
           data-testid="live-activity-line"
           onClick={() => setIsExpanded(!isExpanded)}
-          className="inline-flex items-center gap-2 text-xs text-[#141413] hover:text-[#c96442] font-medium cursor-pointer transition-colors select-none py-0.5 group"
+          className="relative overflow-hidden inline-flex items-center gap-2 text-xs text-[#141413] hover:text-[#c96442] font-medium cursor-pointer transition-colors select-none py-1 px-2.5 rounded-lg bg-[#ede9de]/60 border border-[#dad9d4] group shadow-sm"
         >
-          <div className="flex items-center gap-2">
+          {/* Shimmer sweep effect while processing */}
+          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-[#c96442]/15 to-transparent bg-[length:200%_100%] animate-shimmer pointer-events-none" />
+          <div className="flex items-center gap-2 relative z-10">
             <span className="relative flex h-2 w-2">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#c96442] opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2 w-2 bg-[#c96442]"></span>
@@ -1079,6 +1086,10 @@ export const ChatThread: FC<ChatThreadProps> = ({
   isLoading = false,
   error = null,
   onOpenOnboarding,
+  isCommandRunning = false,
+  activeCommandProgram = '',
+  activeCommandArgs = [],
+  commandOutputLines = [],
 }) => {
   // Worker selection state per workspace (Local vs Groq BYOK)
   const [workerType, setWorkerType] = useState<'local' | 'groq'>('local');
@@ -1373,6 +1384,25 @@ export const ChatThread: FC<ChatThreadProps> = ({
           <div className="flex items-center gap-2 py-1 text-xs text-[#83827d] font-sans select-none">
             <GitBranch className="w-3.5 h-3.5 text-[#83827d] shrink-0" />
             <span>Git initialized.</span>
+          </div>
+        )}
+
+        {/* Shimmer Skeleton Loading State while fetching messages from SQLite */}
+        {isLoading && (!chatMessages || chatMessages.length === 0) && (
+          <div className="w-full space-y-6 py-4 select-none">
+            <div className="flex justify-end">
+              <div className="w-2/3 h-16 rounded-2xl bg-[#ede9de] relative overflow-hidden border border-[#dad9d4]/40">
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/50 to-transparent bg-[length:200%_100%] animate-shimmer" />
+              </div>
+            </div>
+            <div className="space-y-3">
+              <div className="w-1/4 h-4 rounded bg-[#ede9de] relative overflow-hidden">
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/50 to-transparent bg-[length:200%_100%] animate-shimmer" />
+              </div>
+              <div className="w-full h-24 rounded-xl bg-[#ede9de]/70 relative overflow-hidden border border-[#dad9d4]/40">
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-[#c96442]/10 to-transparent bg-[length:200%_100%] animate-shimmer" />
+              </div>
+            </div>
           </div>
         )}
 
@@ -1714,6 +1744,56 @@ export const ChatThread: FC<ChatThreadProps> = ({
             </div>
           );
         })()}
+
+        {/* ============================================================== */}
+        {/* LIVE RUNNING COMMAND CARD WITH SHIMMER EFFECT                  */}
+        {/* ============================================================== */}
+        {isCommandRunning && (
+          <div
+            data-testid="live-running-command-card"
+            className="w-full relative overflow-hidden rounded-xl border border-[#c96442]/30 bg-[#fbfaf7] p-4 space-y-2.5 select-none shadow-sm"
+          >
+            {/* Shimmer sweep animation */}
+            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-[#c96442]/12 to-transparent bg-[length:200%_100%] animate-shimmer pointer-events-none" />
+
+            <div className="flex items-center justify-between relative z-10">
+              <div className="flex items-center gap-2.5">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#c96442] opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-[#c96442]"></span>
+                </span>
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c96442]" />
+                <span className="text-xs font-semibold text-[#141413] font-sans">
+                  Executing command in workspace...
+                </span>
+              </div>
+              <span className="text-[11px] font-mono text-[#83827d] bg-[#ede9de] px-2 py-0.5 rounded">
+                Job Object
+              </span>
+            </div>
+
+            <div className="font-mono text-xs text-[#141413] bg-[#ede9de] px-3 py-2 rounded-lg flex items-center gap-2 border border-[#dad9d4] relative z-10">
+              <span className="text-[#83827d] font-bold select-none">$</span>
+              <span className="font-semibold text-[#141413]">{activeCommandProgram}</span>
+              <span className="text-[#535146]">{activeCommandArgs?.join(' ')}</span>
+            </div>
+
+            {commandOutputLines && commandOutputLines.length > 0 && (
+              <div className="font-mono text-[11px] bg-[#ede9de]/60 p-2.5 rounded-lg max-h-32 overflow-y-auto space-y-1 border border-[#dad9d4]/60 relative z-10">
+                {commandOutputLines.slice(-6).map((item, idx) => (
+                  <div
+                    key={idx}
+                    className={`truncate leading-relaxed font-mono ${
+                      item.stream === 'stderr' ? 'text-rose-700' : 'text-[#3d3929]'
+                    }`}
+                  >
+                    {item.line}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div ref={messagesEndRef} />
       </div>

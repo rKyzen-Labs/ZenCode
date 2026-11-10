@@ -52,3 +52,39 @@ code, pre, .font-mono {
 ::-webkit-scrollbar-thumb:hover {
   background: #c5c4bd;
 }
+
+/* Shimmer wave effect for loading and active processing */
+@keyframes shimmer-sweep {
+  0% {
+    transform: translateX(-150%);
+  }
+  100% {
+    transform: translateX(150%);
+  }
+}
+
+.animate-shimmer-sweep {
+  animation: shimmer-sweep 2s infinite cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.shimmer-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.shimmer-card::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(201, 100, 66, 0.08) 50%,
+    transparent 100%
+  );
+  animation: shimmer-sweep 2.2s infinite ease-in-out;
+  pointer-events: none;
+}

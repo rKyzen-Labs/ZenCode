@@ -47,7 +47,7 @@ export const LandingPage: FC<LandingPageProps> = ({
 }) => {
   const [promptInput, setPromptInput] = useState('');
   const [recentChats, setRecentChats] = useState<ChatSummaryRecord[]>([]);
-  const [_isLoadingChats, setIsLoadingChats] = useState(false);
+  const [isLoadingChats, setIsLoadingChats] = useState(false);
   const [_workerType, setWorkerType] = useState<'local' | 'groq'>('local');
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
@@ -283,7 +283,18 @@ export const LandingPage: FC<LandingPageProps> = ({
         </div>
 
         <div className="flex-1 overflow-y-auto space-y-0.5 pr-1">
-          {recentChats.length === 0 ? (
+          {isLoadingChats ? (
+            <div className="space-y-2 py-1">
+              {[1, 2, 3, 4].map((i) => (
+                <div
+                  key={i}
+                  className="h-10 w-full rounded-lg bg-[#ede9de] relative overflow-hidden border border-[#dad9d4]/40"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/50 to-transparent bg-[length:200%_100%] animate-shimmer" />
+                </div>
+              ))}
+            </div>
+          ) : recentChats.length === 0 ? (
             <div className="py-8 text-center text-[#83827d] text-xs font-sans">
               No recent chats found. Start a new prompt above!
             </div>
