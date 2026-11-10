@@ -1673,31 +1673,6 @@ export const ChatThread: FC<ChatThreadProps> = ({
                         />
                       )}
 
-                      {/* Running command status right after Files Changed box with TEXT SHIMMER */}
-                      {isCommandRunning && isLastMessage && (
-                        <button
-                          type="button"
-                          onClick={() => onOpenTerminalTab?.()}
-                          className="flex items-center gap-2.5 px-3.5 py-2.5 bg-[#ede9de]/70 hover:bg-[#ede9de] border border-[#c96442]/30 hover:border-[#c96442]/60 rounded-xl text-xs font-sans shadow-sm transition-all cursor-pointer select-none group w-fit"
-                          title="Click to view terminal output in tab"
-                        >
-                          <span className="relative flex h-2 w-2 shrink-0">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#c96442] opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-2 w-2 bg-[#c96442]"></span>
-                          </span>
-                          <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c96442] shrink-0" />
-                          <span className="font-semibold text-shimmer">
-                            Running command:
-                          </span>
-                          <span className="font-mono text-shimmer font-medium truncate">
-                            $ {activeCommandProgram} {activeCommandArgs?.join(' ')}
-                          </span>
-                          <span className="text-[11px] text-[#83827d] group-hover:text-[#c96442] font-sans ml-1 underline decoration-[#dad9d4]">
-                            View output in tab →
-                          </span>
-                        </button>
-                      )}
-
                       {/* Copy Output Button */}
                       <div className="flex items-center justify-end pr-1 pt-1">
                         <button

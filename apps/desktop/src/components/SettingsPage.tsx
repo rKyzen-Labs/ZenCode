@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type FC } from 'react';
+import { useState, useEffect, useRef, Fragment, type FC } from 'react';
 import {
   Cpu,
   Check,
@@ -8,7 +8,17 @@ import {
   Loader2,
   AlertTriangle,
   FolderPlus,
+  Keyboard,
+  RotateCcw,
 } from 'lucide-react';
+import {
+  DEFAULT_KEYBINDINGS,
+  loadKeybindings,
+  saveKeybinding,
+  resetAllKeybindings,
+  formatKeyDisplay,
+  parseKeyboardEventToCombo,
+} from '../lib/keybindings';
 import {
   listWorkspaces,
   removeWorkspace,
@@ -54,7 +64,8 @@ type SettingsSection =
   | 'apikey'
   | 'quota'
   | 'worker'
-  | 'mode';
+  | 'mode'
+  | 'keybindings';
 
 const GROQ_MODELS = [
   { id: 'openai/gpt-oss-120b', name: 'OpenAI GPT-OSS 120B', desc: 'Highest reasoning capability (Primary)' },
@@ -123,6 +134,37 @@ export const SettingsPage: FC<SettingsPageProps> = ({
   const quotaRef = useRef<HTMLDivElement>(null);
   const workerRef = useRef<HTMLDivElement>(null);
   const modeRef = useRef<HTMLDivElement>(null);
+  const keybindingsRef = useRef<HTMLDivElement>(null);
+
+  // Keybindings state
+  const [keybindings, setKeybindings] = useState<Record<string, string>>(() => loadKeybindings());
+  const [recordingId, setRecordingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!recordingId) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (e.key === 'Escape') {
+        setRecordingId(null);
+        return;
+      }
+
+      const combo = parseKeyboardEventToCombo(e);
+      if (combo) {
+        const updated = saveKeybinding(recordingId, combo);
+        setKeybindings(updated);
+        setRecordingId(null);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+    };
+  }, [recordingId]);
 
   const scrollToSection = (section: SettingsSection) => {
     setActiveSection(section);
@@ -133,6 +175,7 @@ export const SettingsPage: FC<SettingsPageProps> = ({
       quota: quotaRef,
       worker: workerRef,
       mode: modeRef,
+      keybindings: keybindingsRef,
     };
     refMap[section]?.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
@@ -489,6 +532,18 @@ export const SettingsPage: FC<SettingsPageProps> = ({
             }`}
           >
             Mode
+          </button>
+
+          <button
+            type="button"
+            onClick={() => scrollToSection('keybindings')}
+            className={`w-full text-left px-3 py-2 rounded-lg text-xs font-sans transition-colors cursor-pointer ${
+              activeSection === 'keybindings'
+                ? 'bg-[#ede9de] text-[#141413] font-medium'
+                : 'text-[#535146] hover:text-[#141413] hover:bg-[#ede9de]/50'
+            }`}
+          >
+            Keybindings
           </button>
         </nav>
       </aside>
@@ -1210,6 +1265,114 @@ export const SettingsPage: FC<SettingsPageProps> = ({
                   Autonomous execution for allowlisted test and build commands without interrupting you.
                 </p>
               </div>
+            </div>
+          </section>
+
+          {/* ============================================================== */}
+          {/* SECTION 7: KEYBINDINGS                                         */}
+          {/* ============================================================== */}
+          <section ref={keybindingsRef} className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Keyboard className="w-4 h-4 text-[#c96442]" />
+                  <h2 className="text-base font-semibold text-[#141413] font-sans">Keybindings</h2>
+                </div>
+                <p className="text-[11px] text-[#83827d]">
+                  Customize keyboard shortcuts. Click "Record" and press your preferred key combination.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const defs = resetAllKeybindings();
+                  setKeybindings(defs);
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#ede9de] hover:bg-[#dad9d4] text-[#141413] text-xs font-medium rounded-lg transition-colors border border-[#dad9d4]"
+                title="Reset all shortcuts to defaults"
+              >
+                <RotateCcw className="w-3 h-3 text-[#83827d]" />
+                <span>Reset All to Defaults</span>
+              </button>
+            </div>
+
+            <div className="bg-[#faf9f5] border border-[#dad9d4] rounded-xl divide-y divide-[#dad9d4]/60 overflow-hidden shadow-sm">
+              {DEFAULT_KEYBINDINGS.map((item) => {
+                const currentCombo = keybindings[item.id] || item.defaultCombo;
+                const isCustom = currentCombo !== item.defaultCombo;
+                const isRecording = recordingId === item.id;
+                const keys = formatKeyDisplay(currentCombo);
+
+                return (
+                  <div
+                    key={item.id}
+                    className={`flex items-center justify-between px-4 py-3 transition-colors ${
+                      isRecording ? 'bg-[#ede9de]/80' : 'hover:bg-[#ede9de]/30'
+                    }`}
+                  >
+                    <div className="pr-4 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-[#141413]">{item.label}</span>
+                        <span className="text-[9.5px] uppercase font-mono px-1.5 py-0.5 rounded bg-[#ede9de] text-[#83827d]">
+                          {item.category}
+                        </span>
+                        {isCustom && (
+                          <span className="text-[9.5px] font-sans px-1.5 py-0.5 rounded bg-[#c96442]/10 text-[#c96442] font-medium">
+                            Custom
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-[#83827d] truncate mt-0.5">{item.description}</p>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {isRecording ? (
+                        <div className="flex items-center gap-2 px-3 py-1 bg-[#141413] text-[#faf9f5] text-xs font-mono rounded-lg shadow-sm animate-pulse">
+                          <span>Press keys... (Esc to cancel)</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1">
+                          {keys.map((k, i) => (
+                            <Fragment key={i}>
+                              <kbd className="min-w-[24px] px-2 py-1 rounded bg-[#f7f6f2] border border-[#dad9d4] shadow-sm text-xs font-mono font-medium text-[#141413] text-center inline-block">
+                                {k}
+                              </kbd>
+                              {i < keys.length - 1 && (
+                                <span className="text-[#83827d] text-[10px]">+</span>
+                              )}
+                            </Fragment>
+                          ))}
+                        </div>
+                      )}
+
+                      {!isRecording && (
+                        <button
+                          type="button"
+                          onClick={() => setRecordingId(item.id)}
+                          className="px-2.5 py-1 bg-[#ede9de] hover:bg-[#dad9d4] text-[#141413] text-[11px] font-medium rounded-lg transition-colors border border-[#dad9d4] ml-2"
+                        >
+                          Record
+                        </button>
+                      )}
+
+                      {isCustom && !isRecording && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updated = saveKeybinding(item.id, item.defaultCombo);
+                            setKeybindings(updated);
+                          }}
+                          title="Reset to default key"
+                          className="p-1 text-[#83827d] hover:text-[#141413] hover:bg-[#ede9de] rounded transition-colors"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </section>
         </div>

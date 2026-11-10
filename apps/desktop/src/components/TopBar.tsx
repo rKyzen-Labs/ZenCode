@@ -8,6 +8,7 @@ import {
   Minus,
   Square,
   Loader2,
+  Keyboard,
 } from 'lucide-react';
 import type { QuotaUpdateEvent } from '../types';
 import { windowMinimize, windowToggleMaximize, windowClose } from '../lib/ipc';
@@ -28,6 +29,7 @@ interface TopBarProps {
   onGoHome: () => void;
   onGoSearch: () => void;
   onGoSettings: () => void;
+  onOpenShortcuts?: () => void;
   quotaState: QuotaUpdateEvent | null;
   isTaskRunning?: boolean;
   runningChatId?: string | null;
@@ -43,6 +45,7 @@ export const TopBar: FC<TopBarProps> = ({
   onGoHome,
   onGoSearch,
   onGoSettings,
+  onOpenShortcuts,
   quotaState,
   isTaskRunning = false,
   runningChatId = null,
@@ -92,7 +95,7 @@ export const TopBar: FC<TopBarProps> = ({
         <button
           type="button"
           onClick={onGoSettings}
-          title="Settings"
+          title="Settings (Ctrl+,)"
           className={`w-8 h-8 flex items-center justify-center rounded-md transition-colors cursor-pointer ${
             activeView === 'settings'
               ? 'bg-[#e9e6dc] text-[#141413]'
@@ -118,7 +121,7 @@ export const TopBar: FC<TopBarProps> = ({
         <button
           type="button"
           onClick={onGoSearch}
-          title="Search all chats & workspaces"
+          title="Search all chats & workspaces (Ctrl+K)"
           className={`w-8 h-8 flex items-center justify-center rounded-md transition-colors cursor-pointer ${
             activeView === 'search'
               ? 'bg-[#e9e6dc] text-[#141413]'
@@ -171,7 +174,7 @@ export const TopBar: FC<TopBarProps> = ({
                   e.stopPropagation();
                   onCloseTab(tab.id);
                 }}
-                title="Close chat tab"
+                title="Close chat tab (Ctrl+W)"
                 className="opacity-0 group-hover:opacity-100 w-4 h-4 flex items-center justify-center rounded text-[#83827d] hover:text-[#141413] hover:bg-[#dad9d4] transition-all shrink-0 ml-0.5"
               >
                 <X className="w-3 h-3" />
@@ -183,7 +186,7 @@ export const TopBar: FC<TopBarProps> = ({
         <button
           type="button"
           onClick={onNewChat}
-          title="New Chat"
+          title="New Chat (Ctrl+T)"
           className="w-7 h-7 flex items-center justify-center rounded-md text-[#83827d] hover:text-[#141413] hover:bg-[#ede9de] transition-colors shrink-0 cursor-pointer"
         >
           <Plus className="w-4 h-4" />
@@ -290,6 +293,18 @@ export const TopBar: FC<TopBarProps> = ({
             </div>
           )}
         </div>
+
+        {/* Shortcuts Cheat Sheet Button */}
+        {onOpenShortcuts && (
+          <button
+            type="button"
+            onClick={onOpenShortcuts}
+            title="Keyboard Shortcuts (Ctrl+/)"
+            className="w-7 h-7 flex items-center justify-center text-[#83827d] hover:text-[#141413] hover:bg-[#ede9de] rounded-md transition-colors cursor-pointer"
+          >
+            <Keyboard className="w-3.5 h-3.5" />
+          </button>
+        )}
 
         {/* Window controls */}
         <div className="flex items-center gap-1 ml-1">

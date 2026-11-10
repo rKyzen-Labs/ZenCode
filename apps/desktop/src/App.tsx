@@ -64,6 +64,8 @@ import { SearchPage } from './components/SearchPage';
 import { SettingsPage } from './components/SettingsPage';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { AdvisoryPreviewModal } from './components/AdvisoryPreviewModal';
+import { ShortcutsModal } from './components/ShortcutsModal';
+import { loadKeybindings, matchesKeybinding } from './lib/keybindings';
 
 export default function App() {
   // Navigation View State: 'landing' | 'chat' | 'search' | 'settings'
@@ -72,6 +74,9 @@ export default function App() {
   // Step 3 Onboarding Wizard State
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState<1 | 2 | 3 | 4>(1);
+
+  // Keyboard Shortcuts Modal State
+  const [isShortcutsModalOpen, setIsShortcutsModalOpen] = useState(false);
 
   // Open Chat Sessions (TitleBar Tabs)
   const [openChatTabs, setOpenChatTabs] = useState<ChatTabItem[]>([]);
@@ -970,6 +975,120 @@ export default function App() {
     setChatMessages([]);
   };
 
+  // Global Keyboard Shortcuts (Customizable via Settings or Ctrl+/)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const bindings = loadKeybindings();
+
+      // Escape: close shortcuts modal or dismiss panels
+      if (e.key === 'Escape') {
+        if (isShortcutsModalOpen) {
+          setIsShortcutsModalOpen(false);
+          e.preventDefault();
+          return;
+        }
+      }
+
+      // Help modal: Ctrl + /
+      if (matchesKeybinding(e, bindings.shortcuts_help || 'ctrl+/')) {
+        e.preventDefault();
+        setIsShortcutsModalOpen((prev) => !prev);
+        return;
+      }
+
+      // New Chat: Ctrl + T
+      if (matchesKeybinding(e, bindings.new_chat || 'ctrl+t')) {
+        e.preventDefault();
+        handleNewChat();
+        return;
+      }
+
+      // Close Tab: Ctrl + W
+      if (matchesKeybinding(e, bindings.close_tab || 'ctrl+w')) {
+        e.preventDefault();
+        if (activeChatIdRef.current) {
+          handleCloseTab(activeChatIdRef.current);
+        }
+        return;
+      }
+
+      // Next Tab: Ctrl + Tab
+      if (matchesKeybinding(e, bindings.next_tab || 'ctrl+tab')) {
+        e.preventDefault();
+        if (openChatTabs.length > 1) {
+          const currentIndex = openChatTabs.findIndex((t) => t.id === activeChatIdRef.current);
+          const nextIndex = (currentIndex + 1) % openChatTabs.length;
+          handleSelectTab(openChatTabs[nextIndex].id);
+        }
+        return;
+      }
+
+      // Previous Tab: Ctrl + Shift + Tab
+      if (matchesKeybinding(e, bindings.prev_tab || 'ctrl+shift+tab')) {
+        e.preventDefault();
+        if (openChatTabs.length > 1) {
+          const currentIndex = openChatTabs.findIndex((t) => t.id === activeChatIdRef.current);
+          const prevIndex = (currentIndex - 1 + openChatTabs.length) % openChatTabs.length;
+          handleSelectTab(openChatTabs[prevIndex].id);
+        }
+        return;
+      }
+
+      // Toggle Files/Workspace Pane: Ctrl + B
+      if (matchesKeybinding(e, bindings.toggle_files_pane || 'ctrl+b')) {
+        e.preventDefault();
+        handleToggleFilePane();
+        return;
+      }
+
+      // Toggle Terminal Tab in Pane: Ctrl + `
+      if (matchesKeybinding(e, bindings.toggle_terminal || 'ctrl+`')) {
+        e.preventDefault();
+        setIsFilePaneOpen(true);
+        setRequestedPaneTab('terminal');
+        return;
+      }
+
+      // Search / Command Palette: Ctrl + K
+      if (matchesKeybinding(e, bindings.open_search || 'ctrl+k')) {
+        e.preventDefault();
+        setActiveView('search');
+        return;
+      }
+
+      // Settings: Ctrl + ,
+      if (matchesKeybinding(e, bindings.open_settings || 'ctrl+,')) {
+        e.preventDefault();
+        setActiveView('settings');
+        return;
+      }
+
+      // Focus prompt input: Ctrl + L
+      if (matchesKeybinding(e, bindings.focus_prompt || 'ctrl+l')) {
+        e.preventDefault();
+        const textarea = document.querySelector('textarea') as HTMLTextAreaElement | null;
+        if (textarea) {
+          textarea.focus();
+        }
+        return;
+      }
+
+      // Direct tab index switching: Ctrl + 1..9
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
+        const index = parseInt(e.key, 10) - 1;
+        if (index < openChatTabs.length) {
+          e.preventDefault();
+          handleSelectTab(openChatTabs[index].id);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleGlobalKeyDown);
+    };
+  }, [openChatTabs, isShortcutsModalOpen]);
+
 // Shell command detector helper: recognizes $ prefix, direct CLI tools, or natural language run requests
 function parseShellCommand(input: string): { program: string; args: string[] } | null {
   const trimmed = input.trim();
@@ -1234,6 +1353,7 @@ function parseShellCommand(input: string): { program: string; args: string[] } |
         onGoHome={() => setActiveView('landing')}
         onGoSearch={() => setActiveView('search')}
         onGoSettings={() => setActiveView('settings')}
+        onOpenShortcuts={() => setIsShortcutsModalOpen(true)}
         quotaState={quotaState}
         isTaskRunning={isTaskActive}
         runningChatId={runningChatId}
@@ -1432,6 +1552,13 @@ function parseShellCommand(input: string): { program: string; args: string[] } |
           refreshStatus();
         }}
         initialStep={onboardingStep}
+      />
+
+      {/* Global Keyboard Shortcuts Cheat Sheet Modal */}
+      <ShortcutsModal
+        isOpen={isShortcutsModalOpen}
+        onClose={() => setIsShortcutsModalOpen(false)}
+        onOpenSettings={() => setActiveView('settings')}
       />
     </div>
   );
