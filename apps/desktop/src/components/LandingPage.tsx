@@ -5,6 +5,7 @@ import {
   ChevronDown,
   AlertTriangle,
   Check,
+  Loader2,
 } from 'lucide-react';
 import {
   listAllRecentChats,
@@ -285,13 +286,15 @@ export const LandingPage: FC<LandingPageProps> = ({
         <div className="flex-1 overflow-y-auto space-y-0.5 pr-1">
           {isLoadingChats ? (
             <div className="space-y-2 py-1">
-              {[1, 2, 3, 4].map((i) => (
+              <div className="flex items-center gap-2 py-1">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c96442]" />
+                <span className="text-shimmer text-xs font-sans font-medium">Loading recent chats...</span>
+              </div>
+              {[1, 2, 3].map((i) => (
                 <div
                   key={i}
-                  className="h-10 w-full rounded-lg bg-[#ede9de] relative overflow-hidden border border-[#dad9d4]/40"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/50 to-transparent bg-[length:200%_100%] animate-shimmer" />
-                </div>
+                  className="h-9 w-full rounded-lg bg-[#ede9de] border border-[#dad9d4]/40"
+                />
               ))}
             </div>
           ) : recentChats.length === 0 ? (

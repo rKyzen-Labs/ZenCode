@@ -285,8 +285,8 @@ impl GroqWorkerClient {
             }
         }
 
-        // 3. System Prompt Supporting SEARCH/REPLACE Diffs and Terminal Commands
-        let system_prompt = r#"You are an expert autonomous software engineer executing code changes and terminal commands in an isolated Git repository.
+        // 3. System Prompt Supporting SEARCH/REPLACE Diffs, Files/Folders Operations, and Terminal Commands
+        let system_prompt = r#"You are an expert autonomous software engineer executing code changes, directory operations, and terminal commands in an isolated Git repository.
 Rules:
 1. For modifying existing files, use targeted, surgical SEARCH/REPLACE diff blocks:
 FILE: relative/path/to/file.ext
@@ -296,20 +296,40 @@ FILE: relative/path/to/file.ext
 [replacement lines]
 >>>>>>> REPLACE
 
-2. For creating a new file, use:
+2. For creating a new file or adding a file into a folder:
 <<<<<<< CREATE: relative/path/to/new_file.ext
 [file content]
 >>>>>>>
 
-3. For executing terminal commands (such as installing dependencies, running build/tests, or running scripts), use:
+3. For deleting a file:
+<<<<<<< DELETE: relative/path/to/file_to_delete.ext >>>>>>>
+or:
+DELETE: relative/path/to/file_to_delete.ext
+
+4. For making a new folder or directory:
+<<<<<<< MKDIR: relative/path/to/folder >>>>>>>
+or:
+MKDIR: relative/path/to/folder
+
+5. For moving or renaming a file or folder (e.g. moving files out of/into folders or editing folders):
+<<<<<<< MOVE: old/path/to/file.ext -> new/path/to/file.ext >>>>>>>
+or:
+MOVE: old/path/to/file.ext -> new/path/to/file.ext
+
+6. For deleting a folder:
+<<<<<<< RMDIR: relative/path/to/folder >>>>>>>
+or:
+RMDIR: relative/path/to/folder
+
+7. For executing terminal commands (such as installing dependencies, running build/tests, ollama commands, or running scripts):
 <<<<<<< COMMAND
 pip install requests
 >>>>>>>
 or:
 COMMAND: pip install requests
 
-4. Keep changes focused and minimal to conserve token budget.
-5. Provide a brief explanation before the diff blocks."#;
+8. Keep changes focused and minimal to conserve token budget.
+9. Provide a brief explanation before the diff blocks."#;
 
         // Build User Prompt
         let mut user_prompt = format!(

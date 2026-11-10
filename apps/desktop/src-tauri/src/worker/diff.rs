@@ -35,6 +35,167 @@ pub fn apply_diff_blocks(
             continue;
         }
 
+        // Check for DELETE block: "<<<<<<< DELETE: path/to/file.ext" or "DELETE: path/to/file.ext"
+        if line.starts_with("<<<<<<< DELETE") || line.starts_with("DELETE:") || line.starts_with("REMOVE:") {
+            let file_target = if let Some(pos) = line.find(':') {
+                let rest = &line[pos + 1..];
+                let end = rest.find(">>>>>>>").unwrap_or(rest.len());
+                rest[..end].trim().trim_matches('`').to_string()
+            } else {
+                current_file.clone().ok_or_else(|| "DELETE block missing target file path".to_string())?
+            };
+
+            if line.starts_with("<<<<<<<") && !line.contains(">>>>>>>") {
+                i += 1;
+                while i < lines.len() && !lines[i].trim().starts_with(">>>>>>>") {
+                    i += 1;
+                }
+                if i < lines.len() && lines[i].trim().starts_with(">>>>>>>") {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+
+            let full_target = worktree_dir.join(&file_target);
+            let line_count = if full_target.exists() {
+                std::fs::read_to_string(&full_target).map(|s| s.lines().count()).unwrap_or(0)
+            } else {
+                0
+            };
+            if full_target.exists() {
+                let _ = std::fs::remove_file(&full_target);
+            }
+
+            results.push(AppliedDiffResult {
+                file_path: file_target,
+                is_new: false,
+                additions: 0,
+                deletions: line_count,
+            });
+            continue;
+        }
+
+        // Check for MKDIR block: "<<<<<<< MKDIR: path/to/folder" or "MKDIR: path/to/folder"
+        if line.starts_with("<<<<<<< MKDIR") || line.starts_with("MKDIR:") || line.starts_with("CREATE_DIR:") {
+            let folder_target = if let Some(pos) = line.find(':') {
+                let rest = &line[pos + 1..];
+                let end = rest.find(">>>>>>>").unwrap_or(rest.len());
+                rest[..end].trim().trim_matches('`').to_string()
+            } else {
+                i += 1;
+                continue;
+            };
+
+            if line.starts_with("<<<<<<<") && !line.contains(">>>>>>>") {
+                i += 1;
+                while i < lines.len() && !lines[i].trim().starts_with(">>>>>>>") {
+                    i += 1;
+                }
+                if i < lines.len() && lines[i].trim().starts_with(">>>>>>>") {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+
+            let full_target = worktree_dir.join(&folder_target);
+            let _ = std::fs::create_dir_all(&full_target);
+
+            results.push(AppliedDiffResult {
+                file_path: folder_target,
+                is_new: true,
+                additions: 0,
+                deletions: 0,
+            });
+            continue;
+        }
+
+        // Check for MOVE / RENAME block: "<<<<<<< MOVE: src -> dst" or "MOVE: src -> dst"
+        if line.starts_with("<<<<<<< MOVE") || line.starts_with("MOVE:") || line.starts_with("RENAME:") || line.starts_with("<<<<<<< RENAME") {
+            let spec = if let Some(pos) = line.find(':') {
+                let rest = &line[pos + 1..];
+                let end = rest.find(">>>>>>>").unwrap_or(rest.len());
+                rest[..end].trim().to_string()
+            } else {
+                i += 1;
+                continue;
+            };
+
+            if line.starts_with("<<<<<<<") && !line.contains(">>>>>>>") {
+                i += 1;
+                while i < lines.len() && !lines[i].trim().starts_with(">>>>>>>") {
+                    i += 1;
+                }
+                if i < lines.len() && lines[i].trim().starts_with(">>>>>>>") {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+
+            if let Some((src, dst)) = spec.split_once("->") {
+                let src_clean = src.trim().trim_matches('`').trim();
+                let dst_clean = dst.trim().trim_matches('`').trim();
+
+                let full_src = worktree_dir.join(src_clean);
+                let full_dst = worktree_dir.join(dst_clean);
+
+                if let Some(parent) = full_dst.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+
+                if full_src.exists() {
+                    let _ = std::fs::rename(&full_src, &full_dst);
+                }
+
+                results.push(AppliedDiffResult {
+                    file_path: format!("{src_clean} -> {dst_clean}"),
+                    is_new: false,
+                    additions: 1,
+                    deletions: 1,
+                });
+            }
+            continue;
+        }
+
+        // Check for RMDIR block: "<<<<<<< RMDIR: path/to/folder" or "RMDIR: path/to/folder"
+        if line.starts_with("<<<<<<< RMDIR") || line.starts_with("RMDIR:") || line.starts_with("DELETE_DIR:") {
+            let folder_target = if let Some(pos) = line.find(':') {
+                let rest = &line[pos + 1..];
+                let end = rest.find(">>>>>>>").unwrap_or(rest.len());
+                rest[..end].trim().trim_matches('`').to_string()
+            } else {
+                i += 1;
+                continue;
+            };
+
+            if line.starts_with("<<<<<<<") && !line.contains(">>>>>>>") {
+                i += 1;
+                while i < lines.len() && !lines[i].trim().starts_with(">>>>>>>") {
+                    i += 1;
+                }
+                if i < lines.len() && lines[i].trim().starts_with(">>>>>>>") {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+
+            let full_target = worktree_dir.join(&folder_target);
+            if full_target.exists() {
+                let _ = std::fs::remove_dir_all(&full_target);
+            }
+
+            results.push(AppliedDiffResult {
+                file_path: folder_target,
+                is_new: false,
+                additions: 0,
+                deletions: 1,
+            });
+            continue;
+        }
+
         // Check for CREATE block: "<<<<<<< CREATE: path/to/file.ext"
         if line.starts_with("<<<<<<< CREATE") {
             let file_target = if let Some(pos) = line.find(':') {
@@ -229,6 +390,43 @@ def test():
 
         let final_test = std::fs::read_to_string(temp.join("test_calc.py")).unwrap();
         assert!(final_test.contains("assert multiply(2, 3) == 6"));
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_file_folder_operations_delete_mkdir_move_rmdir() {
+        let temp = std::env::temp_dir().join(format!("test_ops_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        // 1. Create a dummy file to delete
+        std::fs::write(temp.join("obsolete.txt"), "delete me").unwrap();
+        assert!(temp.join("obsolete.txt").exists());
+
+        // 2. Create a file to move
+        std::fs::write(temp.join("move_me.txt"), "moving this").unwrap();
+
+        let response = r#"
+<<<<<<< MKDIR: new_folder/sub_folder >>>>>>>
+<<<<<<< MOVE: move_me.txt -> new_folder/sub_folder/moved.txt >>>>>>>
+<<<<<<< DELETE: obsolete.txt >>>>>>>
+<<<<<<< MKDIR: temp_to_delete >>>>>>>
+<<<<<<< RMDIR: temp_to_delete >>>>>>>
+"#;
+
+        let results = apply_diff_blocks(&temp, response, None).unwrap();
+        assert_eq!(results.len(), 5);
+
+        // Verify obsolete.txt is deleted
+        assert!(!temp.join("obsolete.txt").exists());
+
+        // Verify folder created and file moved
+        assert!(temp.join("new_folder/sub_folder/moved.txt").exists());
+        assert_eq!(std::fs::read_to_string(temp.join("new_folder/sub_folder/moved.txt")).unwrap(), "moving this");
+        assert!(!temp.join("move_me.txt").exists());
+
+        // Verify temp_to_delete was removed
+        assert!(!temp.join("temp_to_delete").exists());
 
         let _ = std::fs::remove_dir_all(&temp);
     }

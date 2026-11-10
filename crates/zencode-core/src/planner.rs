@@ -218,9 +218,10 @@ impl PlanningContext {
 
         out.push_str("CLASSIFICATION & CONTEXT INSTRUCTION:\n");
         out.push_str("1. If PRIOR CONVERSATION exists, evaluate the CURRENT FOLLOW-UP REQUEST in the full context of what was previously requested, created, or modified. If the user refers back to previous files, functions, or concepts (e.g. 'also add input validation to that function', 'now write tests for it'), link directly to the relevant files and functions from prior turns.\n");
-        out.push_str("2. Classify if the current prompt is an actionable coding/file-change task versus a general question, small talk, or greeting.\n");
-        out.push_str("3. If NOT an actionable coding task: set is_actionable: false, provide a direct, helpful conversational reply in conversational_reply, provide a brief task_summary, and leave steps as an empty array [].\n");
-        out.push_str("4. If it IS an actionable coding task: set is_actionable: true, set conversational_reply: null, and provide a concrete task_summary with detailed implementation steps in the steps array.\n");
+        out.push_str("2. Classify if the current prompt is an actionable task (coding, creating/deleting files, creating/moving folders, running commands, inspecting environment) versus general small talk or greeting.\n");
+        out.push_str("3. If the user asks about the local machine, installed tools, or installed Ollama models, use the provided System & Local AI Environment findings to answer directly, accurately, and concisely in conversational_reply without telling the user to manually run terminal commands unless they explicitly asked how to run one.\n");
+        out.push_str("4. If NOT an actionable task: set is_actionable: false, provide a direct, helpful conversational reply in conversational_reply, provide a brief task_summary, and leave steps as an empty array [].\n");
+        out.push_str("5. If it IS an actionable task (including file creation, editing, deleting, folder operations, moving files, package installation, running tests, or terminal commands): set is_actionable: true, set conversational_reply: null, and provide a concrete task_summary with detailed implementation steps in the steps array. The worker has full native capabilities to create files, edit files, delete files, make folders, move files, and execute terminal commands.\n");
 
         out
     }

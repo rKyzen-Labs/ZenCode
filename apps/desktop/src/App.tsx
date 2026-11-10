@@ -980,7 +980,7 @@ function parseShellCommand(input: string): { program: string; args: string[] } |
   const knownBinaries = new Set([
     'pip', 'pip3', 'cargo', 'npm', 'npx', 'pnpm', 'yarn', 'git', 'python',
     'python3', 'node', 'pytest', 'make', 'docker', 'cmd', 'echo', 'poetry',
-    'uv', 'pipenv', 'flask'
+    'uv', 'pipenv', 'flask', 'ollama'
   ]);
 
   const tokenize = (cmdStr: string): string[] => {

@@ -419,7 +419,7 @@ const ConversationStepsCard: FC<ConversationStepsProps> = ({
               <span className="relative inline-flex rounded-full h-2 w-2 bg-[#c96442]"></span>
             </span>
             <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c96442] shrink-0" />
-            <span className="text-[#141413] font-medium font-sans">{currentActionLabel}</span>
+            <span className="font-semibold font-sans text-shimmer">{currentActionLabel}</span>
             <span className="text-[#83827d] font-mono text-[11px]">({formatDuration(Math.max(1, liveTotalSecs))})</span>
             {isExpanded ? (
               <ChevronDown className="w-3.5 h-3.5 text-[#83827d]" />
@@ -1387,21 +1387,18 @@ export const ChatThread: FC<ChatThreadProps> = ({
           </div>
         )}
 
-        {/* Shimmer Skeleton Loading State while fetching messages from SQLite */}
+        {/* Shimmer Loading State while fetching messages from SQLite */}
         {isLoading && (!chatMessages || chatMessages.length === 0) && (
-          <div className="w-full space-y-6 py-4 select-none">
+          <div className="w-full space-y-4 py-4 select-none">
+            <div className="flex items-center gap-2 text-xs">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c96442]" />
+              <span className="text-shimmer font-medium font-sans">Loading conversation history...</span>
+            </div>
             <div className="flex justify-end">
-              <div className="w-2/3 h-16 rounded-2xl bg-[#ede9de] relative overflow-hidden border border-[#dad9d4]/40">
-                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/50 to-transparent bg-[length:200%_100%] animate-shimmer" />
-              </div>
+              <div className="w-2/3 h-16 rounded-2xl bg-[#ede9de] relative overflow-hidden border border-[#dad9d4]/40" />
             </div>
             <div className="space-y-3">
-              <div className="w-1/4 h-4 rounded bg-[#ede9de] relative overflow-hidden">
-                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/50 to-transparent bg-[length:200%_100%] animate-shimmer" />
-              </div>
-              <div className="w-full h-24 rounded-xl bg-[#ede9de]/70 relative overflow-hidden border border-[#dad9d4]/40">
-                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-[#c96442]/10 to-transparent bg-[length:200%_100%] animate-shimmer" />
-              </div>
+              <div className="w-full h-24 rounded-xl bg-[#ede9de]/70 relative overflow-hidden border border-[#dad9d4]/40" />
             </div>
           </div>
         )}
@@ -1674,6 +1671,23 @@ export const ChatThread: FC<ChatThreadProps> = ({
                         />
                       )}
 
+                      {/* Running command status right after Files Changed box with TEXT SHIMMER */}
+                      {isCommandRunning && isLastMessage && (
+                        <div className="flex items-center gap-2.5 px-3.5 py-2.5 bg-[#ede9de]/70 border border-[#c96442]/30 rounded-xl text-xs font-sans shadow-sm select-none">
+                          <span className="relative flex h-2 w-2 shrink-0">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#c96442] opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-[#c96442]"></span>
+                          </span>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c96442] shrink-0" />
+                          <span className="font-semibold text-shimmer">
+                            Running command:
+                          </span>
+                          <span className="font-mono text-shimmer font-medium truncate">
+                            $ {activeCommandProgram} {activeCommandArgs?.join(' ')}
+                          </span>
+                        </div>
+                      )}
+
                       {/* Copy Output Button */}
                       <div className="flex items-center justify-end pr-1 pt-1">
                         <button
@@ -1763,7 +1777,7 @@ export const ChatThread: FC<ChatThreadProps> = ({
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-[#c96442]"></span>
                 </span>
                 <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c96442]" />
-                <span className="text-xs font-semibold text-[#141413] font-sans">
+                <span className="text-xs font-semibold text-shimmer font-sans">
                   Executing command in workspace...
                 </span>
               </div>

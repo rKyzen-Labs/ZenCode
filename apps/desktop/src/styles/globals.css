@@ -67,6 +67,54 @@ code, pre, .font-mono {
   animation: shimmer-sweep 2s infinite cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* Text Shimmer Effect (Glowing light sweep directly on letters/words) */
+@keyframes text-shimmer-sweep {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.text-shimmer {
+  background: linear-gradient(
+    90deg,
+    #535146 0%,
+    #83827d 20%,
+    #c96442 45%,
+    #f2a28d 50%,
+    #c96442 55%,
+    #83827d 80%,
+    #535146 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: text-shimmer-sweep 2.5s linear infinite;
+  display: inline-block;
+}
+
+.text-shimmer-subtle {
+  background: linear-gradient(
+    90deg,
+    #83827d 0%,
+    #141413 30%,
+    #c96442 50%,
+    #141413 70%,
+    #83827d 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: text-shimmer-sweep 2.2s linear infinite;
+  display: inline-block;
+}
+
 .shimmer-card {
   position: relative;
   overflow: hidden;
