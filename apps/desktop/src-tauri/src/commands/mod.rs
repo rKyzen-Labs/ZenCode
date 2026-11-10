@@ -22,6 +22,18 @@ use crate::models::{
 use crate::planner::{QuotaUpdateEvent, MODEL_PRIMARY};
 use crate::state::AppState;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+pub const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+pub fn silent_command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 /// Open a local project directory, detect its characteristics and Git state.
 /// Does not start any AI process.
 #[tauri::command]
@@ -114,7 +126,7 @@ pub async fn execute_open_project(
     let (current_branch, git_status_summary, is_clean, has_commits) = if is_git_repo {
         let has_commits = GitService::has_commits(p).unwrap_or(false);
         let clean_p = clean_path_for_git(p);
-        let branch = Command::new("git")
+        let branch = silent_command("git")
             .arg("-C")
             .arg(&clean_p)
             .args(["branch", "--show-current"])
@@ -221,7 +233,7 @@ pub async fn execute_init_git_repo(
         return Err(format!("Cannot initialize Git: '{path}' does not exist or is not a directory"));
     }
     let clean_p = clean_path_for_git(p);
-    let output = Command::new("git")
+    let output = silent_command("git")
         .arg("-C")
         .arg(&clean_p)
         .arg("init")
@@ -2448,7 +2460,7 @@ pub async fn stash_primary_changes(
     let p = clean_path_for_git(Path::new(&repo_path));
     let msg = message.unwrap_or_else(|| "Zencode: stash before task".to_string());
 
-    let output = Command::new("git")
+    let output = silent_command("git")
         .arg("-C")
         .arg(&p)
         .args(["stash", "push", "-u", "-m", &msg])
@@ -2483,7 +2495,7 @@ pub async fn commit_primary_changes(
 
     let p = clean_path_for_git(Path::new(&repo_path));
 
-    let add_output = Command::new("git")
+    let add_output = silent_command("git")
         .arg("-C")
         .arg(&p)
         .args(["add", "-A"])
@@ -2495,7 +2507,7 @@ pub async fn commit_primary_changes(
         return Err(format!("git add failed: {stderr}"));
     }
 
-    let commit_output = Command::new("git")
+    let commit_output = silent_command("git")
         .arg("-C")
         .arg(&p)
         .args(["commit", "-m", &message])
@@ -3468,7 +3480,7 @@ pub struct OllamaModelItem {
 /// Query installed Ollama models live via `ollama list`.
 #[tauri::command]
 pub async fn list_installed_ollama_models() -> Result<Vec<OllamaModelItem>, String> {
-    let output = std::process::Command::new("ollama")
+    let output = silent_command("ollama")
         .arg("list")
         .output()
         .map_err(|e| format!("Failed to run ollama list: {e}"))?;
@@ -3555,7 +3567,7 @@ pub async fn pick_folder() -> Result<Option<String>, String> {
         #[cfg(target_os = "windows")]
         {
             let script = r#"Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = 'Select Workspace Folder'; $dialog.ShowNewFolderButton = $true; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Output $dialog.SelectedPath }"#;
-            let output = std::process::Command::new("powershell")
+            let output = silent_command("powershell")
                 .args(["-NoProfile", "-NonInteractive", "-Command", script])
                 .output()
                 .map_err(|e| format!("Failed to open folder picker: {e}"))?;
@@ -3592,7 +3604,7 @@ pub async fn pick_file(default_dir: Option<String>) -> Result<Option<String>, St
             let script = format!(
                 r#"Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.Title = 'Select File to Attach'; if ('{initial}' -ne '') {{ $dialog.InitialDirectory = '{initial}' }}; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Output $dialog.FileName }}"#
             );
-            let output = std::process::Command::new("powershell")
+            let output = silent_command("powershell")
                 .args(["-NoProfile", "-NonInteractive", "-Command", &script])
                 .output()
                 .map_err(|e| format!("Failed to open file picker: {e}"))?;
@@ -3700,7 +3712,7 @@ pub async fn verify_startup_dependencies(
 
     // 2. OpenCode sidecar binary check (optional legacy engine; native direct Ollama is primary)
     if let Ok(path) = EngineSupervisor::locate_pinned_binary() {
-        let version = match std::process::Command::new(&path).arg("--version").output() {
+        let version = match silent_command(&path).arg("--version").output() {
             Ok(out) if out.status.success() => {
                 String::from_utf8_lossy(&out.stdout).trim().to_string()
             }
@@ -3715,7 +3727,7 @@ pub async fn verify_startup_dependencies(
     }
 
     // 3. Git on PATH
-    let git_status = match std::process::Command::new("git").arg("--version").output() {
+    let git_status = match silent_command("git").arg("--version").output() {
         Ok(out) if out.status.success() => {
             let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
             DependencyStatus {

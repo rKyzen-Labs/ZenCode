@@ -102,7 +102,10 @@ impl ProcessJob {
     pub fn kill_tree(pid: u32) {
         #[cfg(windows)]
         {
-            let _ = Command::new("taskkill")
+            use std::os::windows::process::CommandExt;
+            let mut cmd = Command::new("taskkill");
+            cmd.creation_flags(0x08000000);
+            let _ = cmd
                 .args(["/F", "/T", "/PID", &pid.to_string()])
                 .output();
         }

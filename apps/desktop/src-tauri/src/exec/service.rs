@@ -9,6 +9,9 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex;
 use zencode_core::redact_secrets;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 use super::job::ProcessJob;
 use super::models::{
     BuildSystemType, CommandRequest, ExecutionResult, ProcessOutputEvent,
@@ -323,12 +326,17 @@ impl ExecutionService {
         let start_time = Instant::now();
         let mut job = ProcessJob::new();
 
-        // Spawn child process with piped stdout and stderr
-        let mut child = TokioCommand::new(&request.program)
-            .args(&request.args)
+        // Spawn child process with piped stdout and stderr without flashing command windows on Windows
+        let mut cmd = TokioCommand::new(&request.program);
+        cmd.args(&request.args)
             .current_dir(cwd_path)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn process '{}': {}", request.program, e))?;
 

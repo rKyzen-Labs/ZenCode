@@ -269,6 +269,11 @@ impl EngineSupervisor {
             .collect();
 
         let mut cmd = Command::new(&bin_path);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
         cmd.arg("serve")
             .arg("--hostname")
             .arg("127.0.0.1")

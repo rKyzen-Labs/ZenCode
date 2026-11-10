@@ -49,13 +49,25 @@ pub enum GitError {
     IoError(#[from] std::io::Error),
 }
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+pub fn silent_git_cmd() -> Command {
+    let mut cmd = Command::new("git");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 pub struct GitService;
 
 impl GitService {
     /// Internal helper to execute a Git command with argument arrays.
     fn run_cmd(repo_path: &Path, args: &[&str]) -> Result<String, GitError> {
         let clean = clean_path_for_git(repo_path);
-        let output = Command::new("git")
+        let output = silent_git_cmd()
             .arg("-C")
             .arg(&clean)
             .args(args)
@@ -74,7 +86,7 @@ impl GitService {
     /// Internal helper to execute a Git command and capture status without failing on non-zero exit code.
     fn run_cmd_allow_err(repo_path: &Path, args: &[&str]) -> Result<(bool, String, String), GitError> {
         let clean = clean_path_for_git(repo_path);
-        let output = Command::new("git")
+        let output = silent_git_cmd()
             .arg("-C")
             .arg(&clean)
             .args(args)
@@ -92,7 +104,7 @@ impl GitService {
         if !clean.exists() {
             return Ok(false);
         }
-        let output = Command::new("git")
+        let output = silent_git_cmd()
             .arg("-C")
             .arg(&clean)
             .args(["rev-parse", "--is-inside-work-tree"])
