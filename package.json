@@ -3,9 +3,9 @@
   "private": true,
   "packageManager": "pnpm@9.15.4",
   "scripts": {
-    "build": "pnpm --dir apps/desktop build",
-    "dev": "pnpm --dir apps/desktop dev",
-    "tauri": "pnpm --dir apps/desktop tauri"
+    "build": "pnpm --filter zencode-desktop build",
+    "dev": "pnpm --filter zencode-desktop dev",
+    "tauri": "pnpm --filter zencode-desktop tauri"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

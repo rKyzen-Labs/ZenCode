@@ -53,7 +53,7 @@ jobs:
         run: pnpm install
 
       - name: Build frontend
-        run: pnpm --dir apps/desktop build
+        run: pnpm --filter zencode-desktop build
 
       - name: Build Tauri app (.exe, .deb, .rpm, .dmg)
         uses: tauri-apps/tauri-action@v0
