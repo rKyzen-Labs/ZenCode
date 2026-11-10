@@ -17,6 +17,13 @@ pub const GROQ_MODELS_ROTATION: &[&str] = &[
     "qwen/qwen3.8-27b",
 ];
 
+/// Estimates the token count of a given text string using character/word heuristic.
+pub fn estimate_tokens(text: &str) -> usize {
+    let char_count = text.chars().count();
+    let word_count = text.split_whitespace().count();
+    ((char_count as f64 / 3.8).ceil() as usize).max(((word_count as f64) * 1.3).ceil() as usize)
+}
+
 /// Tracks sliding-window RPM, TPM, and 429 cooldowns per Groq model.
 #[derive(Debug, Clone)]
 pub struct GroqModelQuota {
@@ -238,7 +245,6 @@ impl GroqWorkerClient {
         );
 
         // 2. Build Context Shredded Workspace Outline
-        let mut shredded_files_summary = String::new();
         let mut likely_files_set = std::collections::HashSet::new();
         for step in steps {
             for lf in &step.likely_files {
@@ -252,69 +258,137 @@ impl GroqWorkerClient {
             }
         }
 
+        let plan_lower = plan_summary.to_lowercase();
+        let is_exploration_task = likely_files_set.is_empty()
+            || likely_files_set.len() > 6
+            || plan_lower.contains("explore")
+            || plan_lower.contains("analyze")
+            || plan_lower.contains("overview")
+            || plan_lower.contains("architecture")
+            || plan_lower.contains("structure")
+            || plan_lower.contains("understand")
+            || plan_lower.contains("review");
+
         // Walk worktree files and collect structural summaries
         let mut files_to_scan = Vec::new();
         if let Ok(entries) = std::fs::read_dir(worktree_path) {
             collect_worktree_files(worktree_path, entries, &mut files_to_scan, 0);
         }
 
-        shredded_files_summary.push_str("=== WORKSPACE STRUCTURAL SUMMARY ===\n");
-        for fpath in &files_to_scan {
-            let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
-            let rel_str = rel_path.to_string_lossy().replace('\\', "/");
-            let rel_str_lower = rel_str.to_lowercase();
-            let file_base = Path::new(&rel_str_lower)
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or(&rel_str_lower);
+        // Sort files for deterministic representation
+        files_to_scan.sort();
 
-            let is_target = likely_files_set.contains(&rel_str_lower)
-                || likely_files_set.contains(file_base)
-                || likely_files_set.iter().any(|lf| lf == file_base || rel_str_lower.ends_with(lf) || lf.ends_with(file_base));
+        let mut shredded_files_summary = String::new();
 
-            // Small source/markup files (< 40KB) receive full content so the model generates surgical diffs without SEARCH mismatches
-            let file_len = std::fs::metadata(fpath).map(|m| m.len()).unwrap_or(0);
-            let is_small_project_file = file_len < 40_000 && (
-                rel_str_lower.ends_with(".html") || rel_str_lower.ends_with(".css") || rel_str_lower.ends_with(".js") ||
-                rel_str_lower.ends_with(".ts") || rel_str_lower.ends_with(".py") || rel_str_lower.ends_with(".json") ||
-                rel_str_lower.ends_with(".rs")
-            );
+        if is_exploration_task {
+            // EXPLORATION / PROJECT-WIDE MODE:
+            // Send high-level breadth: Directory tree + top-level AST signatures of entry points.
+            // Capped strictly under a 3,000 token budget to avoid 8K TPM traps.
+            shredded_files_summary.push_str("=== WORKSPACE FILE TREE ===\n");
+            for fpath in &files_to_scan {
+                let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
+                shredded_files_summary.push_str(&format!("- {}\n", rel_path.to_string_lossy().replace('\\', "/")));
+            }
+            shredded_files_summary.push_str("\n=== KEY ENTRYPOINTS & MODULE OUTLINES (AST SIGNATURES) ===\n");
 
-            if is_target || is_small_project_file {
-                // For target and project implementation files: send full content
-                if let Ok(full_code) = std::fs::read_to_string(fpath) {
-                    shredded_files_summary.push_str(&format!(
-                        "\n--- Target File (Full Content): {rel_str} ---\n{full_code}\n"
-                    ));
-                    // Emit tool read activity gradually to frontend
-                    let _ = app_handle.emit(
-                        "worker:message",
-                        &WorkerEventPayload {
-                            session_id: session_id.to_string(),
-                            event_type: "message.part.updated".into(),
-                            content: serde_json::json!({
-                                "type": "message.part.updated",
-                                "properties": {
-                                    "part": {
-                                        "type": "tool",
-                                        "tool": "read",
-                                        "callID": format!("read_{}", rel_str),
-                                        "state": { "input": { "filePath": rel_str } }
-                                    }
-                                }
-                            }).to_string(),
-                            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
-                        },
-                    );
-                    tokio::time::sleep(Duration::from_millis(60)).await;
+            let mut current_tokens = estimate_tokens(&shredded_files_summary);
+            const EXPLORATION_TOKEN_BUDGET: usize = 3_000;
+
+            for fpath in &files_to_scan {
+                if current_tokens >= EXPLORATION_TOKEN_BUDGET {
+                    shredded_files_summary.push_str("\n... [Additional project files summarized in file tree above to stay within safe token limits] ...\n");
+                    break;
                 }
-            } else {
-                // For other context files: shred function bodies
-                if let Ok(code) = std::fs::read_to_string(fpath) {
-                    let outline = shred_file_context(fpath, &code);
-                    shredded_files_summary.push_str(&format!(
-                        "\n--- Context Outline: {rel_str} ---\n{outline}\n"
-                    ));
+                let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
+                let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+                let rel_str_lower = rel_str.to_lowercase();
+
+                // Prioritize top-level manifest, configuration, and entrypoints
+                let is_entrypoint = rel_str_lower.contains("main")
+                    || rel_str_lower.contains("index")
+                    || rel_str_lower.contains("app.")
+                    || rel_str_lower.contains("lib.")
+                    || rel_str_lower.ends_with("cargo.toml")
+                    || rel_str_lower.ends_with("package.json")
+                    || rel_str_lower.ends_with("requirements.txt")
+                    || rel_str_lower.ends_with("pyproject.toml");
+
+                if is_entrypoint || files_to_scan.len() <= 15 {
+                    if let Ok(code) = std::fs::read_to_string(fpath) {
+                        let outline = shred_file_context(fpath, &code);
+                        let section = format!("\n--- Outline: {rel_str} ---\n{outline}\n");
+                        let section_tokens = estimate_tokens(&section);
+                        if current_tokens + section_tokens <= EXPLORATION_TOKEN_BUDGET {
+                            shredded_files_summary.push_str(&section);
+                            current_tokens += section_tokens;
+                        }
+                    }
+                }
+            }
+        } else {
+            // TARGETED FILE EDIT MODE:
+            // Explicit target files (in likely_files, capped at 3) receive full content.
+            // All other project files MUST be shredded (function bodies stripped).
+            shredded_files_summary.push_str("=== WORKSPACE STRUCTURAL SUMMARY ===\n");
+            let mut target_files_count = 0;
+            let mut current_tokens = estimate_tokens(&shredded_files_summary);
+            const EDIT_TOKEN_BUDGET: usize = 4_000;
+
+            for fpath in &files_to_scan {
+                let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
+                let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+                let rel_str_lower = rel_str.to_lowercase();
+                let file_base = Path::new(&rel_str_lower)
+                    .file_name()
+                    .and_then(|f| f.to_str())
+                    .unwrap_or(&rel_str_lower);
+
+                let is_explicit_target = likely_files_set.contains(&rel_str_lower)
+                    || likely_files_set.contains(file_base)
+                    || likely_files_set.iter().any(|lf| lf == file_base || rel_str_lower.ends_with(lf) || lf.ends_with(file_base));
+
+                if is_explicit_target && target_files_count < 3 {
+                    // Send full content for explicit targets
+                    if let Ok(full_code) = std::fs::read_to_string(fpath) {
+                        target_files_count += 1;
+                        let section = format!("\n--- Target File (Full Content): {rel_str} ---\n{full_code}\n");
+                        shredded_files_summary.push_str(&section);
+                        current_tokens += estimate_tokens(&section);
+
+                        // Emit tool read activity gradually to frontend
+                        let _ = app_handle.emit(
+                            "worker:message",
+                            &WorkerEventPayload {
+                                session_id: session_id.to_string(),
+                                event_type: "message.part.updated".into(),
+                                content: serde_json::json!({
+                                    "type": "message.part.updated",
+                                    "properties": {
+                                        "part": {
+                                            "type": "tool",
+                                            "tool": "read",
+                                            "callID": format!("read_{}", rel_str),
+                                            "state": { "input": { "filePath": rel_str } }
+                                        }
+                                    }
+                                }).to_string(),
+                                timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                            },
+                        );
+                    }
+                } else {
+                    // Non-target files MUST be shredded with function bodies stripped
+                    if current_tokens < EDIT_TOKEN_BUDGET {
+                        if let Ok(code) = std::fs::read_to_string(fpath) {
+                            let outline = shred_file_context(fpath, &code);
+                            let section = format!("\n--- Context Outline (Shredded): {rel_str} ---\n{outline}\n");
+                            let section_tokens = estimate_tokens(&section);
+                            if current_tokens + section_tokens <= EDIT_TOKEN_BUDGET {
+                                shredded_files_summary.push_str(&section);
+                                current_tokens += section_tokens;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -385,6 +459,45 @@ COMMAND: pip install requests
         } else {
             preferred_model.unwrap_or("qwen2.5-coder:7b").to_string()
         };
+
+        // Pre-Flight Payload Size Check (Step 3 Safeguard):
+        // Avoid Groq 8K TPM rate limit traps or 400 "Please reduce the length of the messages"
+        let estimated_total_tokens = estimate_tokens(system_prompt) + estimate_tokens(&user_prompt);
+        println!("[Groq Worker Payload] Estimated tokens: {estimated_total_tokens}, Target Model: {chosen_model}");
+
+        if self.quota_tracker.is_some() && estimated_total_tokens > 6_000 {
+            eprintln!("Payload estimated tokens ({estimated_total_tokens}) exceeds Groq safe limit. Falling back to local Ollama worker...");
+            let _ = app_handle.emit(
+                "worker:message",
+                &WorkerEventPayload {
+                    session_id: session_id.to_string(),
+                    event_type: "message.part.updated".into(),
+                    content: serde_json::json!({
+                        "type": "message.part.updated",
+                        "properties": {
+                            "part": {
+                                "type": "reasoning",
+                                "text": format!("This request is too large for the cloud worker (estimated ~{estimated_total_tokens} tokens, exceeding cloud limit) — running it locally with Ollama instead.")
+                            }
+                        }
+                    }).to_string(),
+                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                },
+            );
+
+            let ollama_client = Self::new_ollama(None);
+            return Box::pin(ollama_client.execute_session(
+                worktree_path,
+                _task_id,
+                session_id,
+                plan_summary,
+                steps,
+                None,
+                execution_service,
+                app_handle,
+            )).await;
+        }
+
         let mut response_text = String::new();
         let max_attempts = if self.quota_tracker.is_some() { 3 } else { 1 };
 
@@ -485,6 +598,41 @@ COMMAND: pip install requests
                             continue;
                         } else {
                             return Err(format!("Local Ollama model returned 429: {}", resp.text().await.unwrap_or_default()));
+                        }
+                    } else if status.as_u16() == 400 {
+                        let err_body = resp.text().await.unwrap_or_default();
+                        eprintln!("Groq returned 400: {err_body}");
+                        if (err_body.contains("reduce the length of the messages") || err_body.contains("rate_limit") || err_body.contains("token")) && self.quota_tracker.is_some() {
+                            let _ = app_handle.emit(
+                                "worker:message",
+                                &WorkerEventPayload {
+                                    session_id: session_id.to_string(),
+                                    event_type: "message.part.updated".into(),
+                                    content: serde_json::json!({
+                                        "type": "message.part.updated",
+                                        "properties": {
+                                            "part": {
+                                                "type": "reasoning",
+                                                "text": "Cloud worker payload exceeded message limit (400) — falling back to local Ollama worker to complete task."
+                                            }
+                                        }
+                                    }).to_string(),
+                                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                                },
+                            );
+                            let ollama_client = Self::new_ollama(None);
+                            return Box::pin(ollama_client.execute_session(
+                                worktree_path,
+                                _task_id,
+                                session_id,
+                                plan_summary,
+                                steps,
+                                None,
+                                execution_service,
+                                app_handle,
+                            )).await;
+                        } else {
+                            return Err(format!("{provider_label} API request failed ({status}): {err_body}"));
                         }
                     } else {
                         let err_body = resp.text().await.unwrap_or_default();
@@ -930,5 +1078,100 @@ COMMAND: pytest tests/test_calc.py
         assert!(cmds.contains(&"pip install requests".to_string()));
         assert!(cmds.contains(&"pytest tests/test_calc.py".to_string()));
         assert!(cmds.contains(&"pip install -r requirements.txt".to_string()));
+    }
+
+    #[test]
+    fn test_estimate_tokens_accuracy() {
+        let short = "Hello world!";
+        let t1 = estimate_tokens(short);
+        assert!(t1 >= 3 && t1 <= 6);
+
+        let code = r#"
+        pub fn calculate_sum(a: i32, b: i32) -> i32 {
+            let result = a + b;
+            println!("Calculating {} + {} = {}", a, b, result);
+            result
+        }
+        "#;
+        let t2 = estimate_tokens(code);
+        assert!(t2 > 20 && t2 < 100);
+    }
+
+    #[test]
+    fn test_exploration_payload_stays_under_budget() {
+        let temp_dir = std::env::temp_dir().join(format!("zencode_test_expl_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let root = &temp_dir;
+
+        // Create 20 mock project files with substantial code
+        for i in 0..20 {
+            let fpath = root.join(format!("module_{i}.rs"));
+            let content = format!(
+                r#"
+                use std::collections::HashMap;
+
+                pub struct Service{i} {{
+                    pub id: u64,
+                    pub name: String,
+                }}
+
+                impl Service{i} {{
+                    pub fn new(id: u64, name: &str) -> Self {{
+                        println!("Init service {i}");
+                        Self {{ id, name: name.to_string() }}
+                    }}
+
+                    pub fn process_data(&self, input: Vec<u8>) -> Result<Vec<u8>, String> {{
+                        for b in &input {{
+                            println!("Processing byte: {{}}", b);
+                        }}
+                        Ok(input)
+                    }}
+                }}
+                "#
+            );
+            std::fs::write(&fpath, content).unwrap();
+        }
+
+        let mut files_to_scan = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(root) {
+            collect_worktree_files(root, entries, &mut files_to_scan, 0);
+        }
+        assert_eq!(files_to_scan.len(), 20);
+
+        // Build shredded summary in exploration mode
+        let mut shredded_files_summary = String::new();
+        shredded_files_summary.push_str("=== WORKSPACE FILE TREE ===\n");
+        for fpath in &files_to_scan {
+            let rel_path = fpath.strip_prefix(root).unwrap_or(fpath);
+            shredded_files_summary.push_str(&format!("- {}\n", rel_path.to_string_lossy().replace('\\', "/")));
+        }
+        shredded_files_summary.push_str("\n=== KEY ENTRYPOINTS & MODULE OUTLINES (AST SIGNATURES) ===\n");
+
+        let mut current_tokens = estimate_tokens(&shredded_files_summary);
+        const EXPLORATION_TOKEN_BUDGET: usize = 3_000;
+
+        for fpath in &files_to_scan {
+            if current_tokens >= EXPLORATION_TOKEN_BUDGET {
+                shredded_files_summary.push_str("\n... [Additional project files summarized in file tree above to stay within safe token limits] ...\n");
+                break;
+            }
+            let rel_path = fpath.strip_prefix(root).unwrap_or(fpath);
+            let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+            if let Ok(code) = std::fs::read_to_string(fpath) {
+                let outline = shred_file_context(fpath, &code);
+                assert!(!outline.contains("Processing byte:"), "Function body must be shredded!");
+                let section = format!("\n--- Outline: {rel_str} ---\n{outline}\n");
+                let section_tokens = estimate_tokens(&section);
+                if current_tokens + section_tokens <= EXPLORATION_TOKEN_BUDGET {
+                    shredded_files_summary.push_str(&section);
+                    current_tokens += section_tokens;
+                }
+            }
+        }
+
+        let total_tokens = estimate_tokens(&shredded_files_summary);
+        assert!(total_tokens <= 3_000, "Exploration summary tokens ({total_tokens}) must stay strictly under the 3000 token budget!");
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
