@@ -757,26 +757,57 @@ pub fn analyze_execution_grounding(
             }
         }
 
-        // 2. Check if step was command/execution oriented (e.g. tests, build, dependencies, server restart, exec)
-        let mut command_matched = false;
-        let is_command_oriented = goal_lower.contains("test")
+        // 2. Check if step was command/execution oriented (e.g. tests, build, dependencies, server restart, exec, inspection)
+        let is_command_oriented = !has_target_files
+            || goal_lower.contains("test")
             || goal_lower.contains("restart")
             || goal_lower.contains("serve")
             || goal_lower.contains("build")
-            || goal_lower.contains("run ")
-            || goal_lower.starts_with("run")
+            || goal_lower.contains("run")
+            || goal_lower.contains("exec")
             || goal_lower.contains("install")
-            || goal_lower.contains("pip ")
-            || goal_lower.contains("npm ")
-            || instructions_lower.contains("restart")
-            || instructions_lower.contains("run ")
+            || goal_lower.contains("command")
+            || goal_lower.contains("list")
+            || goal_lower.contains("inspect")
+            || goal_lower.contains("status")
+            || goal_lower.contains("check")
+            || goal_lower.contains("ollama")
+            || goal_lower.contains("docker")
+            || goal_lower.contains("git")
+            || goal_lower.contains("pip")
+            || goal_lower.contains("npm")
+            || goal_lower.contains("cargo")
+            || goal_lower.contains("python")
+            || goal_lower.contains("node")
+            || instructions_lower.contains("run")
+            || instructions_lower.contains("exec")
             || instructions_lower.contains("install")
-            || instructions_lower.contains("pip ")
-            || instructions_lower.contains("npm ");
+            || instructions_lower.contains("command")
+            || instructions_lower.contains("list")
+            || instructions_lower.contains("ollama")
+            || instructions_lower.contains("docker");
 
-        if is_command_oriented {
+        let mut command_matched = false;
+        if is_command_oriented && !captured_commands.is_empty() {
             for cmd in captured_commands {
                 let cmd_lower = cmd.to_lowercase();
+                let clean_cmd = cmd_lower.trim_start_matches('$').trim();
+                let cmd_words: Vec<&str> = clean_cmd
+                    .split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == ':' || c == '$')
+                    .filter(|s| !s.is_empty() && *s != "exit" && *s != "code" && *s != "0" && *s != "success" && *s != "output")
+                    .collect();
+
+                // If any token of the command (e.g. "ollama", "list", "pip", "pytest", "git", "docker", "status")
+                // appears in the step's goal, instructions, or checks:
+                let token_matched = cmd_words.iter().any(|w| {
+                    w.len() >= 3 && (goal_lower.contains(w) || instructions_lower.contains(w) || checks_lower.contains(w))
+                });
+
+                if token_matched {
+                    command_matched = true;
+                    break;
+                }
+
                 if (goal_lower.contains("install") || instructions_lower.contains("install") || goal_lower.contains("dependenc"))
                     && (cmd_lower.contains("pip") || cmd_lower.contains("npm") || cmd_lower.contains("cargo") || cmd_lower.contains("install"))
                 {
@@ -789,7 +820,7 @@ pub fn analyze_execution_grounding(
                     command_matched = true;
                     break;
                 }
-                if (goal_lower.contains("restart") || instructions_lower.contains("restart"))
+                if (goal_lower.contains("restart") || instructions_lower.contains("restart") || goal_lower.contains("start") || goal_lower.contains("serve"))
                     && (cmd_lower.contains("dev") || cmd_lower.contains("serve") || cmd_lower.contains("start") || cmd_lower.contains("restart"))
                 {
                     command_matched = true;
@@ -801,11 +832,15 @@ pub fn analyze_execution_grounding(
                     command_matched = true;
                     break;
                 }
-                // Generic command match: if any command was executed and goal mentions run/command
                 if (goal_lower.contains("run") || instructions_lower.contains("run")) && !cmd_lower.is_empty() {
                     command_matched = true;
                     break;
                 }
+            }
+
+            // Fallback: If this step has no target files and command(s) were executed:
+            if !command_matched && !has_target_files {
+                command_matched = true;
             }
         }
 
@@ -3846,5 +3881,49 @@ mod tests {
         let (t5, c5) = parse_worker_sse_event(other_session_data, sid);
         assert_eq!(t5, "message.part.updated");
         assert!(!c5, "Different session stop event must NOT complete active session");
+    }
+
+    #[test]
+    fn test_analyze_execution_grounding_discovery_command_verification() {
+        let steps = vec![
+            zencode_core::PlanStep {
+                id: "step_1".to_string(),
+                goal: "List the installed Ollama models to determine the count.".to_string(),
+                likely_files: vec![],
+                instructions: vec!["Execute ollama list in the terminal to inspect installed models.".to_string()],
+                depends_on: vec![],
+                acceptance_checks: vec!["Ensure installed models are retrieved".to_string()],
+            }
+        ];
+        let inventory = ChangeInventory {
+            worktree_path: "/tmp/fake".to_string(),
+            branch_name: "task/test".to_string(),
+            base_commit: "abc1234".to_string(),
+            files: vec![],
+            total_additions: 0,
+            total_deletions: 0,
+            modified_count: 0,
+            added_count: 0,
+            untracked_count: 0,
+            deleted_count: 0,
+            renamed_count: 0,
+            binary_count: 0,
+        };
+        let captured_commands = vec![
+            "$ ollama list (exit code 0 (success))\nOutput:\n  gemma3:4b\n  granite4.1:8b".to_string(),
+        ];
+
+        let (_verified_summary, unperformed_summary, unperformed_steps) =
+            analyze_execution_grounding(&steps, &inventory, &captured_commands);
+
+        assert!(
+            unperformed_steps.is_empty(),
+            "Discovery command ollama list must be verified as performed, got: {:?}",
+            unperformed_steps
+        );
+        assert!(
+            unperformed_summary.contains("All planned steps were verified"),
+            "Expected all steps verified, got: {unperformed_summary}"
+        );
     }
 }

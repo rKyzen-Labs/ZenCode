@@ -545,11 +545,14 @@ impl GeminiPlannerClient {
             OUTPUT FORMAT RULES:\n\
             - DO NOT include conversational filler, greetings, or self-identification.\n\
             - NEVER say 'As the Director AI assistant in ZenCode...' or 'Here is the summary of the completed task...'.\n\
-            - Start immediately and directly with what was accomplished.\n\n\
+            - Start immediately and directly with what was accomplished and any findings/answers from executed commands.\n\
+            - If commands were executed, summarize their results and answer the user's question directly (e.g. count or list the items found in the command output).\n\
+            - ONLY include a 'Key Files Modified' section if files were actually modified or created; do NOT write 'No files were modified' if the task was command-oriented.\n\
+            - ONLY mention skipped or unperformed actions if there are entries in 'Intended Steps / Actions That Were NOT Performed or Skipped'. If all planned steps succeeded, do not invent skipped steps.\n\n\
             Please provide a clear, concise, and structured Markdown summary:\n\
-            - 1-2 sentence overview of what was actually accomplished.\n\
-            - Key files modified and their specific roles.\n\
-            - Explicit notes on any planned actions that were skipped or not executed.\n\
+            - 1-3 sentence overview of what was accomplished and the answer to the user's task or query.\n\
+            - Key files modified (only if files were created or changed).\n\
+            - Explicit notes on skipped actions (only if unperformed actions exist).\n\
             Keep the response professional, truthful, and well-structured in Markdown.",
             task_summary.trim(),
             changed_files_summary.trim(),

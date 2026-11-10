@@ -550,7 +550,14 @@ COMMAND: pip install requests
                                 Some(c) => format!("exit code {c}"),
                                 None => "completed".to_string(),
                             };
-                            executed_commands.push(format!("$ {} {} ({})", req.program, req.args.join(" "), exit_str));
+                            let mut entry = format!("$ {} {} ({})", req.program, req.args.join(" "), exit_str);
+                            if !res.stdout_tail.is_empty() {
+                                entry.push_str("\nOutput:\n");
+                                for line in res.stdout_tail.iter().take(25) {
+                                    entry.push_str(&format!("  {}\n", line));
+                                }
+                            }
+                            executed_commands.push(entry);
                         }
                         Err(e) => {
                             executed_commands.push(format!("$ {} {} (failed: {})", req.program, req.args.join(" "), e));
@@ -584,7 +591,14 @@ COMMAND: pip install requests
                                 Some(c) => format!("exit code {c}"),
                                 None => "completed".to_string(),
                             };
-                            executed_commands.push(format!("$ {} {} ({})", req.program, req.args.join(" "), exit_str));
+                            let mut entry = format!("$ {} {} ({})", req.program, req.args.join(" "), exit_str);
+                            if !res.stdout_tail.is_empty() {
+                                entry.push_str("\nOutput:\n");
+                                for line in res.stdout_tail.iter().take(25) {
+                                    entry.push_str(&format!("  {}\n", line));
+                                }
+                            }
+                            executed_commands.push(entry);
                         }
                         Err(e) => {
                             executed_commands.push(format!("$ {} {} (skipped: {})", req.program, req.args.join(" "), e));
