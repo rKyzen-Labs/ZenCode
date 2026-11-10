@@ -3635,7 +3635,7 @@ pub async fn pick_folder() -> Result<Option<String>, String> {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            Ok(None)
+            Ok::<Option<String>, String>(None)
         }
     })
     .await
@@ -3672,7 +3672,7 @@ pub async fn pick_file(default_dir: Option<String>) -> Result<Option<String>, St
         }
         #[cfg(not(target_os = "windows"))]
         {
-            Ok(None)
+            Ok::<Option<String>, String>(None)
         }
     })
     .await
