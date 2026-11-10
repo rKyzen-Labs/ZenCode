@@ -216,12 +216,16 @@ impl PlanningContext {
             out.push('\n');
         }
 
-        out.push_str("CLASSIFICATION & CONTEXT INSTRUCTION:\n");
+        out.push_str("CLASSIFICATION & ROUTING INSTRUCTION:\n");
         out.push_str("1. If PRIOR CONVERSATION exists, evaluate the CURRENT FOLLOW-UP REQUEST in the full context of what was previously requested, created, or modified. If the user refers back to previous files, functions, or concepts (e.g. 'also add input validation to that function', 'now write tests for it'), link directly to the relevant files and functions from prior turns.\n");
-        out.push_str("2. Classify if the current prompt is an actionable task (coding, creating/deleting files, creating/moving folders, running commands, inspecting environment) versus general small talk or greeting.\n");
-        out.push_str("3. DYNAMIC ENVIRONMENT DISCOVERY VIA COMMANDS: Do not assume or guess environment details, and NEVER tell the user to manually open their terminal and run commands themselves. If the user asks about the local machine, installed tools, runtimes, package managers, services, or models (e.g. 'what models are installed in ollama', 'what version of python do I have', 'is docker running', 'check git branch', 'list packages'), treat it as an ACTIONABLE task (is_actionable: true). Formulate a plan step with instructions to execute the appropriate CLI command (e.g. `COMMAND: ollama list`, `COMMAND: python --version`, `COMMAND: docker ps`, `COMMAND: git status`, `COMMAND: pip list`). The worker will execute the command and display the live output in the Terminal tab.\n");
-        out.push_str("4. If NOT an actionable task (pure greetings like 'hi', 'hello', or small talk): set is_actionable: false, provide a direct, helpful conversational reply in conversational_reply, provide a brief task_summary, and leave steps as an empty array [].\n");
-        out.push_str("5. If it IS an actionable task (including file creation, editing, deleting, folder operations, moving files, package installation, running tests, environment inspection, or terminal commands): set is_actionable: true, set conversational_reply: null, and provide a concrete task_summary with detailed implementation steps in the steps array. The worker has full native capabilities to create files, edit files, delete files, make folders, move files, and execute terminal commands.\n");
+        out.push_str("2. READ-ONLY EXPLORATION & ARCHITECTURAL ANALYSIS: When the user asks to explore, analyze, overview, review, or explain the project, codebase, or architecture (e.g. 'explore this project', 'explain the codebase', 'overview of this repo', 'how is this project structured') and does NOT request writing code, editing/creating/deleting files, installing packages, or running commands:\n");
+        out.push_str("   - Set is_actionable: false.\n");
+        out.push_str("   - Leave steps as an empty array [].\n");
+        out.push_str("   - Answer the user's exploration request DIRECTLY, THOROUGHLY, and COMPREHENSIVELY in conversational_reply, analyzing the PROJECT TREE and MANIFEST SUMMARIES provided above. Explain the architecture, directory layout, key modules, entrypoints, and tech stack in rich, structured Markdown.\n");
+        out.push_str("   - Do NOT dispatch to a worker or formulate coding steps; exploration is answered directly by you.\n");
+        out.push_str("3. GENERAL CONVERSATION & GREETINGS: For pure greetings (like 'hi', 'hello', 'thanks') or general questions without project action: set is_actionable: false, set steps: [], and provide a direct helpful response in conversational_reply.\n");
+        out.push_str("4. DYNAMIC ENVIRONMENT DISCOVERY VIA COMMANDS: If the user explicitly asks about the host machine, installed runtimes, models, or command outputs (e.g. 'what models are installed in ollama', 'check git branch', 'what version of python do I have', 'run pip install requests'): set is_actionable: true, set conversational_reply: null, and formulate a step with the exact terminal command (`COMMAND: ollama list`, `COMMAND: python --version`, etc.).\n");
+        out.push_str("5. ACTIONABLE CODING & REFACTORING TASKS: If the user asks to write code, modify files, create files, delete files, move folders, or implement features: set is_actionable: true, set conversational_reply: null, and provide a concrete task_summary with detailed implementation steps in the steps array. The worker has full native capabilities to create files, edit files, delete files, make folders, move files, and execute terminal commands.\n");
 
         out
     }
@@ -257,11 +261,11 @@ impl GeminiPlannerClient {
             "properties": {
                 "is_actionable": {
                     "type": "boolean",
-                    "description": "True if the user prompt requests code changes, file creations, refactorings, terminal commands, or environment/tool inspection (e.g. 'what models are installed in ollama', 'run pip install requests', 'check git status', 'list docker containers'). False ONLY for general small talk or greetings (e.g. 'hi', 'thank you')."
+                    "description": "True ONLY for actionable coding tasks (writing/modifying files, creating/deleting files, moving folders, running commands). False for greetings, small talk, AND read-only exploration or architectural analysis queries (e.g. 'explore this project', 'explain the codebase', 'overview of this repo')."
                 },
                 "conversational_reply": {
                     "type": "string",
-                    "description": "If is_actionable is false, provide a direct, helpful, friendly conversational reply to the user here. If is_actionable is true, leave empty or null."
+                    "description": "If is_actionable is false, provide a direct, comprehensive, helpful answer to the user here. For project exploration or analysis, provide a thorough, structured architectural overview reviewing the project tree and key components. If is_actionable is true, leave empty or null."
                 },
                 "task_summary": { "type": "string" },
                 "assumptions": { "type": "array", "items": { "type": "string" } },

@@ -563,6 +563,56 @@ pub async fn execute_submit_plan(
         Ok((mut plan, active_model, usage)) => {
             let duration_secs = planning_start.elapsed().as_secs();
             plan.planning_duration_seconds = Some(duration_secs.max(1));
+
+            // CHANGE 1: Exploration/Analysis Tasks Never Reach a Worker
+            // When the prompt is read-only exploration or architecture overview (no file-edit intent),
+            // ensure it is marked is_actionable: false so it resolves directly via Gemini's conversational reply
+            // with zero worktree, zero worker session, and zero files-changed inventory.
+            let task_desc_lower = context.task_description.to_lowercase();
+            let has_edit_keyword = task_desc_lower.contains("edit")
+                || task_desc_lower.contains("modify")
+                || task_desc_lower.contains("create")
+                || task_desc_lower.contains("delete")
+                || task_desc_lower.contains("add ")
+                || task_desc_lower.contains("fix ")
+                || task_desc_lower.contains("refactor")
+                || task_desc_lower.contains("install ")
+                || task_desc_lower.contains("build ")
+                || task_desc_lower.contains("run ");
+
+            let is_read_only_exploration = (task_desc_lower.contains("explore")
+                || task_desc_lower.contains("analyze")
+                || task_desc_lower.contains("overview")
+                || task_desc_lower.contains("architecture")
+                || task_desc_lower.contains("structure")
+                || task_desc_lower.contains("explain")
+                || task_desc_lower.contains("walk me through")
+                || task_desc_lower.contains("what does this"))
+                && !has_edit_keyword;
+
+            if is_read_only_exploration && plan.is_actionable {
+                println!("[Routing] Directing read-only exploration query to conversational reply (is_actionable = false) — zero worker dispatch");
+                plan.is_actionable = false;
+                if plan.conversational_reply.as_ref().map_or(true, |r| r.trim().is_empty()) {
+                    let mut direct_answer = format!("### Project Architecture & Codebase Overview\n\n{}\n\n", plan.task_summary);
+                    if !plan.project_findings.is_empty() {
+                        direct_answer.push_str("#### Key Architecture Findings\n");
+                        for finding in &plan.project_findings {
+                            direct_answer.push_str(&format!("- {}\n", finding));
+                        }
+                        direct_answer.push('\n');
+                    }
+                    if !plan.steps.is_empty() {
+                        direct_answer.push_str("#### Codebase Structure & Components\n");
+                        for s in &plan.steps {
+                            direct_answer.push_str(&format!("- **{}**: {}\n", s.goal, s.instructions.join(" ")));
+                        }
+                    }
+                    plan.conversational_reply = Some(direct_answer);
+                }
+                plan.steps = Vec::new();
+            }
+
             state.increment_request_count();
             let switch_reason = {
                 let tracker = state.planner_client.quota_tracker.lock().await;
@@ -4155,5 +4205,85 @@ mod tests {
             unperformed_summary.contains("All planned steps were verified"),
             "Expected all steps verified, got: {unperformed_summary}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_exploration_task_routing_bypasses_worker_and_answers_direct() {
+        let context = PlanningContext {
+            task_description: "explore this project and explain the architecture".to_string(),
+            project_type: "Rust / React".to_string(),
+            shallow_tree: vec!["Cargo.toml".into(), "src/main.rs".into(), "src/lib.rs".into()],
+            manifest_summaries: vec!["Cargo.toml:\n[package]\nname = \"test\"".into()],
+            git_branch_and_status: "Branch: main, Status: clean".into(),
+            approved_source_excerpts: vec![],
+            constraints: vec![],
+            conversation_history: vec![],
+        };
+
+        // When Gemini returns an exploration plan that was initially marked is_actionable: true,
+        // our Change 1 safeguard intercepts it, sets is_actionable: false, clears steps,
+        // and populates conversational_reply directly.
+        let mut mock_plan = ImplementationPlan {
+            is_actionable: true,
+            conversational_reply: None,
+            task_summary: "Architectural overview of the Rust/React repository".to_string(),
+            assumptions: vec![],
+            questions: vec![],
+            project_findings: vec!["Monorepo with Rust backend and React frontend".to_string()],
+            steps: vec![zencode_core::PlanStep {
+                id: "s1".into(),
+                goal: "Review files".into(),
+                likely_files: vec![],
+                instructions: vec!["Read repository structure".into()],
+                depends_on: vec![],
+                acceptance_checks: vec![],
+            }],
+            risks: vec![],
+            verification_suggestions: vec![],
+            planning_duration_seconds: None,
+        };
+
+        let task_desc_lower = context.task_description.to_lowercase();
+        let has_edit_keyword = task_desc_lower.contains("edit")
+            || task_desc_lower.contains("modify")
+            || task_desc_lower.contains("create")
+            || task_desc_lower.contains("delete")
+            || task_desc_lower.contains("add ")
+            || task_desc_lower.contains("fix ")
+            || task_desc_lower.contains("refactor")
+            || task_desc_lower.contains("install ")
+            || task_desc_lower.contains("build ")
+            || task_desc_lower.contains("run ");
+
+        let is_read_only_exploration = (task_desc_lower.contains("explore")
+            || task_desc_lower.contains("analyze")
+            || task_desc_lower.contains("overview")
+            || task_desc_lower.contains("architecture")
+            || task_desc_lower.contains("structure")
+            || task_desc_lower.contains("explain")
+            || task_desc_lower.contains("walk me through")
+            || task_desc_lower.contains("what does this"))
+            && !has_edit_keyword;
+
+        assert!(is_read_only_exploration, "Must classify as read-only exploration");
+
+        if is_read_only_exploration && mock_plan.is_actionable {
+            mock_plan.is_actionable = false;
+            let mut direct_answer = format!("### Project Architecture & Codebase Overview\n\n{}\n\n", mock_plan.task_summary);
+            if !mock_plan.project_findings.is_empty() {
+                direct_answer.push_str("#### Key Architecture Findings\n");
+                for finding in &mock_plan.project_findings {
+                    direct_answer.push_str(&format!("- {}\n", finding));
+                }
+            }
+            mock_plan.conversational_reply = Some(direct_answer);
+            mock_plan.steps = Vec::new();
+        }
+
+        assert_eq!(mock_plan.is_actionable, false, "Exploration must be is_actionable: false");
+        assert!(mock_plan.steps.is_empty(), "Steps must be empty so no worker is dispatched");
+        assert!(mock_plan.conversational_reply.is_some(), "Must contain direct conversational reply");
+        let reply = mock_plan.conversational_reply.unwrap();
+        assert!(reply.contains("Monorepo with Rust backend and React frontend"));
     }
 }
