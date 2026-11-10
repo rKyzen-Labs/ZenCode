@@ -2434,6 +2434,7 @@ pub async fn request_command_approval(
     args: Vec<String>,
     cwd: Option<String>,
     description: String,
+    app_handle: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CommandRequest, String> {
     let resolved_cwd = match cwd {
@@ -2467,6 +2468,17 @@ pub async fn request_command_approval(
         .execution_service
         .create_approval_request(&program, &arg_refs, &resolved_cwd, &description, tid_opt.as_deref())
         .await;
+
+    println!(
+        "[Rust IPC] request_command_approval: program='{}', args={:?}, auto_approved={}, id='{}'",
+        req.program, req.args, req.auto_approved, req.id
+    );
+
+    // If the command is not auto-approved, emit the approval required event to frontend
+    if !req.auto_approved {
+        let _ = app_handle.emit("permissions:approval_required", &req);
+        println!("[Rust IPC] Emitted 'permissions:approval_required' event for command id='{}'", req.id);
+    }
 
     Ok(req)
 }

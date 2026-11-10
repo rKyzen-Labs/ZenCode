@@ -614,11 +614,21 @@ export async function requestCommandApproval(
   cwd?: string,
   description?: string
 ): Promise<CommandRequest> {
+  console.log('[IPC] Invoking request_command_approval:', { program, args, cwd, description });
   return await safeInvoke<CommandRequest>('request_command_approval', {
     program,
     args,
     cwd: cwd ?? null,
     description: description ?? `Run ${program} ${args.join(' ')}`,
+  });
+}
+
+export async function subscribeToCommandApproval(
+  callback: (req: CommandRequest) => void
+): Promise<UnlistenFn> {
+  return await safeListen<CommandRequest>('permissions:approval_required', (event) => {
+    console.log('[IPC] Received permissions:approval_required event:', event.payload);
+    callback(event.payload);
   });
 }
 

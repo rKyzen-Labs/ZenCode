@@ -35,6 +35,8 @@ import {
   undoTaskChanges,
   subscribeToInventoryReady,
   subscribeToChatMessageAdded,
+  requestCommandApproval,
+  subscribeToCommandApproval,
   approveAndRunCommand,
   cancelCommandExecution,
   previewAdvisoryContext,
@@ -282,9 +284,14 @@ export default function App() {
     let unlistenChatMessageAdded: (() => void) | undefined;
     let unlistenExecOutput: (() => void) | undefined;
     let unlistenExecFinished: (() => void) | undefined;
+    let unlistenCommandApproval: (() => void) | undefined;
 
     const setupListeners = async () => {
       try {
+        unlistenCommandApproval = await subscribeToCommandApproval((req: CommandRequest) => {
+          console.log('[App] Received command approval request:', req);
+          setPendingCommandApproval(req);
+        });
         unlistenWorkerMsg = await subscribeToWorkerMessages((payload) => {
           setWorkerEvents((prev) => [...prev, payload]);
         });
@@ -393,6 +400,7 @@ export default function App() {
       unlistenInventoryReady?.();
       unlistenExecOutput?.();
       unlistenExecFinished?.();
+      unlistenCommandApproval?.();
     };
   }, [refreshStatus]);
 
@@ -690,7 +698,7 @@ export default function App() {
             'assistant',
             summary,
             JSON.stringify(result.plan),
-            summary,
+            undefined, // worker_summary is populated when the worker completes
             []
           );
           setChatMessages((prev) => [...prev, asstMsg]);
@@ -799,7 +807,33 @@ export default function App() {
     setIsTerminalOpen(true);
     setIsCommandRunning(true);
     try {
-      await approveAndRunCommand(req.id);
+      const res = await approveAndRunCommand(req.id);
+      setExecutionResult(res);
+      setIsCommandRunning(false);
+
+      // Append verified execution result message to active chat thread
+      const currentChatId = activeChatIdRef.current;
+      if (currentChatId) {
+        const outSummary = [
+          `Command finished with exit code ${res.exit_code ?? 'unknown'}:`,
+          `$ ${res.program} ${res.args.join(' ')}`,
+          ...(res.stdout_tail.length > 0 ? res.stdout_tail.slice(-10) : []),
+          ...(res.stderr_tail.length > 0 ? res.stderr_tail.slice(-5) : []),
+        ].join('\n');
+        try {
+          const asstMsg = await addChatMessage(
+            currentChatId,
+            'assistant',
+            outSummary,
+            null,
+            `Ran ${res.program} ${res.args.join(' ')}`,
+            []
+          );
+          setChatMessages((prev) => [...prev, asstMsg]);
+        } catch (e) {
+          console.warn('Could not save command result message to db:', e);
+        }
+      }
     } catch (err: any) {
       setIsCommandRunning(false);
       setError(typeof err === 'string' ? err : err.message || 'Failed to approve command execution');
@@ -821,6 +855,28 @@ export default function App() {
       setIsCommandRunning(false);
     } catch (err: any) {
       console.warn('Failed to cancel running command:', err);
+    }
+  };
+
+  const handleTriggerCommand = async (
+    program: string,
+    args: string[],
+    cwd?: string,
+    description?: string
+  ) => {
+    try {
+      setError(null);
+      console.log('[App] handleTriggerCommand dispatching:', { program, args, cwd, description });
+      const req = await requestCommandApproval(program, args, cwd, description);
+      console.log('[App] requestCommandApproval response:', req);
+      if (!req.auto_approved) {
+        setPendingCommandApproval(req);
+      } else {
+        await handleApproveCommand(req);
+      }
+    } catch (err: any) {
+      console.error('[App] handleTriggerCommand error:', err);
+      setError(typeof err === 'string' ? err : err.message || 'Failed to request command approval');
     }
   };
 
@@ -916,6 +972,55 @@ export default function App() {
     setChatMessages([]);
   };
 
+// Shell command detector helper: recognizes $ prefix or common CLI tools
+function parseShellCommand(input: string): { program: string; args: string[] } | null {
+  const trimmed = input.trim();
+  if (!trimmed || trimmed.includes('\n')) return null;
+
+  const startsWithDollar = trimmed.startsWith('$');
+  const cleanCmd = startsWithDollar ? trimmed.replace(/^\$\s*/, '') : trimmed;
+
+  const tokens: string[] = [];
+  let current = '';
+  let inQuote: string | null = null;
+  for (let i = 0; i < cleanCmd.length; i++) {
+    const char = cleanCmd[i];
+    if (inQuote) {
+      if (char === inQuote) {
+        inQuote = null;
+      } else {
+        current += char;
+      }
+    } else if (char === '"' || char === "'") {
+      inQuote = char;
+    } else if (/\s/.test(char)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = '';
+      }
+    } else {
+      current += char;
+    }
+  }
+  if (current.length > 0) tokens.push(current);
+  if (tokens.length === 0) return null;
+
+  const prog = tokens[0].toLowerCase();
+  const knownBinaries = new Set([
+    'pip', 'pip3', 'cargo', 'npm', 'npx', 'pnpm', 'yarn', 'git', 'python',
+    'python3', 'node', 'pytest', 'make', 'docker', 'cmd', 'echo'
+  ]);
+
+  if (startsWithDollar || knownBinaries.has(prog)) {
+    return {
+      program: tokens[0],
+      args: tokens.slice(1),
+    };
+  }
+
+  return null;
+}
+
   // Landing Page Submissions (Start New Chat Session)
   const handleLandingSubmitPrompt = async (promptText: string) => {
     // Auto-manage Git: auto-init repo if missing, or auto-create initial commit if 0-commit repo
@@ -998,6 +1103,18 @@ export default function App() {
       setChatMessages([fallbackUserMessage]);
     }
 
+    // Check if prompt is a direct shell command (e.g. pip install requests)
+    const parsedCmd = parseShellCommand(promptText);
+    if (parsedCmd) {
+      await handleTriggerCommand(
+        parsedCmd.program,
+        parsedCmd.args,
+        project?.path,
+        `Run ${parsedCmd.program} ${parsedCmd.args.join(' ')}`
+      );
+      return;
+    }
+
     await handlePreviewContext(promptText, newChatId);
   };
 
@@ -1028,6 +1145,18 @@ export default function App() {
     } catch (e) {
       console.warn('Failed to record follow-up user message:', e);
       setChatMessages((prev) => [...prev, fallbackUserMsg]);
+    }
+
+    // Check if follow-up prompt is a shell command (e.g. pip install requests or $ cargo check)
+    const parsedCmd = parseShellCommand(promptText);
+    if (parsedCmd) {
+      await handleTriggerCommand(
+        parsedCmd.program,
+        parsedCmd.args,
+        project?.path,
+        `Run ${parsedCmd.program} ${parsedCmd.args.join(' ')}`
+      );
+      return;
     }
 
     await handlePreviewContext(promptText, currentChatId);

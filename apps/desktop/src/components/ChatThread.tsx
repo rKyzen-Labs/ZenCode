@@ -312,6 +312,7 @@ interface ConversationStepsProps {
   plan?: ZencodePlan | null;
   filesChanged?: ParsedFileChange[];
   liveActivities?: ActivityItem[];
+  verificationHistory?: ExecutionResult[];
   elapsedSeconds?: number;
   planningElapsedSeconds?: number;
   completedDurationSeconds?: number;
@@ -326,6 +327,7 @@ const ConversationStepsCard: FC<ConversationStepsProps> = ({
   plan,
   filesChanged,
   liveActivities,
+  verificationHistory,
   elapsedSeconds,
   planningElapsedSeconds,
   completedDurationSeconds,
@@ -357,17 +359,13 @@ const ConversationStepsCard: FC<ConversationStepsProps> = ({
       ? plan.planning_duration_seconds
       : (hasFilesChanged ? 6 : thoughtDuration);
 
-  // Derive variable action summary based on real events and plan steps
-  const exploredFiles =
-    liveActivities?.some((a) => a.type === 'analyze') ||
-    (plan?.steps && plan.steps.some((s) => (s.likely_files && s.likely_files.length > 0) || (s.target_files && s.target_files.length > 0)));
-  const editedFiles =
-    hasFilesChanged ||
-    liveActivities?.some((a) => a.type === 'edit') ||
-    (plan?.steps && plan.steps.some((s) => s.goal?.toLowerCase().includes('edit') || s.goal?.toLowerCase().includes('add') || s.goal?.toLowerCase().includes('creat') || s.goal?.toLowerCase().includes('writ') || s.goal?.toLowerCase().includes('export')));
-  const ranCommands =
+  // Derive grounded action summary based strictly on verified real events
+  const exploredFiles = Boolean(liveActivities?.some((a) => a.type === 'analyze'));
+  const editedFiles = Boolean(hasFilesChanged || liveActivities?.some((a) => a.type === 'edit'));
+  const ranCommands = Boolean(
     liveActivities?.some((a) => a.type === 'run') ||
-    (plan?.steps && plan.steps.some((s) => s.instructions?.some((i) => i.toLowerCase().startsWith('run') || i.toLowerCase().startsWith('execute') || i.toLowerCase().includes('test'))));
+    (verificationHistory && verificationHistory.length > 0 && isLive)
+  );
 
   const actionBreadcrumbs: string[] = [];
   if (exploredFiles) actionBreadcrumbs.push('Explored files');
@@ -463,111 +461,113 @@ const ConversationStepsCard: FC<ConversationStepsProps> = ({
           )}
 
           {/* Planning Thought Item with Real Time & Expandable Planner Output */}
-          <div className="space-y-1">
-            <div
-              onClick={() => setIsThoughtOpen(!isThoughtOpen)}
-              className="inline-flex items-center gap-1.5 py-0.5 text-xs text-[#83827d] hover:text-[#141413] transition-colors select-none cursor-pointer group"
-              title="Click to view Gemini planner reasoning and strategy"
-            >
-              <span>Thought for</span>
-              <span className="text-[#535146] font-medium font-mono">{thoughtDuration}s</span>
-              {isThoughtOpen ? (
-                <ChevronDown className="w-3 h-3 text-[#83827d] group-hover:text-[#141413]" />
-              ) : (
-                <ChevronRight className="w-3 h-3 text-[#83827d] group-hover:text-[#141413]" />
-              )}
-            </div>
-
-            {/* Gemini Planner Output rendered under Thought */}
-            {isThoughtOpen && (
-              <div className="bg-[#ede9de]/60 border border-[#dad9d4] rounded-lg p-3 my-1.5 space-y-2 text-xs font-sans text-[#3d3929]">
-                {isPlanning ? (
-                  <div className="flex items-center gap-2 text-xs text-[#83827d] py-1 font-sans">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c96442]" />
-                    <span>Gemini planner is analyzing codebase and formulating plan...</span>
-                  </div>
-                ) : plan ? (
-                  <div className="space-y-2">
-                    {/* Goal & Task Summary */}
-                    {plan.task_summary && (
-                      <div>
-                        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-[#83827d] block mb-0.5 font-sans">
-                          Planner Analysis &amp; Goal
-                        </span>
-                        <p className="text-[12.5px] leading-relaxed text-[#141413] font-normal font-sans">
-                          {plan.task_summary}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Conversational reasoning */}
-                    {plan.conversational_reply && plan.conversational_reply !== plan.task_summary && (
-                      <div>
-                        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-[#83827d] block mb-0.5 font-sans">
-                          Reasoning
-                        </span>
-                        <p className="text-[12px] leading-relaxed text-[#535146] font-sans">
-                          {plan.conversational_reply}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Project Findings */}
-                    {plan.project_findings && plan.project_findings.length > 0 && (
-                      <div>
-                        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-[#83827d] block mb-0.5 font-sans">
-                          Project Findings
-                        </span>
-                        <ul className="list-disc list-inside space-y-0.5 text-[#535146] text-[11.5px] font-sans">
-                          {plan.project_findings.map((f, idx) => (
-                            <li key={idx} className="leading-relaxed">
-                              {f}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {/* Assumptions */}
-                    {plan.assumptions && plan.assumptions.length > 0 && (
-                      <div>
-                        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-[#83827d] block mb-0.5 font-sans">
-                          Assumptions
-                        </span>
-                        <ul className="list-disc list-inside space-y-0.5 text-[#535146] text-[11.5px] font-sans">
-                          {plan.assumptions.map((a, idx) => (
-                            <li key={idx} className="leading-relaxed">
-                              {a}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {/* Verification Suggestions */}
-                    {plan.verification_suggestions && plan.verification_suggestions.length > 0 && (
-                      <div>
-                        <span className="text-[10.5px] font-semibold uppercase tracking-wider text-[#83827d] block mb-0.5 font-sans">
-                          Verification Strategy
-                        </span>
-                        <ul className="list-disc list-inside space-y-0.5 text-[#535146] text-[11.5px] font-sans">
-                          {plan.verification_suggestions.map((v, idx) => (
-                            <li key={idx} className="leading-relaxed">
-                              {v}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
+          {(isPlanning || (plan && (plan.task_summary || (plan.steps && plan.steps.length > 0)))) && (
+            <div className="space-y-1">
+              <div
+                onClick={() => setIsThoughtOpen(!isThoughtOpen)}
+                className="inline-flex items-center gap-1.5 py-0.5 text-xs text-[#83827d] hover:text-[#141413] transition-colors select-none cursor-pointer group"
+                title="Click to view Gemini planner reasoning and strategy"
+              >
+                <span>Thought for</span>
+                <span className="text-[#535146] font-medium font-mono">{thoughtDuration}s</span>
+                {isThoughtOpen ? (
+                  <ChevronDown className="w-3 h-3 text-[#83827d] group-hover:text-[#141413]" />
                 ) : (
-                  <div className="text-xs text-[#83827d] italic font-sans">
-                    No planning details recorded for this turn.
-                  </div>
+                  <ChevronRight className="w-3 h-3 text-[#83827d] group-hover:text-[#141413]" />
                 )}
               </div>
-            )}
-          </div>
+
+              {/* Gemini Planner Output rendered under Thought */}
+              {isThoughtOpen && (
+                <div className="bg-[#ede9de]/60 border border-[#dad9d4] rounded-lg p-3 my-1.5 space-y-2 text-xs font-sans text-[#3d3929]">
+                  {isPlanning ? (
+                    <div className="flex items-center gap-2 text-xs text-[#83827d] py-1 font-sans">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c96442]" />
+                      <span>Gemini planner is analyzing codebase and formulating plan...</span>
+                    </div>
+                  ) : plan ? (
+                    <div className="space-y-2">
+                      {/* Goal & Task Summary */}
+                      {plan.task_summary && (
+                        <div>
+                          <span className="text-[10.5px] font-semibold uppercase tracking-wider text-[#83827d] block mb-0.5 font-sans">
+                            Planner Analysis &amp; Goal
+                          </span>
+                          <p className="text-[12.5px] leading-relaxed text-[#141413] font-normal font-sans">
+                            {plan.task_summary}
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Conversational reasoning */}
+                      {plan.conversational_reply && plan.conversational_reply !== plan.task_summary && (
+                        <div>
+                          <span className="text-[10.5px] font-semibold uppercase tracking-wider text-[#83827d] block mb-0.5 font-sans">
+                            Reasoning
+                          </span>
+                          <p className="text-[12px] leading-relaxed text-[#535146] font-sans">
+                            {plan.conversational_reply}
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Project Findings */}
+                      {plan.project_findings && plan.project_findings.length > 0 && (
+                        <div>
+                          <span className="text-[10.5px] font-semibold uppercase tracking-wider text-[#83827d] block mb-0.5 font-sans">
+                            Project Findings
+                          </span>
+                          <ul className="list-disc list-inside space-y-0.5 text-[#535146] text-[11.5px] font-sans">
+                            {plan.project_findings.map((f, idx) => (
+                              <li key={idx} className="leading-relaxed">
+                                {f}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Assumptions */}
+                      {plan.assumptions && plan.assumptions.length > 0 && (
+                        <div>
+                          <span className="text-[10.5px] font-semibold uppercase tracking-wider text-[#83827d] block mb-0.5 font-sans">
+                            Assumptions
+                          </span>
+                          <ul className="list-disc list-inside space-y-0.5 text-[#535146] text-[11.5px] font-sans">
+                            {plan.assumptions.map((a, idx) => (
+                              <li key={idx} className="leading-relaxed">
+                                {a}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Verification Suggestions */}
+                      {plan.verification_suggestions && plan.verification_suggestions.length > 0 && (
+                        <div>
+                          <span className="text-[10.5px] font-semibold uppercase tracking-wider text-[#83827d] block mb-0.5 font-sans">
+                            Verification Strategy
+                          </span>
+                          <ul className="list-disc list-inside space-y-0.5 text-[#535146] text-[11.5px] font-sans">
+                            {plan.verification_suggestions.map((v, idx) => (
+                              <li key={idx} className="leading-relaxed">
+                                {v}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-[#83827d] italic font-sans">
+                      No planning details recorded for this turn.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* 1. Concrete live executed tool activities (Analyzed, Edited, Ran) */}
           {hasLiveActivities &&
@@ -576,14 +576,19 @@ const ConversationStepsCard: FC<ConversationStepsProps> = ({
                 return null; // Merged into the main Thought block above
               }
               if (act.type === 'run') {
+                const displayCmd = act.command
+                  ? act.command
+                  : (act.label || '').replace(/^Ran\s+/i, '');
                 return (
                   <div
                     key={act.id}
                     className="flex items-center gap-2 py-0.5 text-xs text-[#141413] hover:text-[#c96442] transition-colors cursor-pointer select-none font-sans"
                   >
-                    <span className="text-[#83827d] font-semibold font-mono">$</span>
-                    <span className="font-mono text-[#141413]">{act.label}</span>
-                    <ChevronRight className="w-3 h-3 text-[#83827d]" />
+                    <span className="text-[#83827d] font-semibold font-mono select-none">$</span>
+                    <span className="font-mono text-[#141413] truncate max-w-xl" title={displayCmd}>
+                      {displayCmd}
+                    </span>
+                    <ChevronRight className="w-3 h-3 text-[#83827d] shrink-0" />
                   </div>
                 );
               }
@@ -850,8 +855,7 @@ const stripDirectorPreambleFrontend = (text: string): string => {
   if (!text) return '';
   return text
     .replace(/^as the director ai assistant in zencode[^\n]*:?\s*/i, '')
-    .replace(/^here is the summary of the (completed|recent) task[^\n]*:?\s*/i, '')
-    .replace(/^here is a summary of the (completed|recent) task[^\n]*:?\s*/i, '')
+    .replace(/^here is (?:the|a) summary of (?:the\s+)?(?:recent\s+|completed\s+)?(?:task\s+)?(?:execution)?[^\n]*:?\s*/i, '')
     .trim();
 };
 
@@ -1060,7 +1064,7 @@ export const ChatThread: FC<ChatThreadProps> = ({
   isPlanning = false,
   planningElapsedSeconds = 0,
   inventory,
-  verificationHistory: _verificationHistory,
+  verificationHistory,
   pendingCommandApproval,
   onApproveCommand,
   onDenyCommand,
@@ -1245,7 +1249,7 @@ export const ChatThread: FC<ChatThreadProps> = ({
             id: `act_${actCounter++}`,
             type: 'thought',
             label: part.text || 'Thinking...',
-            duration: '16s',
+            duration: planningElapsedSeconds ? `${planningElapsedSeconds}s` : undefined,
           });
         }
       }
@@ -1590,7 +1594,7 @@ export const ChatThread: FC<ChatThreadProps> = ({
                   {/* Conversation Steps in Verbose Mode for EVERY prompt */}
                   <ConversationStepsCard
                     id={msg.id || `msg_${idx}`}
-                    plan={parsedPlan || (isLastMessage ? plan : null)}
+                    plan={parsedPlan || (isCurrentlyRunning ? plan : null)}
                     filesChanged={parsedInv?.files}
                     liveActivities={isLastMessage ? structuredActivities : undefined}
                     elapsedSeconds={isLastMessage ? elapsedSeconds : undefined}
@@ -1598,6 +1602,7 @@ export const ChatThread: FC<ChatThreadProps> = ({
                     completedDurationSeconds={turnDurationSecs}
                     isLive={isCurrentlyRunning}
                     isPlanning={isLastMessage && isPlanning}
+                    verificationHistory={isLastMessage && isCurrentlyRunning ? verificationHistory : undefined}
                     onOpenFileDiff={onOpenFileDiff}
                   />
 
@@ -1608,10 +1613,26 @@ export const ChatThread: FC<ChatThreadProps> = ({
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      {/* Hide static repetitive task summary while task is running to avoid duplicate clutter */}
-                      {(!isCurrentlyRunning || msg.worker_summary) && (
-                        renderMarkdownContent(msg.worker_summary || msg.content || '')
-                      )}
+                      {/* Render grounded completion summary; avoid premature or redundant prompt duplication */}
+                      {(() => {
+                        if (isCurrentlyRunning) {
+                          return null;
+                        }
+                        const contentToRender = msg.worker_summary || msg.content || '';
+                        if (
+                          parsedPlan?.task_summary &&
+                          contentToRender.trim().toLowerCase() === parsedPlan.task_summary.trim().toLowerCase()
+                        ) {
+                          return null;
+                        }
+                        if (
+                          prevUserMsg?.content &&
+                          contentToRender.trim().toLowerCase() === prevUserMsg.content.trim().toLowerCase()
+                        ) {
+                          return null;
+                        }
+                        return renderMarkdownContent(contentToRender);
+                      })()}
 
                       {/* Files Changed banner for this turn matching PDF Page 3 */}
                       {parsedInv && parsedInv.files.length > 0 && (
@@ -1663,6 +1684,7 @@ export const ChatThread: FC<ChatThreadProps> = ({
               planningElapsedSeconds={planningElapsedSeconds}
               isLive={true}
               isPlanning={isPlanning}
+              verificationHistory={verificationHistory}
               onOpenFileDiff={onOpenFileDiff}
             />
           </div>
