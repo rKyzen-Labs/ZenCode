@@ -165,19 +165,29 @@ impl GroqQuotaManager {
 }
 
 pub struct GroqWorkerClient {
+    pub endpoint_url: String,
     pub api_key: String,
-    pub quota_tracker: Arc<Mutex<crate::planner::quota::ModelQuotaTracker>>,
+    pub quota_tracker: Option<Arc<Mutex<crate::planner::quota::ModelQuotaTracker>>>,
 }
 
 impl GroqWorkerClient {
     pub fn new(api_key: String, quota_tracker: Arc<Mutex<crate::planner::quota::ModelQuotaTracker>>) -> Self {
         Self {
+            endpoint_url: "https://api.groq.com/openai/v1/chat/completions".to_string(),
             api_key,
-            quota_tracker,
+            quota_tracker: Some(quota_tracker),
         }
     }
 
-    /// Executes the plan step-by-step in the isolated task worktree using Groq cloud models.
+    pub fn new_ollama(endpoint: Option<String>) -> Self {
+        Self {
+            endpoint_url: endpoint.unwrap_or_else(|| "http://127.0.0.1:11434/v1/chat/completions".to_string()),
+            api_key: "ollama".to_string(),
+            quota_tracker: None,
+        }
+    }
+
+    /// Executes the plan step-by-step in the isolated task worktree using Groq cloud models or local Ollama.
     pub async fn execute_session(
         &self,
         worktree_path: &Path,
@@ -189,16 +199,17 @@ impl GroqWorkerClient {
         execution_service: Arc<ExecutionService>,
         app_handle: AppHandle,
     ) -> Result<(ChangeInventory, Vec<String>), String> {
-        // Pre-flight check: ensure Groq capacity is not completely exhausted
-        {
-            let tracker = self.quota_tracker.lock().await;
+        // Pre-flight check: ensure Groq capacity is not completely exhausted if using Groq
+        if let Some(ref tracker_arc) = self.quota_tracker {
+            let tracker = tracker_arc.lock().await;
             if tracker.are_all_groq_models_exhausted() {
                 return Err("All Groq models are exhausted for today (0 requests remaining or rate-limited). Please switch back to the Local (Ollama) worker in the dock or Settings.".to_string());
             }
         }
 
+        let timeout_secs = if self.quota_tracker.is_none() { 300 } else { 90 };
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(90))
+            .timeout(Duration::from_secs(timeout_secs))
             .build()
             .map_err(|e| e.to_string())?;
 
@@ -366,16 +377,22 @@ COMMAND: pip install requests
         }
         user_prompt.push_str(&format!("\n\n{shredded_files_summary}"));
 
-        // 4. Model Rotation Loop (gpt-oss-120b -> gpt-oss-20b -> qwen3.8-27b)
+        // 4. Model Selection & Request Loop
         let mut attempts = 0;
-        let mut chosen_model = {
-            let mut tracker = self.quota_tracker.lock().await;
+        let mut chosen_model = if let Some(ref tracker_arc) = self.quota_tracker {
+            let mut tracker = tracker_arc.lock().await;
             tracker.select_groq_model(preferred_model)?
+        } else {
+            preferred_model.unwrap_or("qwen2.5-coder:7b").to_string()
         };
         let mut response_text = String::new();
+        let max_attempts = if self.quota_tracker.is_some() { 3 } else { 1 };
 
-        while attempts < 3 {
+        while attempts < max_attempts {
             attempts += 1;
+
+            let is_ollama = self.quota_tracker.is_none();
+            let provider_label = if is_ollama { "Ollama (Local)" } else { "Groq (Cloud)" };
 
             // Emit reasoning thought
             let _ = app_handle.emit(
@@ -388,7 +405,7 @@ COMMAND: pip install requests
                         "properties": {
                             "part": {
                                 "type": "reasoning",
-                                "text": format!("Sending prompt to Groq model: {chosen_model}")
+                                "text": format!("Sending prompt to {provider_label} model: {chosen_model}")
                             }
                         }
                     }).to_string(),
@@ -406,10 +423,15 @@ COMMAND: pip install requests
                 "max_tokens": 4096
             });
 
-            let req_resp = client
-                .post("https://api.groq.com/openai/v1/chat/completions")
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
+            let mut req_builder = client
+                .post(&self.endpoint_url)
+                .header("Content-Type", "application/json");
+
+            if !self.api_key.is_empty() && self.api_key != "ollama" {
+                req_builder = req_builder.header("Authorization", format!("Bearer {}", self.api_key));
+            }
+
+            let req_resp = req_builder
                 .json(&body)
                 .send()
                 .await;
@@ -417,10 +439,10 @@ COMMAND: pip install requests
             match req_resp {
                 Ok(resp) => {
                     let status = resp.status();
-                    // Extract real ground-truth rate-limit headers from Groq response
-                    let groq_headers = crate::planner::quota::parse_groq_headers(resp.headers());
-                    {
-                        let mut tracker = self.quota_tracker.lock().await;
+                    if let Some(ref tracker_arc) = self.quota_tracker {
+                        // Extract real ground-truth rate-limit headers from Groq response
+                        let groq_headers = crate::planner::quota::parse_groq_headers(resp.headers());
+                        let mut tracker = tracker_arc.lock().await;
                         tracker.update_groq_server_headers(&chosen_model, &groq_headers);
                         let event = tracker.to_quota_update_event(&chosen_model);
                         let _ = app_handle.emit("planner:quota_update", &event);
@@ -428,14 +450,14 @@ COMMAND: pip install requests
 
                     if status.is_success() {
                         let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-                        let tokens = json
-                            .get("usage")
-                            .and_then(|u| u.get("total_tokens"))
-                            .and_then(|t| t.as_u64())
-                            .unwrap_or(1000) as u32;
+                        if let Some(ref tracker_arc) = self.quota_tracker {
+                            let tokens = json
+                                .get("usage")
+                                .and_then(|u| u.get("total_tokens"))
+                                .and_then(|t| t.as_u64())
+                                .unwrap_or(1000) as u32;
 
-                        {
-                            let mut tracker = self.quota_tracker.lock().await;
+                            let mut tracker = tracker_arc.lock().await;
                             tracker.record_actual_usage(&chosen_model, tokens);
                             let event = tracker.to_quota_update_event(&chosen_model);
                             let _ = app_handle.emit("planner:quota_update", &event);
@@ -452,27 +474,31 @@ COMMAND: pip install requests
                             .to_string();
                         break;
                     } else if status.as_u16() == 429 {
-                        // Rate limit hit: ModelQuotaTracker already set cooldown from retry-after header
-                        let next_model = {
-                            let mut tracker = self.quota_tracker.lock().await;
-                            tracker.select_groq_model(None).map_err(|e| format!("Groq quota exhausted: {e}"))?
-                        };
-                        println!("Groq 429 on {chosen_model}. Rotating to {next_model}...");
-                        chosen_model = next_model;
-                        continue;
+                        if let Some(ref tracker_arc) = self.quota_tracker {
+                            // Rate limit hit: ModelQuotaTracker already set cooldown from retry-after header
+                            let next_model = {
+                                let mut tracker = tracker_arc.lock().await;
+                                tracker.select_groq_model(None).map_err(|e| format!("Groq quota exhausted: {e}"))?
+                            };
+                            println!("Groq 429 on {chosen_model}. Rotating to {next_model}...");
+                            chosen_model = next_model;
+                            continue;
+                        } else {
+                            return Err(format!("Local Ollama model returned 429: {}", resp.text().await.unwrap_or_default()));
+                        }
                     } else {
                         let err_body = resp.text().await.unwrap_or_default();
-                        return Err(format!("Groq API request failed ({status}): {err_body}"));
+                        return Err(format!("{provider_label} API request failed ({status}): {err_body}"));
                     }
                 }
                 Err(e) => {
-                    return Err(format!("Network failure calling Groq API: {e}"));
+                    return Err(format!("Network failure calling {provider_label} API: {e}"));
                 }
             }
         }
 
         if response_text.is_empty() {
-            return Err("Groq worker failed to generate a response across rotated models.".to_string());
+            return Err("Worker failed to generate a response.".to_string());
         }
 
         // 5. Parse and Apply Diff Blocks to Worktree

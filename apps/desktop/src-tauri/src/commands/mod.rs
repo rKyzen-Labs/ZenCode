@@ -1232,6 +1232,235 @@ pub async fn start_worker_session(
         return Ok(session_id);
     }
 
+    // 5. Native Direct Ollama Execution (or fallback to sidecar only if explicitly present)
+    if EngineSupervisor::locate_pinned_binary().is_err() {
+        let session_id = format!("ollama_session_{}", tid);
+        let worker_model_name = state.worker_model.lock().await.clone();
+        let ollama_client = crate::worker::GroqWorkerClient::new_ollama(None);
+        let worktree_buf = PathBuf::from(&worktree_info.worktree_path);
+        let tid_clone = tid.clone();
+        let ses_id_clone = session_id.clone();
+        let plan_summary = plan.task_summary.clone();
+        let plan_steps = plan.steps.clone();
+        let app_clone = app_handle.clone();
+        let active_task_inventories = state.active_task_inventories.clone();
+        let task_state_arc = state.task_state.clone();
+        let db_arc = state.db.clone();
+        let planner_client_groq = state.planner_client.clone();
+        let exec_service_groq = state.execution_service.clone();
+
+        // Update state to WorkerRunning
+        {
+            let mut task = state.task_state.lock().await;
+            *task = TaskState::WorkerRunning {
+                session_id: session_id.clone(),
+            };
+        }
+
+        let _ = app_handle.emit(
+            "worker:status",
+            &TaskState::WorkerRunning {
+                session_id: session_id.clone(),
+            },
+        );
+
+        tokio::spawn(async move {
+            match ollama_client
+                .execute_session(
+                    &worktree_buf,
+                    &tid_clone,
+                    &ses_id_clone,
+                    &plan_summary,
+                    &plan_steps,
+                    Some(&worker_model_name),
+                    exec_service_groq,
+                    app_clone.clone(),
+                )
+                .await
+            {
+                Ok((inventory, executed_commands)) => {
+                    let mut inv_map = active_task_inventories.lock().await;
+                    inv_map.insert(tid_clone.clone(), inventory.clone());
+
+                    let (commit_hash, conflict_resolved) = match GitService::commit_and_merge_task_to_primary(
+                        &worktree_buf,
+                        "",
+                        &plan_summary,
+                    ) {
+                        Ok(outcome) => (outcome.commit_sha, outcome.conflict_resolved),
+                        Err(e) => {
+                            eprintln!("Warning: automatic commit and merge to primary failed: {e}");
+                            (None, false)
+                        }
+                    };
+
+                    if conflict_resolved {
+                        let notice_record = crate::db::models::ChatMessageRecord {
+                            id: format!("sys_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),
+                            chat_id: tid_clone.clone(),
+                            role: "system".to_string(),
+                            content: format!("Resolved a conflict automatically — {}'s changes were kept.", plan_summary),
+                            plan_json: None,
+                            worker_summary: None,
+                            files_changed_json: None,
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                            commit_hash: None,
+                        };
+                        let _ = db_arc.add_chat_message(&notice_record);
+                        let _ = app_clone.emit("chat:message_added", &notice_record);
+                    }
+
+                    // Emit progress reasoning that summary is being generated before task completes
+                    let _ = app_clone.emit(
+                        "worker:message",
+                        &WorkerEventPayload {
+                            session_id: ses_id_clone.clone(),
+                            event_type: "message.part.updated".into(),
+                            content: serde_json::json!({
+                                "type": "message.part.updated",
+                                "properties": {
+                                    "part": {
+                                        "type": "reasoning",
+                                        "text": "Summarizing and verifying task execution outcomes..."
+                                    }
+                                }
+                            }).to_string(),
+                            timestamp_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                        },
+                    );
+
+                    let (files_summary, diff_excerpts) = format_inventory_for_summary(&inventory);
+                    let (verified_cmds, unperformed_summary, unperformed_list) =
+                        analyze_execution_grounding(&plan_steps, &inventory, &executed_commands);
+
+                    // Ask Gemini (Director model) to summarize what happened with grounded verified outcomes
+                    let summary = match CredentialService::get_gemini_api_key() {
+                        Ok(key) => {
+                            match planner_client_groq
+                                .summarize_task_outcome_grounded(
+                                    &key,
+                                    &plan_summary,
+                                    &files_summary,
+                                    &diff_excerpts,
+                                    &verified_cmds,
+                                    &unperformed_summary,
+                                    Some(&app_clone),
+                                )
+                                .await
+                            {
+                                Ok((gemini_sum, _, _)) => {
+                                    let files_modified: Vec<String> = inventory.files.iter().map(|f| f.path.clone()).collect();
+                                    zencode_core::verify_and_reconcile_summary(
+                                        &gemini_sum,
+                                        &files_modified,
+                                        &executed_commands,
+                                        &unperformed_list,
+                                    )
+                                }
+                                Err(e) => {
+                                    eprintln!("Gemini summarization failed ({e}), falling back to inventory stats");
+                                    format!(
+                                        "Completed task with Ollama worker: {} file(s) modified (+{}/-{}) across {} executed command(s)",
+                                        inventory.files.len(),
+                                        inventory.total_additions,
+                                        inventory.total_deletions,
+                                        executed_commands.len()
+                                    )
+                                }
+                            }
+                        }
+                        Err(_) => format!(
+                            "Completed task with Ollama worker: {} file(s) modified (+{}/-{}) across {} executed command(s)",
+                            inventory.files.len(),
+                            inventory.total_additions,
+                            inventory.total_deletions,
+                            executed_commands.len()
+                        ),
+                    };
+
+                    let inv_json = serde_json::to_string(&inventory).ok();
+                    let finalized = db_arc
+                        .finalize_latest_assistant_message(
+                            &tid_clone,
+                            &summary,
+                            inv_json.as_deref(),
+                            commit_hash.as_deref(),
+                        )
+                        .unwrap_or(false);
+
+                    let record = if finalized {
+                        db_arc
+                            .get_chat_messages(&tid_clone)
+                            .ok()
+                            .and_then(|msgs| msgs.into_iter().rev().find(|m| m.role == "assistant"))
+                            .unwrap_or_else(|| {
+                                crate::db::models::ChatMessageRecord {
+                                    id: format!("msg_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()),
+                                    chat_id: tid_clone.clone(),
+                                    role: "assistant".to_string(),
+                                    content: summary.clone(),
+                                    plan_json: None,
+                                    worker_summary: Some(summary.clone()),
+                                    files_changed_json: inv_json.clone(),
+                                    created_at: chrono::Utc::now().to_rfc3339(),
+                                    commit_hash: commit_hash.clone(),
+                                }
+                            })
+                    } else {
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let msg_id = format!(
+                            "msg_{}",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis()
+                        );
+                        let rec = crate::db::models::ChatMessageRecord {
+                            id: msg_id,
+                            chat_id: tid_clone.clone(),
+                            role: "assistant".to_string(),
+                            content: summary.clone(),
+                            plan_json: None,
+                            worker_summary: Some(summary.clone()),
+                            files_changed_json: inv_json,
+                            created_at: now,
+                            commit_hash: commit_hash.clone(),
+                        };
+                        let _ = db_arc.add_chat_message(&rec);
+                        rec
+                    };
+                    let _ = app_clone.emit("chat:message_added", &record);
+
+                    // Associate commit_hash with user prompt message in this chat
+                    if let Some(ref sha) = commit_hash {
+                        if let Ok(msgs) = db_arc.get_chat_messages(&tid_clone) {
+                            if let Some(user_msg) = msgs.iter().rev().find(|m| m.role == "user") {
+                                let _ = db_arc.update_message_commit_hash(&user_msg.id, sha);
+                            }
+                        }
+                    }
+
+                    // Emit inventory ready and transition task state to Complete ONLY AFTER the summary message is published
+                    let _ = app_clone.emit("review:inventory_ready", &inventory);
+                    let mut task = task_state_arc.lock().await;
+                    *task = TaskState::Complete;
+                    let _ = app_clone.emit(
+                        "worker:status",
+                        &TaskState::Complete,
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Ollama worker error: {e}");
+                    let mut task = task_state_arc.lock().await;
+                    *task = TaskState::Failed(e.clone());
+                    let _ = app_clone.emit("worker:status", &TaskState::Failed(e));
+                }
+            }
+        });
+
+        return Ok(session_id);
+    }
+
     // 5. Configure OpenCode sidecar strictly with worktree path as its working directory (Local Ollama)
     let mut supervisor_guard = state.engine_supervisor.lock().await;
     if let Some(mut existing) = supervisor_guard.take() {
@@ -3469,32 +3698,21 @@ pub async fn verify_startup_dependencies(
     };
     dependencies.push(ollama_status);
 
-    // 2. OpenCode sidecar binary check
-    let opencode_status = match EngineSupervisor::locate_pinned_binary() {
-        Ok(path) => {
-            let version = match std::process::Command::new(&path).arg("--version").output() {
-                Ok(out) if out.status.success() => {
-                    String::from_utf8_lossy(&out.stdout).trim().to_string()
-                }
-                _ => "v1.0.0".to_string(),
-            };
-            DependencyStatus {
-                name: "OpenCode Sidecar Engine".into(),
-                is_ready: true,
-                details: format!("Binary present at {:?} ({})", path, version),
-                fix_recommendation: None,
+    // 2. OpenCode sidecar binary check (optional legacy engine; native direct Ollama is primary)
+    if let Ok(path) = EngineSupervisor::locate_pinned_binary() {
+        let version = match std::process::Command::new(&path).arg("--version").output() {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
             }
-        }
-        Err(_) => DependencyStatus {
-            name: "OpenCode Sidecar Engine".into(),
-            is_ready: false,
-            details: "OpenCode sidecar executable not found in binaries directory".into(),
-            fix_recommendation: Some(
-                "Ensure 'opencode.exe' is present in the application binaries/ folder".into(),
-            ),
-        },
-    };
-    dependencies.push(opencode_status);
+            _ => "v1.0.0".to_string(),
+        };
+        dependencies.push(DependencyStatus {
+            name: "OpenCode Sidecar Engine (Optional)".into(),
+            is_ready: true,
+            details: format!("Binary present at {:?} ({})", path, version),
+            fix_recommendation: None,
+        });
+    }
 
     // 3. Git on PATH
     let git_status = match std::process::Command::new("git").arg("--version").output() {
