@@ -227,16 +227,6 @@ ZenCode/
 
 ---
 
-## 🗺️ Roadmap & Development Milestones
-
-- [x] **Milestone 0: Engine Boundary & Contracts** — Deterministic routing, secret redaction, credential vault, offline Ollama fallback handling.
-- [x] **Milestone 1: Desktop Foundation** — Tauri 2 + React 18, dark/light theme, streaming responses, SSE worker connection.
-- [x] **Milestone 2: Git Worktree Isolation & Diff Review** — Hidden worktree sandboxes, CodeMirror diff viewer, atomic accept/reject changes.
-- [x] **Milestone 3: Grounded Verification & Terminal Integration** — Supervised terminal executions, command approval gates, real-time log stream.
-- [x] **Milestone 4: Multi-Platform Release** — Native Windows NSIS installer, Debian `.deb` package, and standalone Linux 64-bit ELF binary.
-- [ ] **Milestone 5: macOS Universal Package (.dmg)** — Automated signing and notarization for Apple Silicon and Intel Macs.
-
----
 
 ## 🤝 Contributing
 
