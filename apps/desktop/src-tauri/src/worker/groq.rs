@@ -436,12 +436,13 @@ pip install requests
 or:
 COMMAND: pip install requests
 
-8. Keep changes focused and minimal to conserve token budget.
-9. Provide a brief explanation before the diff blocks."#;
+8. Write complete, high-quality, production-ready code. NEVER write stubs, placeholders, abbreviations, or '// TODO' comments. Fully implement all requested sections, components, styling, logic, and functions.
+9. For web & UI tasks, ensure high visual fidelity, complete CSS styling, full semantic HTML structure with all sections, and working interactive event handlers.
+10. Provide a brief explanation before the diff blocks."#;
 
         // Build User Prompt
         let mut user_prompt = format!(
-            "Execute the following implementation plan:\n\nTask: {plan_summary}\n\nSteps:\n"
+            "Execute the following implementation plan thoroughly and completely without placeholders or stubs:\n\nTask: {plan_summary}\n\nSteps:\n"
         );
         for (i, step) in steps.iter().enumerate() {
             user_prompt.push_str(&format!(
