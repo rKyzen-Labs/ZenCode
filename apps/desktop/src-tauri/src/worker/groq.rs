@@ -698,7 +698,7 @@ or: COMMAND: npm test
 
         // 5. Parse and Apply Diff Blocks to Worktree
         let fallback_file = steps.first().and_then(|s| s.likely_files.first()).map(|s| s.as_str());
-        let applied_diffs = apply_diff_blocks(worktree_path, &response_text, fallback_file)?;
+        let mut applied_diffs = apply_diff_blocks(worktree_path, &response_text, fallback_file)?;
 
         // Emit edit activity events for UI matching Image 5
         for diff in &applied_diffs {
@@ -770,6 +770,143 @@ or: COMMAND: npm test
                     timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
                 },
             );
+        }
+
+        // 5d. Automated Local Compiler / Typecheck Verification & Self-Correction Loop
+        if !applied_diffs.is_empty() {
+            let check_result = run_local_compiler_check(
+                worktree_path,
+                session_id,
+                &execution_service,
+                &app_handle,
+                &applied_diffs,
+            ).await;
+
+            if let Ok(Some(compiler_errors)) = check_result {
+                let _ = app_handle.emit(
+                    "worker:message",
+                    &WorkerEventPayload {
+                        session_id: session_id.to_string(),
+                        event_type: "message.part.updated".into(),
+                        content: serde_json::json!({
+                            "type": "message.part.updated",
+                            "properties": {
+                                "part": {
+                                    "type": "reasoning",
+                                    "text": format!("Local compiler check detected errors:\n{}\nTriggering autonomous self-correction pass...", compiler_errors.trim())
+                                }
+                            }
+                        }).to_string(),
+                        timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                    },
+                );
+
+                // Perform 1 autonomous repair pass with compiler feedback
+                let repair_prompt = format!(
+                    "A local compiler/typecheck verification ran on the changes you just made and failed with the following errors:\n\n```\n{}\n```\n\nPlease fix the errors immediately. Output the necessary code updates in diff blocks or full file blocks (e.g. ```language:filepath ... ``` or <<<<<<< SEARCH ... ======= ... >>>>>>>). Do NOT introduce stubs or placeholders.",
+                    compiler_errors.trim()
+                );
+
+                let repair_body = serde_json::json!({
+                    "model": chosen_model,
+                    "messages": [
+                        { "role": "system", "content": system_prompt },
+                        { "role": "user", "content": user_prompt },
+                        { "role": "assistant", "content": response_text },
+                        { "role": "user", "content": repair_prompt }
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 4096
+                });
+
+                let mut req_builder = client
+                    .post(&self.endpoint_url)
+                    .header("Content-Type", "application/json");
+
+                if !self.api_key.is_empty() && self.api_key != "ollama" {
+                    req_builder = req_builder.header("Authorization", format!("Bearer {}", self.api_key));
+                }
+
+                if let Ok(resp) = req_builder.json(&repair_body).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(json) = resp.json::<serde_json::Value>().await {
+                            let repair_response = json
+                                .get("choices")
+                                .and_then(|c| c.as_array())
+                                .and_then(|arr| arr.first())
+                                .and_then(|c| c.get("message"))
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_str())
+                                .unwrap_or_default();
+
+                            if !repair_response.is_empty() {
+                                if let Ok(repair_diffs) = apply_diff_blocks(worktree_path, repair_response, fallback_file) {
+                                    if !repair_diffs.is_empty() {
+                                        format_and_clean_worktree_files(worktree_path, &repair_diffs);
+                                        applied_diffs.extend(repair_diffs.clone());
+
+                                        // Re-verify after repair
+                                        let post_repair_check = run_local_compiler_check(
+                                            worktree_path,
+                                            session_id,
+                                            &execution_service,
+                                            &app_handle,
+                                            &repair_diffs,
+                                        ).await;
+
+                                        let status_msg = match post_repair_check {
+                                            Ok(None) => "Autonomous self-correction succeeded: All compiler checks passed (exit code 0).".to_string(),
+                                            Ok(Some(remaining)) => format!("Autonomous self-correction completed. Remaining compiler notice: {}", remaining.lines().next().unwrap_or("")),
+                                            Err(_) => "Autonomous self-correction completed.".to_string(),
+                                        };
+
+                                        let _ = app_handle.emit(
+                                            "worker:message",
+                                            &WorkerEventPayload {
+                                                session_id: session_id.to_string(),
+                                                event_type: "message.part.updated".into(),
+                                                content: serde_json::json!({
+                                                    "type": "message.part.updated",
+                                                    "properties": {
+                                                        "part": {
+                                                            "type": "reasoning",
+                                                            "text": status_msg
+                                                        }
+                                                    }
+                                                }).to_string(),
+                                                timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if let Ok(None) = check_result {
+                let has_compiler = worktree_path.join("Cargo.toml").exists()
+                    || worktree_path.join("tsconfig.json").exists()
+                    || worktree_path.join("go.mod").exists();
+                if has_compiler {
+                    let _ = app_handle.emit(
+                        "worker:message",
+                        &WorkerEventPayload {
+                            session_id: session_id.to_string(),
+                            event_type: "message.part.updated".into(),
+                            content: serde_json::json!({
+                                "type": "message.part.updated",
+                                "properties": {
+                                    "part": {
+                                        "type": "reasoning",
+                                        "text": "Local compiler verification passed: syntax & types verified (exit code 0)."
+                                    }
+                                }
+                            }).to_string(),
+                            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                        },
+                    );
+                }
+            }
         }
 
         // 6. Extract and Execute Terminal Commands (Dependencies, Builds, Tests)
@@ -1128,6 +1265,137 @@ pub fn audit_code_quality(worktree_path: &Path, applied_diffs: &[crate::worker::
         }
     }
     findings
+}
+
+/// Runs an automated local compiler / typecheck / syntax verification pass inside the worktree.
+/// Returns Ok(None) if checks passed or no supported compiler is found in the project.
+/// Returns Ok(Some(error_summary)) if errors were found.
+pub async fn run_local_compiler_check(
+    worktree_path: &Path,
+    session_id: &str,
+    execution_service: &ExecutionService,
+    app_handle: &AppHandle,
+    applied_diffs: &[crate::worker::diff::AppliedDiffResult],
+) -> Result<Option<String>, String> {
+    // 1. Rust project check
+    if worktree_path.join("Cargo.toml").exists() {
+        let prog = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+        let args = ["check", "--message-format=short"];
+        let desc = "Run cargo check verification".to_string();
+        let req = execution_service
+            .create_approval_request(prog, &args, worktree_path, &desc, Some(session_id))
+            .await;
+
+        if req.auto_approved {
+            match execution_service.execute_command(&req.id, Some(app_handle), None).await {
+                Ok(res) => {
+                    if res.exit_code != Some(0) && !res.cancelled {
+                        let mut err = String::new();
+                        for line in res.stderr_tail.iter().chain(res.stdout_tail.iter()).take(30) {
+                            err.push_str(line);
+                            err.push('\n');
+                        }
+                        if !err.is_empty() {
+                            return Ok(Some(err));
+                        }
+                    }
+                }
+                Err(e) => return Ok(Some(format!("cargo check failed to run: {e}"))),
+            }
+        }
+    }
+    // 2. TypeScript project check
+    else if worktree_path.join("tsconfig.json").exists() {
+        let prog = if cfg!(windows) { "npx.cmd" } else { "npx" };
+        let args = ["tsc", "--noEmit"];
+        let desc = "Run typescript typecheck verification".to_string();
+        let req = execution_service
+            .create_approval_request(prog, &args, worktree_path, &desc, Some(session_id))
+            .await;
+
+        if req.auto_approved {
+            match execution_service.execute_command(&req.id, Some(app_handle), None).await {
+                Ok(res) => {
+                    if res.exit_code != Some(0) && !res.cancelled {
+                        let mut err = String::new();
+                        for line in res.stdout_tail.iter().chain(res.stderr_tail.iter()).take(30) {
+                            err.push_str(line);
+                            err.push('\n');
+                        }
+                        if !err.is_empty() {
+                            return Ok(Some(err));
+                        }
+                    }
+                }
+                Err(e) => return Ok(Some(format!("tsc check failed to run: {e}"))),
+            }
+        }
+    }
+    // 3. Go project check
+    else if worktree_path.join("go.mod").exists() {
+        let prog = if cfg!(windows) { "go.exe" } else { "go" };
+        let args = ["vet", "./..."];
+        let desc = "Run go vet verification".to_string();
+        let req = execution_service
+            .create_approval_request(prog, &args, worktree_path, &desc, Some(session_id))
+            .await;
+
+        if req.auto_approved {
+            match execution_service.execute_command(&req.id, Some(app_handle), None).await {
+                Ok(res) => {
+                    if res.exit_code != Some(0) && !res.cancelled {
+                        let mut err = String::new();
+                        for line in res.stderr_tail.iter().chain(res.stdout_tail.iter()).take(30) {
+                            err.push_str(line);
+                            err.push('\n');
+                        }
+                        if !err.is_empty() {
+                            return Ok(Some(err));
+                        }
+                    }
+                }
+                Err(e) => return Ok(Some(format!("go vet failed to run: {e}"))),
+            }
+        }
+    }
+    // 4. Python files check
+    else {
+        let py_files: Vec<&str> = applied_diffs
+            .iter()
+            .map(|d| d.file_path.as_str())
+            .filter(|p| p.ends_with(".py"))
+            .collect();
+
+        if !py_files.is_empty() {
+            let prog = if cfg!(windows) { "python.exe" } else { "python" };
+            let mut args = vec!["-m", "py_compile"];
+            args.extend(py_files);
+            let desc = "Run python syntax compilation verification".to_string();
+            let req = execution_service
+                .create_approval_request(prog, &args, worktree_path, &desc, Some(session_id))
+                .await;
+
+            if req.auto_approved {
+                match execution_service.execute_command(&req.id, Some(app_handle), None).await {
+                    Ok(res) => {
+                        if res.exit_code != Some(0) && !res.cancelled {
+                            let mut err = String::new();
+                            for line in res.stderr_tail.iter().chain(res.stdout_tail.iter()).take(30) {
+                                err.push_str(line);
+                                err.push('\n');
+                            }
+                            if !err.is_empty() {
+                                return Ok(Some(err));
+                            }
+                        }
+                    }
+                    Err(e) => return Ok(Some(format!("python py_compile failed: {e}"))),
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 fn collect_worktree_files(

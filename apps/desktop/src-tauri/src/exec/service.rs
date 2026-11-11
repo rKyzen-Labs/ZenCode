@@ -98,11 +98,27 @@ impl ExecutionService {
             }
         }
 
-        if prog_base == "pytest" {
+        if prog_base == "pytest" || prog_base == "pytest.exe" {
             return CommandSecurityClass::SafeAutoApproved;
         }
 
-        if (prog_base == "go" || prog_base == "go.exe") && !args.is_empty() && args[0] == "test" {
+        if (prog_base == "go" || prog_base == "go.exe") && !args.is_empty() && (args[0] == "test" || args[0] == "vet") {
+            return CommandSecurityClass::SafeAutoApproved;
+        }
+
+        if (prog_base == "tsc" || prog_base == "tsc.cmd" || prog_base == "tsc.exe")
+            || (prog_base == "npx" || prog_base == "npx.cmd" || prog_base == "npx.exe") && args.iter().any(|a| a == &"tsc")
+        {
+            if args.iter().any(|a| a == &"--noEmit") {
+                return CommandSecurityClass::SafeAutoApproved;
+            }
+        }
+
+        if (prog_base == "python" || prog_base == "python3" || prog_base == "python.exe" || prog_base == "python3.exe")
+            && args.len() >= 2
+            && args[0] == "-m"
+            && args[1] == "py_compile"
+        {
             return CommandSecurityClass::SafeAutoApproved;
         }
 
@@ -521,5 +537,42 @@ impl ExecutionService {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_command_security_classes() {
+        assert_eq!(
+            ExecutionService::classify_command("cargo", &["check", "--message-format=short"]),
+            CommandSecurityClass::SafeAutoApproved
+        );
+        assert_eq!(
+            ExecutionService::classify_command("npx", &["tsc", "--noEmit"]),
+            CommandSecurityClass::SafeAutoApproved
+        );
+        assert_eq!(
+            ExecutionService::classify_command("npx.cmd", &["tsc", "--noEmit"]),
+            CommandSecurityClass::SafeAutoApproved
+        );
+        assert_eq!(
+            ExecutionService::classify_command("go", &["vet", "./..."]),
+            CommandSecurityClass::SafeAutoApproved
+        );
+        assert_eq!(
+            ExecutionService::classify_command("python", &["-m", "py_compile", "main.py"]),
+            CommandSecurityClass::SafeAutoApproved
+        );
+        assert_eq!(
+            ExecutionService::classify_command("pip", &["install", "requests"]),
+            CommandSecurityClass::AlwaysRequireApproval
+        );
+        assert_eq!(
+            ExecutionService::classify_command("cargo", &["publish"]),
+            CommandSecurityClass::AlwaysRequireApproval
+        );
     }
 }
