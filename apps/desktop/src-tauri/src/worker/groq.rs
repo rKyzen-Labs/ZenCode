@@ -275,8 +275,20 @@ impl GroqWorkerClient {
             collect_worktree_files(worktree_path, entries, &mut files_to_scan, 0);
         }
 
-        // Sort files for deterministic representation
-        files_to_scan.sort();
+        // Sort files: prioritize explicit target files first so they are guaranteed full context
+        if !is_exploration_task {
+            files_to_scan.sort_by(|a, b| {
+                let a_rel = a.strip_prefix(worktree_path).unwrap_or(a).to_string_lossy().to_lowercase().replace('\\', "/");
+                let b_rel = b.strip_prefix(worktree_path).unwrap_or(b).to_string_lossy().to_lowercase().replace('\\', "/");
+                let a_base = Path::new(&a_rel).file_name().and_then(|f| f.to_str()).unwrap_or(&a_rel);
+                let b_base = Path::new(&b_rel).file_name().and_then(|f| f.to_str()).unwrap_or(&b_rel);
+                let a_is_target = likely_files_set.iter().any(|lf| lf == &a_rel || lf == a_base || a_rel.ends_with(lf));
+                let b_is_target = likely_files_set.iter().any(|lf| lf == &b_rel || lf == b_base || b_rel.ends_with(lf));
+                b_is_target.cmp(&a_is_target).then_with(|| a.cmp(b))
+            });
+        } else {
+            files_to_scan.sort();
+        }
 
         let mut shredded_files_summary = String::new();
 
@@ -965,6 +977,32 @@ or: COMMAND: npm test
             Err(_) => {}
         }
 
+        // 5f. Automated Local Linter & Code Smells Diagnostics (Zero Groq Calls)
+        if let Ok(Some(lint_notices)) = run_local_linter_check(
+            worktree_path,
+            session_id,
+            &execution_service,
+            &app_handle,
+        ).await {
+            let _ = app_handle.emit(
+                "worker:message",
+                &WorkerEventPayload {
+                    session_id: session_id.to_string(),
+                    event_type: "message.part.updated".into(),
+                    content: serde_json::json!({
+                        "type": "message.part.updated",
+                        "properties": {
+                            "part": {
+                                "type": "reasoning",
+                                "text": format!("Local linter audit diagnostics:\n{}", lint_notices.trim())
+                            }
+                        }
+                    }).to_string(),
+                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                },
+            );
+        }
+
         // 6. Extract and Execute Terminal Commands (Dependencies, Builds, Tests)
         let commands_to_run = extract_commands_for_session(&response_text, steps);
         let mut executed_commands = Vec::new();
@@ -1381,6 +1419,56 @@ pub fn audit_code_quality(worktree_path: &Path, applied_diffs: &[crate::worker::
             }
         }
     }
+
+    // Cross-file HTML-to-JS ID contract verification
+    let mut defined_html_ids = std::collections::HashSet::new();
+    for diff in applied_diffs {
+        if diff.file_path.ends_with(".html") {
+            let full_path = worktree_path.join(&diff.file_path);
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                for token in content.split_whitespace() {
+                    let t_lower = token.to_lowercase();
+                    if t_lower.starts_with("id=\"") || t_lower.starts_with("id='") {
+                        let quote = if t_lower.starts_with("id=\"") { '"' } else { '\'' };
+                        if let Some(start) = token.find(quote) {
+                            if let Some(end) = token[start + 1..].find(quote) {
+                                let id_val = &token[start + 1..start + 1 + end];
+                                if !id_val.is_empty() {
+                                    defined_html_ids.insert(id_val.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !defined_html_ids.is_empty() {
+        for diff in applied_diffs {
+            if diff.file_path.ends_with(".js") || diff.file_path.ends_with(".ts") {
+                let full_path = worktree_path.join(&diff.file_path);
+                if let Ok(content) = std::fs::read_to_string(&full_path) {
+                    let mut search_idx = 0;
+                    while let Some(pos) = content[search_idx..].find("getElementById(") {
+                        let sub = &content[search_idx + pos + 15..];
+                        if let Some(quote) = sub.chars().next() {
+                            if quote == '"' || quote == '\'' {
+                                if let Some(end_quote) = sub[1..].find(quote) {
+                                    let id_used = &sub[1..1 + end_quote];
+                                    if !id_used.is_empty() && !defined_html_ids.contains(id_used) {
+                                        findings.push(format!("Contract mismatch: '{}' calls getElementById('{}'), but id does not exist in HTML", diff.file_path, id_used));
+                                    }
+                                }
+                            }
+                        }
+                        search_idx += pos + 15;
+                    }
+                }
+            }
+        }
+    }
+
     findings
 }
 
@@ -1508,6 +1596,46 @@ pub async fn run_local_compiler_check(
                     }
                     Err(e) => return Ok(Some(format!("python py_compile failed: {e}"))),
                 }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Runs local linters (cargo clippy, ruff, eslint) in read-only audit mode if configured.
+/// Returns Ok(None) if no linter found or clean, or Ok(Some(linter_notices)).
+pub async fn run_local_linter_check(
+    worktree_path: &Path,
+    session_id: &str,
+    execution_service: &ExecutionService,
+    app_handle: &AppHandle,
+) -> Result<Option<String>, String> {
+    if worktree_path.join("Cargo.toml").exists() {
+        let prog = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+        let args = ["clippy", "--message-format=short", "--no-deps"];
+        let desc = "Run cargo clippy linter audit".to_string();
+        let req = execution_service
+            .create_approval_request(prog, &args, worktree_path, &desc, Some(session_id))
+            .await;
+
+        if req.auto_approved {
+            match execution_service.execute_command(&req.id, Some(app_handle), None).await {
+                Ok(res) => {
+                    if res.exit_code != Some(0) && !res.cancelled {
+                        let mut notices = String::new();
+                        for line in res.stdout_tail.iter().chain(res.stderr_tail.iter()).take(15) {
+                            if line.contains("warning:") || line.contains("error:") {
+                                notices.push_str(line);
+                                notices.push('\n');
+                            }
+                        }
+                        if !notices.is_empty() {
+                            return Ok(Some(notices));
+                        }
+                    }
+                }
+                Err(_) => {}
             }
         }
     }

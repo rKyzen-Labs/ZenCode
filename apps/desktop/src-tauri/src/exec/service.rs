@@ -80,7 +80,7 @@ impl ExecutionService {
         // 2. Safe auto-approved allowlist: common read-only & local test/build operations
         if (prog_base == "cargo" || prog_base == "cargo.exe") && !args.is_empty() {
             let sub = args[0];
-            if sub == "check" || sub == "status" {
+            if sub == "check" || sub == "status" || sub == "clippy" {
                 return CommandSecurityClass::SafeAutoApproved;
             }
             if sub == "build" && !full_cmd_lower.contains("--release") {
@@ -126,7 +126,13 @@ impl ExecutionService {
             return CommandSecurityClass::SafeAutoApproved;
         }
 
-        if (prog_base == "ruff" || prog_base == "ruff.exe") && !args.is_empty() && args[0] == "format" {
+        if (prog_base == "ruff" || prog_base == "ruff.exe") && !args.is_empty() && (args[0] == "format" || args[0] == "check") {
+            return CommandSecurityClass::SafeAutoApproved;
+        }
+
+        if (prog_base == "eslint" || prog_base == "eslint.cmd" || prog_base == "eslint.exe")
+            || (prog_base == "npx" || prog_base == "npx.cmd" || prog_base == "npx.exe") && args.iter().any(|a| a == &"eslint")
+        {
             return CommandSecurityClass::SafeAutoApproved;
         }
 
