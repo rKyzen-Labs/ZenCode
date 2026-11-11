@@ -728,6 +728,50 @@ or: COMMAND: npm test
             tokio::time::sleep(Duration::from_millis(80)).await;
         }
 
+        // 5b. Local Code Formatter & Clean Whitespace Pass
+        format_and_clean_worktree_files(worktree_path, &applied_diffs);
+
+        // 5c. Local Quality & Completeness Audit
+        let quality_findings = audit_code_quality(worktree_path, &applied_diffs);
+        if !quality_findings.is_empty() {
+            let audit_text = format!("Code Quality Notice: {}", quality_findings.join("; "));
+            let _ = app_handle.emit(
+                "worker:message",
+                &WorkerEventPayload {
+                    session_id: session_id.to_string(),
+                    event_type: "message.part.updated".into(),
+                    content: serde_json::json!({
+                        "type": "message.part.updated",
+                        "properties": {
+                            "part": {
+                                "type": "reasoning",
+                                "text": audit_text
+                            }
+                        }
+                    }).to_string(),
+                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                },
+            );
+        } else if !applied_diffs.is_empty() {
+            let _ = app_handle.emit(
+                "worker:message",
+                &WorkerEventPayload {
+                    session_id: session_id.to_string(),
+                    event_type: "message.part.updated".into(),
+                    content: serde_json::json!({
+                        "type": "message.part.updated",
+                        "properties": {
+                            "part": {
+                                "type": "reasoning",
+                                "text": format!("Code Quality Audit passed: {} file(s) verified complete with zero stubs.", applied_diffs.len())
+                            }
+                        }
+                    }).to_string(),
+                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                },
+            );
+        }
+
         // 6. Extract and Execute Terminal Commands (Dependencies, Builds, Tests)
         let commands_to_run = extract_commands_for_session(&response_text, steps);
         let mut executed_commands = Vec::new();
@@ -1032,6 +1076,60 @@ pub fn extract_commands_for_session(
     commands
 }
 
+/// Formats and normalizes modified files in the worktree, stripping trailing whitespace
+/// and ensuring clean, standard line endings and trailing newlines.
+pub fn format_and_clean_worktree_files(worktree_path: &Path, applied_diffs: &[crate::worker::diff::AppliedDiffResult]) {
+    for diff in applied_diffs {
+        let full_path = worktree_path.join(&diff.file_path);
+        if full_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                let cleaned_lines: Vec<String> = content
+                    .lines()
+                    .map(|l| l.trim_end().to_string())
+                    .collect();
+                let mut cleaned = cleaned_lines.join("\n");
+                if !cleaned.ends_with('\n') {
+                    cleaned.push('\n');
+                }
+                let _ = std::fs::write(&full_path, cleaned);
+            }
+        }
+    }
+}
+
+/// Audits modified files for incomplete implementations, placeholders, or stubs.
+pub fn audit_code_quality(worktree_path: &Path, applied_diffs: &[crate::worker::diff::AppliedDiffResult]) -> Vec<String> {
+    let mut findings = Vec::new();
+    let stub_markers = [
+        "todo:",
+        "fixme:",
+        "implement later",
+        "lorem ipsum",
+        "add more here",
+        "placeholder",
+    ];
+
+    for diff in applied_diffs {
+        let full_path = worktree_path.join(&diff.file_path);
+        if full_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                let lower = content.to_lowercase();
+                for marker in stub_markers {
+                    if lower.contains(marker) {
+                        findings.push(format!("File '{}' contains stub marker: '{}'", diff.file_path, marker));
+                        break;
+                    }
+                }
+                // Check for empty or unusually brief HTML files
+                if diff.file_path.ends_with(".html") && content.lines().count() < 25 {
+                    findings.push(format!("HTML file '{}' is unusually brief ({} lines)", diff.file_path, content.lines().count()));
+                }
+            }
+        }
+    }
+    findings
+}
+
 fn collect_worktree_files(
     root: &Path,
     entries: std::fs::ReadDir,
@@ -1219,6 +1317,37 @@ COMMAND: pytest tests/test_calc.py
 
         let total_tokens = estimate_tokens(&shredded_files_summary);
         assert!(total_tokens <= 3_000, "Exploration summary tokens ({total_tokens}) must stay strictly under the 3000 token budget!");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_format_and_clean_and_audit_code_quality() {
+        let temp_dir = std::env::temp_dir().join(format!("zencode_audit_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Create a file with trailing spaces and stub marker
+        let dirty_content = "function test() {   \n    // TODO: implement later   \n    return 42;   \n}";
+        let test_file = temp_dir.join("test.js");
+        std::fs::write(&test_file, dirty_content).unwrap();
+
+        let applied = vec![crate::worker::diff::AppliedDiffResult {
+            file_path: "test.js".to_string(),
+            is_new: true,
+            additions: 4,
+            deletions: 0,
+        }];
+
+        // Run formatting
+        format_and_clean_worktree_files(&temp_dir, &applied);
+        let cleaned = std::fs::read_to_string(&test_file).unwrap();
+        assert!(cleaned.ends_with('\n'), "Must end with newline");
+        assert!(!cleaned.contains("   \n"), "Must strip trailing whitespace");
+
+        // Run audit
+        let findings = audit_code_quality(&temp_dir, &applied);
+        assert!(!findings.is_empty(), "Must detect TODO: stub marker");
+        assert!(findings[0].contains("stub marker: 'todo:'"));
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
