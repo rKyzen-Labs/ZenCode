@@ -420,11 +420,19 @@ CORE PRINCIPLES & STANDARDS:
      * Every element queried in JavaScript (e.g. via document.querySelector or getElementById) must exist in the HTML structure with identical naming.
      * All imported module paths, asset links, and stylesheet <link> tags must match real created file paths.
 
-3. MODERN UI/UX & STYLING EXCELLENCE:
+3. MODERN UI/UX & DESIGN SYSTEM STANDARDS:
    - Use semantic HTML5 (<header>, <nav>, <main>, <section>, <article>, <footer>).
-   - Use modern, responsive CSS with CSS custom properties (variables), Flexbox/Grid, smooth hover/focus states, and clean responsive breakpoints (@media).
-   - Ensure high contrast and refined typography hierarchy with distinct weights for headings, body text, and monospace elements.
+   - In CSS, define and utilize semantic design variables in :root:
+     * Color palette: --bg, --surface, --text-primary, --text-secondary, --accent, --border-subtle
+     * Elevation shadows: multi-layered smooth ambient shadows (e.g. box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 10px 24px -4px rgba(0,0,0,0.07);)
+     * Typography scale: modern system font stack (Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif) + JetBrains Mono for monospace
+     * Transitions: subtle micro-interactions with cubic-bezier curves (transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1)) and hover translateY(-2px) lifts
+     * Spacing: generous section padding (clamp(48px, 6vw, 96px)) and fluid max-width container margins
    - Provide active, working JavaScript event listeners (attached after DOMContentLoaded with defensive null checks).
+
+4. DIFFERENTIAL SURGICAL DIFF MANDATE:
+   - When modifying files that already exist in the workspace, ALWAYS use surgical SEARCH/REPLACE diff blocks.
+   - Do NOT rewrite entire files when only adding or changing a specific function, component, or style rule. This conserves the 4,096 token budget and prevents accidental truncation.
 
 DIFF FORMAT & OPERATIONS:
 1. For modifying existing files, use targeted, surgical SEARCH/REPLACE diff blocks:
@@ -635,15 +643,84 @@ or: COMMAND: npm test
                             let _ = app_handle.emit("planner:quota_update", &event);
                         }
 
-                        response_text = json
+                        let choice = json
                             .get("choices")
                             .and_then(|c| c.as_array())
-                            .and_then(|arr| arr.first())
+                            .and_then(|arr| arr.first());
+
+                        response_text = choice
                             .and_then(|c| c.get("message"))
                             .and_then(|m| m.get("content"))
                             .and_then(|c| c.as_str())
                             .unwrap_or_default()
                             .to_string();
+
+                        let finish_reason = choice
+                            .and_then(|c| c.get("finish_reason"))
+                            .and_then(|f| f.as_str())
+                            .unwrap_or("stop");
+
+                        // Auto-continuation if response was cut off by token limit
+                        if finish_reason == "length" && !response_text.is_empty() {
+                            let _ = app_handle.emit(
+                                "worker:message",
+                                &WorkerEventPayload {
+                                    session_id: session_id.to_string(),
+                                    event_type: "message.part.updated".into(),
+                                    content: serde_json::json!({
+                                        "type": "message.part.updated",
+                                        "properties": {
+                                            "part": {
+                                                "type": "reasoning",
+                                                "text": "Output token limit reached. Automatically retrieving remaining code continuation..."
+                                            }
+                                        }
+                                    }).to_string(),
+                                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                                },
+                            );
+
+                            let cont_prompt = "You reached the maximum output token limit. Continue generating the exact remaining diff/file code without repeating what you already wrote:";
+                            let cont_body = serde_json::json!({
+                                "model": chosen_model,
+                                "messages": [
+                                    { "role": "system", "content": system_prompt },
+                                    { "role": "user", "content": user_prompt },
+                                    { "role": "assistant", "content": response_text },
+                                    { "role": "user", "content": cont_prompt }
+                                ],
+                                "temperature": 0.2,
+                                "max_tokens": 4096
+                            });
+
+                            let mut cont_builder = client
+                                .post(&self.endpoint_url)
+                                .header("Content-Type", "application/json");
+
+                            if !self.api_key.is_empty() && self.api_key != "ollama" {
+                                cont_builder = cont_builder.header("Authorization", format!("Bearer {}", self.api_key));
+                            }
+
+                            if let Ok(cont_resp) = cont_builder.json(&cont_body).send().await {
+                                if cont_resp.status().is_success() {
+                                    if let Ok(cont_json) = cont_resp.json::<serde_json::Value>().await {
+                                        let continuation_chunk = cont_json
+                                            .get("choices")
+                                            .and_then(|c| c.as_array())
+                                            .and_then(|arr| arr.first())
+                                            .and_then(|c| c.get("message"))
+                                            .and_then(|m| m.get("content"))
+                                            .and_then(|c| c.as_str())
+                                            .unwrap_or_default();
+                                        if !continuation_chunk.is_empty() {
+                                            response_text.push('\n');
+                                            response_text.push_str(continuation_chunk);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         break;
                     } else if status.as_u16() == 429 {
                         if let Some(ref tracker_arc) = self.quota_tracker {
