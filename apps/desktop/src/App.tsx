@@ -330,6 +330,15 @@ export default function App() {
               ? (taskState as any).detail
               : 'Worker execution terminated unexpectedly';
             setError(errMsg);
+            const currentChatId = activeChatIdRef.current;
+            if (currentChatId) {
+              try {
+                const msgs = await getChatMessages(currentChatId);
+                setChatMessages(msgs || []);
+              } catch (e) {
+                console.warn('Could not refresh messages on task failed:', e);
+              }
+            }
           }
         });
 

@@ -715,12 +715,19 @@ pub async fn execute_submit_plan(
                 || task_desc_lower.contains("modify")
                 || task_desc_lower.contains("create")
                 || task_desc_lower.contains("delete")
-                || task_desc_lower.contains("add ")
-                || task_desc_lower.contains("fix ")
+                || task_desc_lower.contains("remove")
+                || task_desc_lower.contains("add")
+                || task_desc_lower.contains("fix")
                 || task_desc_lower.contains("refactor")
-                || task_desc_lower.contains("install ")
-                || task_desc_lower.contains("build ")
-                || task_desc_lower.contains("run ");
+                || task_desc_lower.contains("install")
+                || task_desc_lower.contains("build")
+                || task_desc_lower.contains("develop")
+                || task_desc_lower.contains("make")
+                || task_desc_lower.contains("code")
+                || task_desc_lower.contains("implement")
+                || task_desc_lower.contains("generate")
+                || task_desc_lower.contains("write")
+                || task_desc_lower.contains("run");
 
             let is_read_only_exploration = (task_desc_lower.contains("explore")
                 || task_desc_lower.contains("analyze")
@@ -753,6 +760,34 @@ pub async fn execute_submit_plan(
                     plan.conversational_reply = Some(direct_answer);
                 }
                 plan.steps = Vec::new();
+            } else if has_edit_keyword && !plan.is_actionable {
+                // If user explicitly prompted to build/develop/create/edit but Gemini returned is_actionable: false,
+                // override to true so worker execution is dispatched!
+                println!("[Routing] Explicit build/code intent detected in prompt ('{}'). Forcing is_actionable = true.", context.task_description);
+                plan.is_actionable = true;
+                if plan.steps.is_empty() {
+                    let goal_desc = if !plan.task_summary.is_empty() {
+                        plan.task_summary.clone()
+                    } else {
+                        context.task_description.clone()
+                    };
+                    let likely = if !context.multimodal_attachments.is_empty() {
+                        vec!["index.html".to_string(), "styles.css".to_string(), "app.js".to_string()]
+                    } else {
+                        vec![]
+                    };
+                    plan.steps.push(zencode_core::PlanStep {
+                        id: "step-1".to_string(),
+                        goal: format!("Build and implement {}", goal_desc),
+                        likely_files: likely,
+                        instructions: vec![
+                            format!("Implement the files and features requested: {}", context.task_description),
+                            "Create or update the target files with complete code.".to_string(),
+                        ],
+                        depends_on: vec![],
+                        acceptance_checks: vec![],
+                    });
+                }
             }
 
             state.increment_request_count();
@@ -1195,7 +1230,14 @@ pub async fn start_worker_session(
     let (worker_type, preferred_groq_model) = state
         .db
         .get_workspace_worker_config(&project_dir)
-        .unwrap_or_else(|_| ("local".to_string(), Some("openai/gpt-oss-120b".to_string())));
+        .unwrap_or_else(|_| {
+            let default_worker = if CredentialService::get_groq_api_key().map(|k| !k.trim().is_empty()).unwrap_or(false) {
+                "groq".to_string()
+            } else {
+                "local".to_string()
+            };
+            (default_worker, Some("openai/gpt-oss-120b".to_string()))
+        });
 
     if worker_type == "groq" {
         // Groq Cloud Worker Mode (BYOK)
@@ -1428,7 +1470,25 @@ pub async fn start_worker_session(
                     eprintln!("Groq worker error: {e}");
                     let mut task = task_state_arc.lock().await;
                     *task = TaskState::Failed(e.clone());
-                    let _ = app_clone.emit("worker:status", &TaskState::Failed(e));
+                    let _ = app_clone.emit("worker:status", &TaskState::Failed(e.clone()));
+
+                    let err_summary = format!(
+                        "### Groq Worker Error\n\nThe Groq cloud worker could not complete the code execution:\n\n> {}\n\nPlease check your Groq API key or try switching to the Local (Ollama) worker in the dock.",
+                        e
+                    );
+                    let err_record = crate::db::models::ChatMessageRecord {
+                        id: format!("msg_err_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()),
+                        chat_id: tid_clone.clone(),
+                        role: "assistant".to_string(),
+                        content: err_summary.clone(),
+                        plan_json: None,
+                        worker_summary: Some(err_summary.clone()),
+                        files_changed_json: None,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        commit_hash: None,
+                    };
+                    let _ = db_arc.add_chat_message(&err_record);
+                    let _ = app_clone.emit("chat:message_added", &err_record);
                 }
             }
         });
@@ -1657,7 +1717,25 @@ pub async fn start_worker_session(
                     eprintln!("Ollama worker error: {e}");
                     let mut task = task_state_arc.lock().await;
                     *task = TaskState::Failed(e.clone());
-                    let _ = app_clone.emit("worker:status", &TaskState::Failed(e));
+                    let _ = app_clone.emit("worker:status", &TaskState::Failed(e.clone()));
+
+                    let err_summary = format!(
+                        "### Ollama Worker Error\n\nThe local Ollama worker could not complete the code execution:\n\n> {}\n\nPlease check that Ollama is running (`ollama serve`) and model is installed, or switch to the Groq worker.",
+                        e
+                    );
+                    let err_record = crate::db::models::ChatMessageRecord {
+                        id: format!("msg_err_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()),
+                        chat_id: tid_clone.clone(),
+                        role: "assistant".to_string(),
+                        content: err_summary.clone(),
+                        plan_json: None,
+                        worker_summary: Some(err_summary.clone()),
+                        files_changed_json: None,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        commit_hash: None,
+                    };
+                    let _ = db_arc.add_chat_message(&err_record);
+                    let _ = app_clone.emit("chat:message_added", &err_record);
                 }
             }
         });
@@ -4437,12 +4515,19 @@ mod tests {
             || task_desc_lower.contains("modify")
             || task_desc_lower.contains("create")
             || task_desc_lower.contains("delete")
-            || task_desc_lower.contains("add ")
-            || task_desc_lower.contains("fix ")
+            || task_desc_lower.contains("remove")
+            || task_desc_lower.contains("add")
+            || task_desc_lower.contains("fix")
             || task_desc_lower.contains("refactor")
-            || task_desc_lower.contains("install ")
-            || task_desc_lower.contains("build ")
-            || task_desc_lower.contains("run ");
+            || task_desc_lower.contains("install")
+            || task_desc_lower.contains("build")
+            || task_desc_lower.contains("develop")
+            || task_desc_lower.contains("make")
+            || task_desc_lower.contains("code")
+            || task_desc_lower.contains("implement")
+            || task_desc_lower.contains("generate")
+            || task_desc_lower.contains("write")
+            || task_desc_lower.contains("run");
 
         let is_read_only_exploration = (task_desc_lower.contains("explore")
             || task_desc_lower.contains("analyze")
@@ -4474,6 +4559,41 @@ mod tests {
         assert!(mock_plan.conversational_reply.is_some(), "Must contain direct conversational reply");
         let reply = mock_plan.conversational_reply.unwrap();
         assert!(reply.contains("Monorepo with Rust backend and React frontend"));
+    }
+
+    #[tokio::test]
+    async fn test_build_prompt_intent_forces_actionable() {
+        let prompts = vec![
+            "build",
+            "build it",
+            "develop me website based on a pdf",
+            "make a landing page",
+            "code the authentication system",
+            "implement the feature",
+        ];
+
+        for p in prompts {
+            let task_desc_lower = p.to_lowercase();
+            let has_edit_keyword = task_desc_lower.contains("edit")
+                || task_desc_lower.contains("modify")
+                || task_desc_lower.contains("create")
+                || task_desc_lower.contains("delete")
+                || task_desc_lower.contains("remove")
+                || task_desc_lower.contains("add")
+                || task_desc_lower.contains("fix")
+                || task_desc_lower.contains("refactor")
+                || task_desc_lower.contains("install")
+                || task_desc_lower.contains("build")
+                || task_desc_lower.contains("develop")
+                || task_desc_lower.contains("make")
+                || task_desc_lower.contains("code")
+                || task_desc_lower.contains("implement")
+                || task_desc_lower.contains("generate")
+                || task_desc_lower.contains("write")
+                || task_desc_lower.contains("run");
+
+            assert!(has_edit_keyword, "Prompt '{p}' must be detected as actionable edit/build intent");
+        }
     }
 
     #[tokio::test]

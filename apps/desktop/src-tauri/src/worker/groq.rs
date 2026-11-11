@@ -507,7 +507,7 @@ COMMAND: pip install requests
             let is_ollama = self.quota_tracker.is_none();
             let provider_label = if is_ollama { "Ollama (Local)" } else { "Groq (Cloud)" };
 
-            // Emit reasoning thought
+            // Emit reasoning thought and active generation activity
             let _ = app_handle.emit(
                 "worker:message",
                 &WorkerEventPayload {
@@ -519,6 +519,26 @@ COMMAND: pip install requests
                             "part": {
                                 "type": "reasoning",
                                 "text": format!("Sending prompt to {provider_label} model: {chosen_model}")
+                            }
+                        }
+                    }).to_string(),
+                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                },
+            );
+
+            let _ = app_handle.emit(
+                "worker:message",
+                &WorkerEventPayload {
+                    session_id: session_id.to_string(),
+                    event_type: "message.part.updated".into(),
+                    content: serde_json::json!({
+                        "type": "message.part.updated",
+                        "properties": {
+                            "part": {
+                                "type": "tool",
+                                "tool": "write",
+                                "callID": format!("call_write_{}_{attempts}", session_id),
+                                "state": { "input": { "filePath": format!("{chosen_model}") } }
                             }
                         }
                     }).to_string(),

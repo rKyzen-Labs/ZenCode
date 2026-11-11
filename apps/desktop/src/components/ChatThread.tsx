@@ -1123,6 +1123,15 @@ export const ChatThread: FC<ChatThreadProps> = ({
         .then((cfg) => {
           if (cfg?.worker_type) {
             setWorkerType(cfg.worker_type);
+          } else {
+            // Default to Groq if Groq API key is already configured
+            getGroqKeyStatus()
+              .then((status) => {
+                if (status?.has_key) {
+                  setWorkerType('groq');
+                }
+              })
+              .catch(() => {});
           }
         })
         .catch(() => {});

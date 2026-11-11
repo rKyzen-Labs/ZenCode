@@ -329,7 +329,197 @@ pub fn apply_diff_blocks(
         i += 1;
     }
 
+    // Fallback: If no diff blocks were matched (e.g. model outputted standard markdown code blocks),
+    // parse markdown fenced blocks with associated file headers/comments.
+    if results.is_empty() {
+        let markdown_results = apply_markdown_file_blocks(worktree_dir, response_text, fallback_target_file)?;
+        results.extend(markdown_results);
+    }
+
     Ok(results)
+}
+
+/// Fallback parser for standard LLM markdown responses with code fences.
+/// Supports `### File: path`, `FILE: path`, `**path**`, ````lang:path````, and in-fence file comments.
+pub fn apply_markdown_file_blocks(
+    worktree_dir: &Path,
+    response_text: &str,
+    fallback_target_file: Option<&str>,
+) -> Result<Vec<AppliedDiffResult>, String> {
+    let mut results = Vec::new();
+    let lines: Vec<&str> = response_text.lines().collect();
+    let mut i = 0;
+    let mut pending_file_header: Option<String> = None;
+    let mut collected_blocks: Vec<(Option<String>, Vec<String>)> = Vec::new();
+
+    while i < lines.len() {
+        let line = lines[i].trim();
+
+        // 1. Detect markdown file headers preceding code fences
+        if let Some(rest) = line.strip_prefix("FILE:").or_else(|| line.strip_prefix("File:")).or_else(|| line.strip_prefix("Filename:")) {
+            let clean = rest.trim().trim_matches('`').trim_matches('*').trim();
+            if is_valid_filename(clean) {
+                pending_file_header = Some(clean.to_string());
+            }
+            i += 1;
+            continue;
+        }
+
+        if line.starts_with("###") || line.starts_with("##") {
+            let header_text = line.trim_start_matches('#').trim();
+            let clean = header_text
+                .trim_start_matches("File:")
+                .trim_start_matches("FILE:")
+                .trim()
+                .trim_matches('`')
+                .trim_matches('*')
+                .trim();
+            if is_valid_filename(clean) {
+                pending_file_header = Some(clean.to_string());
+            }
+            i += 1;
+            continue;
+        }
+
+        if (line.starts_with("**") || line.starts_with("__")) && (line.ends_with("**") || line.ends_with("__:") || line.ends_with("**:") || line.ends_with("__")) {
+            let clean = line
+                .trim_matches('*')
+                .trim_matches('_')
+                .trim_end_matches(':')
+                .trim()
+                .trim_matches('`');
+            if is_valid_filename(clean) {
+                pending_file_header = Some(clean.to_string());
+            }
+            i += 1;
+            continue;
+        }
+
+        // 2. Detect code fence open
+        if line.starts_with("```") {
+            let fence_info = line.trim_start_matches('`').trim();
+            let mut file_from_fence: Option<String> = None;
+
+            if let Some(pos) = fence_info.find(':') {
+                let candidate = fence_info[pos + 1..].trim().trim_matches('"').trim_matches('\'');
+                if is_valid_filename(candidate) {
+                    file_from_fence = Some(candidate.to_string());
+                }
+            } else if let Some(pos) = fence_info.find("file=") {
+                let candidate = fence_info[pos + 5..].trim().trim_matches('"').trim_matches('\'');
+                if is_valid_filename(candidate) {
+                    file_from_fence = Some(candidate.to_string());
+                }
+            } else if fence_info.contains(' ') {
+                let parts: Vec<&str> = fence_info.split_whitespace().collect();
+                for part in parts {
+                    let clean = part.trim().trim_matches('"').trim_matches('\'');
+                    if is_valid_filename(clean) {
+                        file_from_fence = Some(clean.to_string());
+                        break;
+                    }
+                }
+            } else if is_valid_filename(fence_info) {
+                file_from_fence = Some(fence_info.to_string());
+            }
+
+            i += 1;
+            let mut block_lines = Vec::new();
+            while i < lines.len() && !lines[i].trim().starts_with("```") {
+                block_lines.push(lines[i].to_string());
+                i += 1;
+            }
+            if i < lines.len() && lines[i].trim().starts_with("```") {
+                i += 1; // skip closing fence
+            }
+
+            // Determine target file
+            let mut resolved_file = file_from_fence.or_else(|| pending_file_header.take());
+
+            // Check if line 0 of block contains a file comment (e.g. "// index.html", "/* styles.css */", "<!-- index.html -->")
+            if resolved_file.is_none() && !block_lines.is_empty() {
+                let first_line = block_lines[0].trim();
+                let comment_candidate = first_line
+                    .trim_start_matches("//")
+                    .trim_start_matches("/*")
+                    .trim_start_matches("<!--")
+                    .trim_start_matches('#')
+                    .trim_end_matches("*/")
+                    .trim_end_matches("-->")
+                    .trim()
+                    .trim_matches('`');
+                if is_valid_filename(comment_candidate) {
+                    resolved_file = Some(comment_candidate.to_string());
+                    // Remove the comment header line so file is clean
+                    block_lines.remove(0);
+                }
+            }
+
+            collected_blocks.push((resolved_file, block_lines));
+            continue;
+        }
+
+        i += 1;
+    }
+
+    // If there is only one block and no resolved file, use fallback_target_file
+    if collected_blocks.len() == 1 && collected_blocks[0].0.is_none() {
+        if let Some(fallback) = fallback_target_file {
+            collected_blocks[0].0 = Some(fallback.to_string());
+        }
+    }
+
+    // Write all resolved blocks
+    for (file_opt, content_lines) in collected_blocks {
+        if let Some(file_rel) = file_opt {
+            let clean_path = file_rel.trim().trim_start_matches("./").replace('\\', "/");
+            let full_target = worktree_dir.join(&clean_path);
+
+            if let Some(parent) = full_target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            let was_new = !full_target.exists();
+            let old_line_count = if !was_new {
+                std::fs::read_to_string(&full_target).map(|s| s.lines().count()).unwrap_or(0)
+            } else {
+                0
+            };
+
+            let content = content_lines.join("\n");
+            let new_line_count = content_lines.len();
+
+            std::fs::write(&full_target, &content)
+                .map_err(|e| format!("Failed writing markdown file block {clean_path}: {e}"))?;
+
+            results.push(AppliedDiffResult {
+                file_path: clean_path,
+                is_new: was_new,
+                additions: new_line_count,
+                deletions: old_line_count,
+            });
+        }
+    }
+
+    Ok(results)
+}
+
+fn is_valid_filename(s: &str) -> bool {
+    let clean = s.trim().trim_matches('`').trim_matches('"').trim_matches('\'');
+    if clean.is_empty() || clean.contains('\n') || clean.len() > 120 {
+        return false;
+    }
+    // Must contain a period with an extension (e.g. .html, .js, .css, .py, .rs, .json, .toml)
+    // and not be a prose sentence
+    if let Some(dot_idx) = clean.rfind('.') {
+        if dot_idx > 0 && dot_idx + 1 < clean.len() {
+            let ext = &clean[dot_idx + 1..];
+            if !ext.contains(' ') && ext.len() <= 10 && !clean.contains("..") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn find_subslice_trimmed(haystack: &[&str], needle: &[&str]) -> Option<usize> {
@@ -427,6 +617,65 @@ def test():
 
         // Verify temp_to_delete was removed
         assert!(!temp.join("temp_to_delete").exists());
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_markdown_file_blocks_parsing() {
+        let temp = std::env::temp_dir().join(format!("test_md_diff_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let md_response = r#"
+Here is the code to build the website based on the design specification:
+
+### `index.html`
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Website</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <h1>Welcome</h1>
+    <script src="app.js"></script>
+</body>
+</html>
+```
+
+### File: styles.css
+```css
+body {
+    font-family: sans-serif;
+    background-color: #f0f0f0;
+}
+```
+
+**app.js**:
+```javascript
+console.log("App loaded successfully");
+```
+"#;
+
+        let results = apply_diff_blocks(&temp, md_response, None).unwrap();
+        assert_eq!(results.len(), 3, "Must parse all 3 files from markdown code blocks");
+
+        let files: Vec<String> = results.iter().map(|r| r.file_path.clone()).collect();
+        assert!(files.contains(&"index.html".to_string()));
+        assert!(files.contains(&"styles.css".to_string()));
+        assert!(files.contains(&"app.js".to_string()));
+
+        assert!(temp.join("index.html").exists());
+        assert!(temp.join("styles.css").exists());
+        assert!(temp.join("app.js").exists());
+
+        let index_content = std::fs::read_to_string(temp.join("index.html")).unwrap();
+        assert!(index_content.contains("<!DOCTYPE html>"));
+
+        let js_content = std::fs::read_to_string(temp.join("app.js")).unwrap();
+        assert!(js_content.contains("App loaded successfully"));
 
         let _ = std::fs::remove_dir_all(&temp);
     }
