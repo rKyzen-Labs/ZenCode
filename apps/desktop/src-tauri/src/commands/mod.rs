@@ -491,7 +491,7 @@ pub async fn execute_preview_planning_context(
     // 2. Scan task_description for @tokens (e.g. @uxpilot.pdf, @app.tsx)
     for word in task_description.split_whitespace() {
         if let Some(stripped) = word.strip_prefix('@') {
-            let clean = stripped.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\' && c != '_' && c != '-');
+            let clean = stripped.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\' && c != '_' && c != '-' && c != ':');
             if !clean.is_empty() && !candidate_paths.contains(&clean.to_string()) {
                 candidate_paths.push(clean.to_string());
             }
@@ -500,7 +500,7 @@ pub async fn execute_preview_planning_context(
 
     // 3. Scan task_description for filenames directly present in the project directory
     for word in task_description.split_whitespace() {
-        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\' && c != '_' && c != '-');
+        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\' && c != '_' && c != '-' && c != ':');
         if clean.contains('.') {
             let potential_file = project_dir.join(clean);
             if potential_file.is_file() {
@@ -535,7 +535,20 @@ pub async fn execute_preview_planning_context(
     for raw_path in candidate_paths {
         let path = Path::new(&raw_path);
         let resolved_path = if path.is_absolute() && path.is_file() {
-            path.to_path_buf()
+            // If outside project_dir, automatically copy into main workspace folder!
+            if !path.starts_with(project_dir) {
+                let fname = path.file_name().unwrap_or_default();
+                let dest = project_dir.join(fname);
+                println!(
+                    "[Workspace] Auto-copying attached external file '{}' into main workspace folder '{}'",
+                    path.display(),
+                    dest.display()
+                );
+                let _ = std::fs::copy(path, &dest);
+                dest
+            } else {
+                path.to_path_buf()
+            }
         } else if project_dir.join(path).is_file() {
             project_dir.join(path)
         } else {
@@ -551,6 +564,11 @@ pub async fn execute_preview_planning_context(
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_else(|| raw_path.clone());
+
+        // Ensure newly copied/attached file is included in shallow_tree for context
+        if !shallow_tree.contains(&file_name) {
+            shallow_tree.push(file_name.clone());
+        }
 
         if zencode_core::is_multimodal_file(&resolved_path) {
             // Check size <= 20MB for Gemini inlineData
@@ -3769,9 +3787,20 @@ pub async fn pick_folder() -> Result<Option<String>, String> {
 }
 
 /// Native OS file picker dialog for attaching files to prompts.
+/// If an active workspace is open and the selected file is outside the workspace,
+/// it is automatically copied into the main workspace folder so both the
+/// Planner (Gemini) and the Worker (Ollama/Groq) can access it directly.
 #[tauri::command]
-pub async fn pick_file(default_dir: Option<String>) -> Result<Option<String>, String> {
-    let handle = tokio::task::spawn_blocking(move || {
+pub async fn pick_file(
+    default_dir: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let active_ws: Option<PathBuf> = {
+        let guard = state.active_project.lock().await;
+        guard.as_ref().map(|p| PathBuf::from(&p.path))
+    };
+
+    let selected_path_opt = tokio::task::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
             let initial = default_dir.unwrap_or_default().replace('\'', "''");
@@ -3802,7 +3831,42 @@ pub async fn pick_file(default_dir: Option<String>) -> Result<Option<String>, St
     .await
     .map_err(|e| e.to_string())??;
 
-    Ok(handle)
+    let Some(raw_path) = selected_path_opt else {
+        return Ok(None);
+    };
+
+    let picked_path = PathBuf::from(&raw_path);
+    if !picked_path.is_file() {
+        return Ok(Some(raw_path));
+    }
+
+    if let Some(ws_dir) = active_ws {
+        // If outside the active workspace, automatically copy it to the main workspace folder!
+        if !picked_path.starts_with(&ws_dir) {
+            let file_name = picked_path
+                .file_name()
+                .ok_or_else(|| "Invalid file name".to_string())?;
+            let dest_path = ws_dir.join(file_name);
+            println!(
+                "[Attachment] Auto-copying attached file from '{}' into main workspace folder '{}'",
+                picked_path.display(),
+                dest_path.display()
+            );
+            if let Err(e) = std::fs::copy(&picked_path, &dest_path) {
+                eprintln!("[Attachment] Warning: Could not copy file to workspace: {e}");
+                return Ok(Some(raw_path));
+            }
+            // Return filename relative to workspace so it's clean and uniform
+            return Ok(Some(file_name.to_string_lossy().to_string()));
+        } else {
+            // Already inside workspace — return relative path if possible
+            if let Ok(rel) = picked_path.strip_prefix(&ws_dir) {
+                return Ok(Some(rel.to_string_lossy().to_string()));
+            }
+        }
+    }
+
+    Ok(Some(raw_path))
 }
 
 /// Runs a quick health check of required local dependencies:
@@ -4477,6 +4541,33 @@ mod tests {
         assert_eq!(preview2.attached_files.len(), 1);
         assert!(preview2.attached_files[0].contains("mockup.pdf"));
 
+        // 3. Verify external file auto-copy into main workspace folder
+        let external_dir = std::env::temp_dir().join(format!(
+            "zencode_external_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        std::fs::create_dir_all(&external_dir).unwrap();
+        let ext_file = external_dir.join("external_mockup.png");
+        std::fs::write(&ext_file, b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR").unwrap();
+
+        let preview3 = execute_preview_planning_context(
+            "integrate image from external path",
+            None,
+            Some(vec![ext_file.to_string_lossy().to_string()]),
+            &state,
+        ).await.unwrap();
+
+        assert!(
+            temp_dir.join("external_mockup.png").is_file(),
+            "External attached file must be automatically copied into main workspace folder"
+        );
+        assert_eq!(preview3.attached_files.len(), 1);
+        assert!(preview3.attached_files[0].contains("external_mockup.png"));
+
+        let _ = std::fs::remove_dir_all(&external_dir);
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
