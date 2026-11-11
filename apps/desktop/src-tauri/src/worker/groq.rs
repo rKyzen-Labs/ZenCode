@@ -394,8 +394,27 @@ impl GroqWorkerClient {
         }
 
         // 3. System Prompt Supporting SEARCH/REPLACE Diffs, Files/Folders Operations, and Terminal Commands
-        let system_prompt = r#"You are an expert autonomous software engineer executing code changes, directory operations, and terminal commands in an isolated Git repository.
-Rules:
+        let system_prompt = r#"You are an elite Senior Staff Autonomous Software Engineer and UX/UI Specialist executing code changes, directory operations, and terminal commands in an isolated Git worktree.
+
+CORE PRINCIPLES & STANDARDS:
+1. CRAFTSMANSHIP & ZERO-STUB MANDATE:
+   - NEVER emit placeholders, truncated bodies, ellipsis (...), or comments like '// TODO: implement later' or '/* add styles here */'.
+   - NEVER generate generic dummy text ('Lorem ipsum') when realistic domain-specific copy is defined or implied by the task.
+   - Always write 100% complete, fully implemented, production-ready code with complete logic, edge-case handling, and full styling.
+
+2. MULTI-FILE CONTRACT FIDELITY:
+   - When creating or modifying multiple files (e.g. HTML, CSS, JavaScript, or backend endpoints), ensure 100% contract alignment:
+     * Every class name, data attribute, and ID used in HTML must match the corresponding CSS selector in the stylesheet.
+     * Every element queried in JavaScript (e.g. via document.querySelector or getElementById) must exist in the HTML structure with identical naming.
+     * All imported module paths, asset links, and stylesheet <link> tags must match real created file paths.
+
+3. MODERN UI/UX & STYLING EXCELLENCE:
+   - Use semantic HTML5 (<header>, <nav>, <main>, <section>, <article>, <footer>).
+   - Use modern, responsive CSS with CSS custom properties (variables), Flexbox/Grid, smooth hover/focus states, and clean responsive breakpoints (@media).
+   - Ensure high contrast and refined typography hierarchy with distinct weights for headings, body text, and monospace elements.
+   - Provide active, working JavaScript event listeners (attached after DOMContentLoaded with defensive null checks).
+
+DIFF FORMAT & OPERATIONS:
 1. For modifying existing files, use targeted, surgical SEARCH/REPLACE diff blocks:
 FILE: relative/path/to/file.ext
 <<<<<<< SEARCH
@@ -404,51 +423,58 @@ FILE: relative/path/to/file.ext
 [replacement lines]
 >>>>>>> REPLACE
 
-2. For creating a new file or adding a file into a folder:
+2. For creating a new file or writing a complete file:
 <<<<<<< CREATE: relative/path/to/new_file.ext
-[file content]
+[full complete file content]
 >>>>>>>
+or standard markdown code blocks with clear file header:
+### File: relative/path/to/new_file.ext
+```lang
+[full complete file content]
+```
 
 3. For deleting a file:
 <<<<<<< DELETE: relative/path/to/file_to_delete.ext >>>>>>>
-or:
-DELETE: relative/path/to/file_to_delete.ext
+or: DELETE: relative/path/to/file_to_delete.ext
 
 4. For making a new folder or directory:
 <<<<<<< MKDIR: relative/path/to/folder >>>>>>>
-or:
-MKDIR: relative/path/to/folder
+or: MKDIR: relative/path/to/folder
 
-5. For moving or renaming a file or folder (e.g. moving files out of/into folders or editing folders):
+5. For moving or renaming a file or folder:
 <<<<<<< MOVE: old/path/to/file.ext -> new/path/to/file.ext >>>>>>>
-or:
-MOVE: old/path/to/file.ext -> new/path/to/file.ext
+or: MOVE: old/path/to/file.ext -> new/path/to/file.ext
 
 6. For deleting a folder:
 <<<<<<< RMDIR: relative/path/to/folder >>>>>>>
-or:
-RMDIR: relative/path/to/folder
+or: RMDIR: relative/path/to/folder
 
-7. For executing terminal commands (such as running environment inspection/discovery like `ollama list` or `docker ps`, installing dependencies, running build/tests, or running scripts):
+7. For executing terminal commands (discovery like `ollama list`, installing dependencies, running builds, running tests):
 <<<<<<< COMMAND
-pip install requests
+npm test
 >>>>>>>
-or:
-COMMAND: pip install requests
+or: COMMAND: npm test
 
-8. Write complete, high-quality, production-ready code. NEVER write stubs, placeholders, abbreviations, or '// TODO' comments. Fully implement all requested sections, components, styling, logic, and functions.
-9. For web & UI tasks, ensure high visual fidelity, complete CSS styling, full semantic HTML structure with all sections, and working interactive event handlers.
-10. Provide a brief explanation before the diff blocks."#;
+8. Provide a concise explanation of the architectural approach before emitting diff blocks."#;
 
         // Build User Prompt
         let mut user_prompt = format!(
-            "Execute the following implementation plan thoroughly and completely without placeholders or stubs:\n\nTask: {plan_summary}\n\nSteps:\n"
+            "Execute the following implementation plan with the highest software engineering quality and zero stubs:\n\nTask: {plan_summary}\n\nSteps:\n"
         );
         for (i, step) in steps.iter().enumerate() {
             user_prompt.push_str(&format!(
-                "{}. Goal: {}\n   Instructions: {:?}\n   Target Files: {:?}\n",
-                i + 1, step.goal, step.instructions, step.likely_files
+                "{}. Goal: {}\n   Instructions:\n",
+                i + 1, step.goal
             ));
+            for inst in &step.instructions {
+                user_prompt.push_str(&format!("      - {}\n", inst));
+            }
+            if !step.likely_files.is_empty() {
+                user_prompt.push_str(&format!("   Target Files: {}\n", step.likely_files.join(", ")));
+            }
+            if !step.acceptance_checks.is_empty() {
+                user_prompt.push_str(&format!("   Acceptance Criteria: {}\n", step.acceptance_checks.join("; ")));
+            }
         }
         user_prompt.push_str(&format!("\n\n{shredded_files_summary}"));
 
