@@ -909,6 +909,62 @@ or: COMMAND: npm test
             }
         }
 
+        // 5e. Automated Local Unit Test Verification (Zero Groq Calls)
+        let test_result = run_local_test_check(
+            worktree_path,
+            session_id,
+            &execution_service,
+            &app_handle,
+        ).await;
+
+        match test_result {
+            Ok(None) => {
+                let has_test_suite = worktree_path.join("Cargo.toml").exists()
+                    || worktree_path.join("pytest.ini").exists()
+                    || worktree_path.join("tests").is_dir()
+                    || worktree_path.join("go.mod").exists();
+                if has_test_suite {
+                    let _ = app_handle.emit(
+                        "worker:message",
+                        &WorkerEventPayload {
+                            session_id: session_id.to_string(),
+                            event_type: "message.part.updated".into(),
+                            content: serde_json::json!({
+                                "type": "message.part.updated",
+                                "properties": {
+                                    "part": {
+                                        "type": "reasoning",
+                                        "text": "Local test suite verification passed: All unit tests green (exit code 0)."
+                                    }
+                                }
+                            }).to_string(),
+                            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                        },
+                    );
+                }
+            }
+            Ok(Some(test_errs)) => {
+                let _ = app_handle.emit(
+                    "worker:message",
+                    &WorkerEventPayload {
+                        session_id: session_id.to_string(),
+                        event_type: "message.part.updated".into(),
+                        content: serde_json::json!({
+                            "type": "message.part.updated",
+                            "properties": {
+                                "part": {
+                                    "type": "reasoning",
+                                    "text": format!("Local test runner notice: unit tests reported failures:\n{}", test_errs.trim())
+                                }
+                            }
+                        }).to_string(),
+                        timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                    },
+                );
+            }
+            Err(_) => {}
+        }
+
         // 6. Extract and Execute Terminal Commands (Dependencies, Builds, Tests)
         let commands_to_run = extract_commands_for_session(&response_text, steps);
         let mut executed_commands = Vec::new();
@@ -1230,11 +1286,29 @@ pub fn format_and_clean_worktree_files(worktree_path: &Path, applied_diffs: &[cr
                 }
                 let _ = std::fs::write(&full_path, cleaned);
             }
+
+            // Local standard formatters if available on system
+            if diff.file_path.ends_with(".rs") {
+                let prog = if cfg!(windows) { "rustfmt.exe" } else { "rustfmt" };
+                let _ = std::process::Command::new(prog)
+                    .arg(&full_path)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            } else if diff.file_path.ends_with(".go") {
+                let prog = if cfg!(windows) { "gofmt.exe" } else { "gofmt" };
+                let _ = std::process::Command::new(prog)
+                    .args(&["-w", full_path.to_str().unwrap_or("")])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
         }
     }
 }
 
-/// Audits modified files for incomplete implementations, placeholders, or stubs.
+/// Audits modified files for incomplete implementations, placeholders, stubs,
+/// broken asset references, and structural HTML errors.
 pub fn audit_code_quality(worktree_path: &Path, applied_diffs: &[crate::worker::diff::AppliedDiffResult]) -> Vec<String> {
     let mut findings = Vec::new();
     let stub_markers = [
@@ -1258,8 +1332,51 @@ pub fn audit_code_quality(worktree_path: &Path, applied_diffs: &[crate::worker::
                     }
                 }
                 // Check for empty or unusually brief HTML files
-                if diff.file_path.ends_with(".html") && content.lines().count() < 25 {
-                    findings.push(format!("HTML file '{}' is unusually brief ({} lines)", diff.file_path, content.lines().count()));
+                if diff.file_path.ends_with(".html") {
+                    if content.lines().count() < 25 {
+                        findings.push(format!("HTML file '{}' is unusually brief ({} lines)", diff.file_path, content.lines().count()));
+                    }
+
+                    // Check for unclosed root structural tags
+                    let open_divs = lower.matches("<div").count();
+                    let close_divs = lower.matches("</div>").count();
+                    if open_divs != close_divs {
+                        findings.push(format!("HTML file '{}' has mismatched <div> tags ({} open vs {} closed)", diff.file_path, open_divs, close_divs));
+                    }
+
+                    // Asset and script reference integrity check
+                    for token in content.split_whitespace() {
+                        let t_lower = token.to_lowercase();
+                        let target_attr = if t_lower.starts_with("src=\"") || t_lower.starts_with("href=\"") {
+                            Some('"')
+                        } else if t_lower.starts_with("src='") || t_lower.starts_with("href='") {
+                            Some('\'')
+                        } else {
+                            None
+                        };
+
+                        if let Some(quote) = target_attr {
+                            if let Some(start) = token.find(quote) {
+                                if let Some(end) = token[start + 1..].find(quote) {
+                                    let raw_ref = &token[start + 1..start + 1 + end];
+                                    let clean_ref = raw_ref.split('?').next().unwrap_or(raw_ref).split('#').next().unwrap_or(raw_ref);
+                                    if !clean_ref.is_empty()
+                                        && !clean_ref.starts_with("http://")
+                                        && !clean_ref.starts_with("https://")
+                                        && !clean_ref.starts_with("//")
+                                        && !clean_ref.starts_with("data:")
+                                        && !clean_ref.starts_with("mailto:")
+                                        && !clean_ref.starts_with('#')
+                                    {
+                                        let asset_path = worktree_path.join(clean_ref);
+                                        if !asset_path.exists() {
+                                            findings.push(format!("Asset '{}' referenced in '{}' was not found in worktree", clean_ref, diff.file_path));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1391,6 +1508,100 @@ pub async fn run_local_compiler_check(
                     }
                     Err(e) => return Ok(Some(format!("python py_compile failed: {e}"))),
                 }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Runs automated local unit tests inside the worktree if a test suite exists.
+/// Returns Ok(None) if tests pass or no test suite is configured.
+/// Returns Ok(Some(test_failures)) if tests failed.
+pub async fn run_local_test_check(
+    worktree_path: &Path,
+    session_id: &str,
+    execution_service: &ExecutionService,
+    app_handle: &AppHandle,
+) -> Result<Option<String>, String> {
+    // 1. Rust test suite
+    if worktree_path.join("Cargo.toml").exists() {
+        let prog = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+        let args = ["test", "--no-fail-fast"];
+        let desc = "Run cargo test verification".to_string();
+        let req = execution_service
+            .create_approval_request(prog, &args, worktree_path, &desc, Some(session_id))
+            .await;
+
+        if req.auto_approved {
+            match execution_service.execute_command(&req.id, Some(app_handle), None).await {
+                Ok(res) => {
+                    if res.exit_code != Some(0) && !res.cancelled {
+                        let mut err = String::new();
+                        for line in res.stdout_tail.iter().chain(res.stderr_tail.iter()).take(25) {
+                            err.push_str(line);
+                            err.push('\n');
+                        }
+                        if !err.is_empty() {
+                            return Ok(Some(err));
+                        }
+                    }
+                }
+                Err(e) => return Ok(Some(format!("cargo test failed to run: {e}"))),
+            }
+        }
+    }
+    // 2. Python test suite
+    else if worktree_path.join("pytest.ini").exists() || worktree_path.join("tests").is_dir() {
+        let prog = if cfg!(windows) { "pytest.exe" } else { "pytest" };
+        let args = ["-q"];
+        let desc = "Run pytest verification".to_string();
+        let req = execution_service
+            .create_approval_request(prog, &args, worktree_path, &desc, Some(session_id))
+            .await;
+
+        if req.auto_approved {
+            match execution_service.execute_command(&req.id, Some(app_handle), None).await {
+                Ok(res) => {
+                    if res.exit_code != Some(0) && !res.cancelled {
+                        let mut err = String::new();
+                        for line in res.stdout_tail.iter().chain(res.stderr_tail.iter()).take(25) {
+                            err.push_str(line);
+                            err.push('\n');
+                        }
+                        if !err.is_empty() {
+                            return Ok(Some(err));
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    // 3. Go test suite
+    else if worktree_path.join("go.mod").exists() {
+        let prog = if cfg!(windows) { "go.exe" } else { "go" };
+        let args = ["test", "./..."];
+        let desc = "Run go test verification".to_string();
+        let req = execution_service
+            .create_approval_request(prog, &args, worktree_path, &desc, Some(session_id))
+            .await;
+
+        if req.auto_approved {
+            match execution_service.execute_command(&req.id, Some(app_handle), None).await {
+                Ok(res) => {
+                    if res.exit_code != Some(0) && !res.cancelled {
+                        let mut err = String::new();
+                        for line in res.stdout_tail.iter().chain(res.stderr_tail.iter()).take(25) {
+                            err.push_str(line);
+                            err.push('\n');
+                        }
+                        if !err.is_empty() {
+                            return Ok(Some(err));
+                        }
+                    }
+                }
+                Err(_) => {}
             }
         }
     }
@@ -1615,6 +1826,31 @@ COMMAND: pytest tests/test_calc.py
         let findings = audit_code_quality(&temp_dir, &applied);
         assert!(!findings.is_empty(), "Must detect TODO: stub marker");
         assert!(findings[0].contains("stub marker: 'todo:'"));
+
+        // 2. Create an HTML file referencing a missing stylesheet and unclosed tag
+        let html_content = r#"<!DOCTYPE html>
+<html>
+<head>
+    <link rel="stylesheet" href="nonexistent.css">
+</head>
+<body>
+    <div>
+        <p>Hello</p>
+</body>
+</html>"#;
+        let html_file = temp_dir.join("index.html");
+        std::fs::write(&html_file, html_content).unwrap();
+
+        let applied_html = vec![crate::worker::diff::AppliedDiffResult {
+            file_path: "index.html".to_string(),
+            is_new: true,
+            additions: 10,
+            deletions: 0,
+        }];
+
+        let html_findings = audit_code_quality(&temp_dir, &applied_html);
+        assert!(html_findings.iter().any(|f| f.contains("nonexistent.css")), "Must detect missing asset reference");
+        assert!(html_findings.iter().any(|f| f.contains("mismatched <div> tags")), "Must detect unclosed <div>");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

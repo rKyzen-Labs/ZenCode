@@ -102,6 +102,10 @@ impl ExecutionService {
             return CommandSecurityClass::SafeAutoApproved;
         }
 
+        if (prog_base == "npm" || prog_base == "npm.cmd" || prog_base == "npm.exe") && !args.is_empty() && args[0] == "test" {
+            return CommandSecurityClass::SafeAutoApproved;
+        }
+
         if (prog_base == "go" || prog_base == "go.exe") && !args.is_empty() && (args[0] == "test" || args[0] == "vet") {
             return CommandSecurityClass::SafeAutoApproved;
         }
@@ -112,6 +116,18 @@ impl ExecutionService {
             if args.iter().any(|a| a == &"--noEmit") {
                 return CommandSecurityClass::SafeAutoApproved;
             }
+        }
+
+        if (prog_base == "npx" || prog_base == "npx.cmd" || prog_base == "npx.exe") && args.iter().any(|a| a == &"prettier") {
+            return CommandSecurityClass::SafeAutoApproved;
+        }
+
+        if prog_base == "rustfmt" || prog_base == "rustfmt.exe" || prog_base == "gofmt" || prog_base == "gofmt.exe" {
+            return CommandSecurityClass::SafeAutoApproved;
+        }
+
+        if (prog_base == "ruff" || prog_base == "ruff.exe") && !args.is_empty() && args[0] == "format" {
+            return CommandSecurityClass::SafeAutoApproved;
         }
 
         if (prog_base == "python" || prog_base == "python3" || prog_base == "python.exe" || prog_base == "python3.exe")
