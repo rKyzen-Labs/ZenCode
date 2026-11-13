@@ -13,6 +13,7 @@ pub const MODEL_PRIMARY: &str = "gemini-3.5-flash-lite";
 pub const MODEL_SECONDARY: &str = "gemini-3.1-flash-lite";
 pub const MODEL_TERTIARY: &str = "Gemma-4-31b";
 pub const MODEL_PINNED_ADVANCED: &str = "gemini-3.8-flash";
+pub const MODEL_HYDROGEN: &str = "gemini-4-hydrogen";
 
 pub const GROQ_MODEL_120B: &str = "openai/gpt-oss-120b";
 pub const GROQ_MODEL_20B: &str = "openai/gpt-oss-20b";
@@ -50,6 +51,9 @@ impl ModelLimits {
             Self { rpm: 30, tpm: 16_000, rpd: 14_400, tpd: 1_000_000 }
         } else if match_str(id, MODEL_PINNED_ADVANCED) {
             Self { rpm: 15, tpm: 1_000_000, rpd: 1_500, tpd: 4_000_000 }
+        } else if match_str(id, MODEL_HYDROGEN) {
+            // Authoritative Gemini 4 Hydrogen limits from Google AI Studio: 5 RPM, 250K TPM, 20 RPD
+            Self { rpm: 5, tpm: 250_000, rpd: 20, tpd: 1_000_000 }
         } else if match_str(id, GROQ_MODEL_120B)
             || match_str(id, GROQ_MODEL_20B)
             || match_str(id, GROQ_MODEL_QWEN)
@@ -516,6 +520,10 @@ impl ModelQuotaTracker {
             SingleModelTracker::new(MODEL_PINNED_ADVANCED, "Gemini 3.8 Flash"),
         );
         trackers.insert(
+            MODEL_HYDROGEN.to_string(),
+            SingleModelTracker::new(MODEL_HYDROGEN, "Gemini 4 Hydrogen"),
+        );
+        trackers.insert(
             GROQ_MODEL_120B.to_string(),
             SingleModelTracker::new(GROQ_MODEL_120B, "OpenAI GPT-OSS 120B (Groq)"),
         );
@@ -748,6 +756,7 @@ impl ModelQuotaTracker {
             MODEL_SECONDARY,
             MODEL_TERTIARY,
             MODEL_PINNED_ADVANCED,
+            MODEL_HYDROGEN,
             GROQ_MODEL_120B,
             GROQ_MODEL_20B,
             GROQ_MODEL_QWEN,

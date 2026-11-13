@@ -333,6 +333,16 @@ impl PlanningContext {
         out.push_str("   - COMPLETE SECTION BLUEPRINT: Deconstruct the visual layout into explicit sections (e.g. Navigation with logo, Hero with interactive mockup, Problem statement, Multi-step carousel, Terminal simulation, Comparison charts, Features grid, Audit/verification cards, System requirements, and Footer). Embed these concrete section blueprints directly into the step instructions.\n");
         out.push_str("   - ANTI-STUB MANDATE: Explicitly instruct the worker to generate 100% complete, fully implemented markup, CSS styles, and event-driven JavaScript with zero placeholders or stubs.\n");
 
+        if let Some(preset) = crate::design_system::detect_design_system_intent(&self.task_description) {
+            out.push_str("\nDESIGN SYSTEM BLUEPRINT (AUTO-DETECTED):\n");
+            out.push_str(&crate::design_system::format_design_system_guideline(preset));
+            out.push('\n');
+            out.push_str(crate::design_system::anti_pattern_shield());
+            out.push_str("\n\n");
+            out.push_str(crate::design_system::reflection_checklist());
+            out.push_str("\n\n");
+        }
+
         out
     }
 }

@@ -496,6 +496,16 @@ or: COMMAND: npm test
                 user_prompt.push_str(&format!("   Acceptance Criteria: {}\n", step.acceptance_checks.join("; ")));
             }
         }
+
+        if let Some(preset) = zencode_core::detect_design_system_intent(plan_summary) {
+            user_prompt.push_str("\n\n");
+            user_prompt.push_str(&zencode_core::format_design_system_guideline(preset));
+            user_prompt.push_str("\n\n");
+            user_prompt.push_str(zencode_core::anti_pattern_shield());
+            user_prompt.push_str("\n\n");
+            user_prompt.push_str(zencode_core::reflection_checklist());
+        }
+
         user_prompt.push_str(&format!("\n\n{shredded_files_summary}"));
 
         // 4. Model Selection & Request Loop

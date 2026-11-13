@@ -101,6 +101,7 @@ interface ChatThreadProps {
 const AVAILABLE_DIRECTOR_MODELS = [
   { id: 'gemini-3.5-flash-lite', label: 'Director: Gemini 3.5 Flash Lite' },
   { id: 'gemini-3.8-flash', label: 'Director: Gemini 3.8 Flash' },
+  { id: 'gemini-4-hydrogen', label: 'Director: Gemini 4 Hydrogen' },
   { id: 'granite4.1:8b', label: 'Agent: Ollama granite4.1:8b' },
 ];
 
