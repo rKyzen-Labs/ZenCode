@@ -344,7 +344,9 @@ impl GroqWorkerClient {
             shredded_files_summary.push_str("=== WORKSPACE STRUCTURAL SUMMARY ===\n");
             let mut target_files_count = 0;
             let mut current_tokens = estimate_tokens(&shredded_files_summary);
-            let edit_token_budget: usize = if self.quota_tracker.is_some() { 2_000 } else { 4_500 };
+            let is_groq = self.quota_tracker.is_some();
+            let edit_token_budget: usize = if is_groq { 1_200 } else { 4_500 };
+            let max_target_tokens: usize = if is_groq { 800 } else { 3_500 };
 
             for fpath in &files_to_scan {
                 let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
@@ -359,13 +361,22 @@ impl GroqWorkerClient {
                     || likely_files_set.contains(file_base)
                     || likely_files_set.iter().any(|lf| lf == file_base || rel_str_lower.ends_with(lf) || lf.ends_with(file_base));
 
-                if is_explicit_target && target_files_count < 3 {
-                    // Send full content for explicit targets
+                if is_explicit_target && target_files_count < 3 && current_tokens < edit_token_budget {
+                    // Send content for explicit targets, trimmed if huge on Groq
                     if let Ok(full_code) = std::fs::read_to_string(fpath) {
                         target_files_count += 1;
-                        let section = format!("\n--- Target File (Full Content): {rel_str} ---\n{full_code}\n");
+                        let code_tokens = estimate_tokens(&full_code);
+                        let content_to_use = if is_groq && code_tokens > max_target_tokens {
+                            let chars_limit = max_target_tokens * 3;
+                            let safe_len = chars_limit.min(full_code.len());
+                            format!("{}\n... [Remainder of target file omitted to stay within Groq TPM limit] ...", &full_code[..safe_len])
+                        } else {
+                            full_code
+                        };
+                        let section = format!("\n--- Target File (Content): {rel_str} ---\n{content_to_use}\n");
+                        let sec_toks = estimate_tokens(&section);
                         shredded_files_summary.push_str(&section);
-                        current_tokens += estimate_tokens(&section);
+                        current_tokens += sec_toks;
 
                         // Emit tool read activity gradually to frontend
                         let _ = app_handle.emit(
@@ -524,49 +535,27 @@ or: COMMAND: npm test
             preferred_model.unwrap_or("qwen2.5-coder:7b").to_string()
         };
 
-        // Pre-Flight Payload Size Check (Groq 8K TPM Safeguard):
-        // Groq enforces (prompt_tokens + max_tokens) <= model TPM (8,000 for on-demand tier).
+        // For Groq Cloud: ensure prompt_tokens fits comfortably within Groq TPM budget
+        let is_groq = self.quota_tracker.is_some();
+        if is_groq {
+            let p_tokens = estimate_tokens(system_prompt) + estimate_tokens(&user_prompt);
+            if p_tokens > 3_500 {
+                println!("[Groq Worker Payload] Prompt tokens ({p_tokens}) high. Trimming non-essential context to fit Groq 8K TPM...");
+                if let Some(pos) = user_prompt.rfind("\n--- Context Outline (Shredded):") {
+                    user_prompt.truncate(pos);
+                    user_prompt.push_str("\n[Additional non-target file outlines omitted to stay strictly within Groq TPM limit]");
+                }
+            }
+        }
+
         let prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(&user_prompt);
-        let dynamic_max_tokens = if self.quota_tracker.is_some() {
+        let dynamic_max_tokens = if is_groq {
             let available_headroom = 7_500usize.saturating_sub(prompt_tokens);
             available_headroom.clamp(1_024, 4_096) as u32
         } else {
             4_096
         };
         println!("[Groq Worker Payload] Estimated prompt tokens: {prompt_tokens}, Dynamic max_tokens: {dynamic_max_tokens}, Target Model: {chosen_model}");
-
-        if self.quota_tracker.is_some() && (prompt_tokens > 5_500 || prompt_tokens + (dynamic_max_tokens as usize) > 7_600) {
-            eprintln!("Payload estimated tokens ({prompt_tokens} prompt + {dynamic_max_tokens} output) exceeds Groq safe TPM limit. Falling back to local Ollama worker...");
-            let _ = app_handle.emit(
-                "worker:message",
-                &WorkerEventPayload {
-                    session_id: session_id.to_string(),
-                    event_type: "message.part.updated".into(),
-                    content: serde_json::json!({
-                        "type": "message.part.updated",
-                        "properties": {
-                            "part": {
-                                "type": "reasoning",
-                                "text": format!("This request requires ~{prompt_tokens} tokens which exceeds Groq's 8K on-demand TPM limit — executing locally with Ollama instead to ensure complete code generation without interruption.")
-                            }
-                        }
-                    }).to_string(),
-                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
-                },
-            );
-
-            let ollama_client = Self::new_ollama(None);
-            return Box::pin(ollama_client.execute_session(
-                worktree_path,
-                _task_id,
-                session_id,
-                plan_summary,
-                steps,
-                None,
-                execution_service,
-                app_handle,
-            )).await;
-        }
 
         let mut response_text = String::new();
         let max_attempts = if self.quota_tracker.is_some() { 3 } else { 1 };
@@ -745,61 +734,44 @@ or: COMMAND: npm test
                         }
 
                         break;
-                    } else if status.as_u16() == 429 {
+                    } else if status.as_u16() == 429 || status.as_u16() == 413 {
+                        let err_body = resp.text().await.unwrap_or_default();
+                        eprintln!("Groq returned rate/size error {status}: {err_body}");
                         if let Some(ref tracker_arc) = self.quota_tracker {
                             // Rate limit hit: ModelQuotaTracker already set cooldown from retry-after header
                             let next_model = {
                                 let mut tracker = tracker_arc.lock().await;
-                                tracker.select_groq_model(None).map_err(|e| format!("Groq quota exhausted: {e}"))?
+                                tracker.select_groq_model(None)
                             };
-                            println!("Groq 429 on {chosen_model}. Rotating to {next_model}...");
-                            chosen_model = next_model;
-                            continue;
+                            match next_model {
+                                Ok(m) if m != chosen_model => {
+                                    println!("Groq rate limit on {chosen_model}. Rotating to Groq model {m}...");
+                                    let _ = app_handle.emit(
+                                        "worker:message",
+                                        &WorkerEventPayload {
+                                            session_id: session_id.to_string(),
+                                            event_type: "message.part.updated".into(),
+                                            content: serde_json::json!({
+                                                "type": "message.part.updated",
+                                                "properties": {
+                                                    "part": {
+                                                        "type": "reasoning",
+                                                        "text": format!("Groq model {chosen_model} hit rate/capacity limits ({status}). Rotating to Groq model {m}...")
+                                                    }
+                                                }
+                                            }).to_string(),
+                                            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                                        },
+                                    );
+                                    chosen_model = m;
+                                    continue;
+                                }
+                                _ => {
+                                    return Err(format!("Groq cloud rate limit reached on {chosen_model} ({status}): {err_body}. All Groq models are currently at capacity."));
+                                }
+                            }
                         } else {
-                            return Err(format!("Local Ollama model returned 429: {}", resp.text().await.unwrap_or_default()));
-                        }
-                    } else if status.as_u16() == 413 || status.as_u16() == 400 || !status.is_success() {
-                        let err_body = resp.text().await.unwrap_or_default();
-                        eprintln!("Groq returned error {status}: {err_body}");
-                        let is_payload_or_rate_limit = status.as_u16() == 413
-                            || status.as_u16() == 429
-                            || err_body.contains("ratelimitexceeded")
-                            || err_body.contains("Request too large")
-                            || err_body.contains("Payload Too Large")
-                            || err_body.contains("reduce the length of the messages")
-                            || err_body.contains("tokens per minute");
-
-                        if is_payload_or_rate_limit && self.quota_tracker.is_some() {
-                            let _ = app_handle.emit(
-                                "worker:message",
-                                &WorkerEventPayload {
-                                    session_id: session_id.to_string(),
-                                    event_type: "message.part.updated".into(),
-                                    content: serde_json::json!({
-                                        "type": "message.part.updated",
-                                        "properties": {
-                                            "part": {
-                                                "type": "reasoning",
-                                                "text": "Groq cloud worker rate limit reached (413 Payload Too Large / TPM Limit) — seamlessly continuing execution locally with Ollama..."
-                                            }
-                                        }
-                                    }).to_string(),
-                                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
-                                },
-                            );
-                            let ollama_client = Self::new_ollama(None);
-                            return Box::pin(ollama_client.execute_session(
-                                worktree_path,
-                                _task_id,
-                                session_id,
-                                plan_summary,
-                                steps,
-                                None,
-                                execution_service,
-                                app_handle,
-                            )).await;
-                        } else {
-                            return Err(format!("{provider_label} API request failed ({status}): {err_body}"));
+                            return Err(format!("Local Ollama model returned {status}: {err_body}"));
                         }
                     } else {
                         let err_body = resp.text().await.unwrap_or_default();
