@@ -10,6 +10,9 @@ import {
   FolderPlus,
   Keyboard,
   RotateCcw,
+  Globe,
+  ExternalLink,
+  Plus,
 } from 'lucide-react';
 import {
   DEFAULT_KEYBINDINGS,
@@ -32,6 +35,10 @@ import {
   setGroqApiKey,
   deleteGroqApiKey,
   validateGroqApiKey,
+  getOpenRouterKeyStatus,
+  setOpenRouterApiKey,
+  deleteOpenRouterApiKey,
+  validateOpenRouterApiKey,
   getWorkspaceWorkerConfig,
   setWorkspaceWorkerConfig,
   listInstalledOllamaModels,
@@ -45,6 +52,7 @@ import type {
   QuotaUpdateEvent,
   GeminiKeyStatus,
   GroqKeyStatus,
+  OpenRouterKeyStatus,
   WorkspaceWorkerConfig,
   OllamaModelItem,
 } from '../types';
@@ -71,6 +79,16 @@ const GROQ_MODELS = [
   { id: 'openai/gpt-oss-120b', name: 'OpenAI GPT-OSS 120B', desc: 'Highest reasoning capability (Primary)' },
   { id: 'openai/gpt-oss-20b', name: 'OpenAI GPT-OSS 20B', desc: 'High throughput, low latency (Secondary)' },
   { id: 'qwen/qwen3.8-27b', name: 'Qwen 3.8 27B', desc: 'Specialized code generation (Tertiary)' },
+];
+
+const OPENROUTER_FREE_MODELS = [
+  { id: 'qwen/qwen-2.5-coder-32b-instruct:free', name: 'Qwen 2.5 Coder 32B Instruct', desc: 'Top open coding model in the world (32k context)', badge: 'Recommended' },
+  { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B Instruct', desc: '128k context full project generation', badge: 'Flagship' },
+  { id: 'deepseek/deepseek-r1:free', name: 'DeepSeek R1', desc: 'Chain-of-thought algorithm & logic solver', badge: 'Reasoning' },
+  { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash Exp', desc: 'Fast multimodal instruction following', badge: 'Multimodal' },
+  { id: 'meta-llama/llama-3.1-8b-instruct:free', name: 'Llama 3.1 8B Instruct', desc: 'Lightweight fast instruction following', badge: 'Fast' },
+  { id: 'mistralai/mistral-7b-instruct:free', name: 'Mistral 7B Instruct', desc: 'Compact general reasoning worker', badge: 'Lean' },
+  { id: 'microsoft/phi-3-mini-128k-instruct:free', name: 'Phi-3 Mini 128k', desc: '128k context ultra-compact worker', badge: 'Compact' },
 ];
 
 export const SettingsPage: FC<SettingsPageProps> = ({
@@ -109,6 +127,16 @@ export const SettingsPage: FC<SettingsPageProps> = ({
   const [groqKeyNotice, setGroqKeyNotice] = useState<string | null>(null);
   const [showGroqKeyText, setShowGroqKeyText] = useState(false);
   const [isEditingGroqKey, setIsEditingGroqKey] = useState(false);
+
+  // OpenRouter API Key state
+  const [openRouterKeyStatus, setOpenRouterKeyStatus] = useState<OpenRouterKeyStatus | null>(null);
+  const [newOpenRouterKeyInput, setNewOpenRouterKeyInput] = useState('');
+  const [isSavingOpenRouterKey, setIsSavingOpenRouterKey] = useState(false);
+  const [isValidatingOpenRouter, setIsValidatingOpenRouter] = useState(false);
+  const [openRouterKeyNotice, setOpenRouterKeyNotice] = useState<string | null>(null);
+  const [showOpenRouterKeyText, setShowOpenRouterKeyText] = useState(false);
+  const [isEditingOpenRouterKey, setIsEditingOpenRouterKey] = useState(false);
+  const [customOpenRouterModel, setCustomOpenRouterModel] = useState('');
 
   // Worker model state
   const [workspaceWorkerConfig, setWorkspaceWorkerConfigState] = useState<WorkspaceWorkerConfig | null>(null);
@@ -216,6 +244,13 @@ export const SettingsPage: FC<SettingsPageProps> = ({
       setGroqKeyStatus(gks);
     } catch (e) {
       console.warn('Failed to get Groq key status:', e);
+    }
+
+    try {
+      const orks = await getOpenRouterKeyStatus();
+      setOpenRouterKeyStatus(orks);
+    } catch (e) {
+      console.warn('Failed to get OpenRouter key status:', e);
     }
 
     try {
@@ -368,7 +403,54 @@ export const SettingsPage: FC<SettingsPageProps> = ({
     }
   };
 
-  const handleSelectDefaultWorkerType = async (workerType: 'local' | 'groq') => {
+  const handleValidateOpenRouter = async () => {
+    if (!newOpenRouterKeyInput.trim()) return;
+    setIsValidatingOpenRouter(true);
+    setOpenRouterKeyNotice(null);
+    try {
+      const isValid = await validateOpenRouterApiKey(newOpenRouterKeyInput.trim());
+      if (isValid) {
+        setOpenRouterKeyNotice('Validation successful! OpenRouter API key is active.');
+      } else {
+        setOpenRouterKeyNotice('Validation failed: Invalid OpenRouter API key.');
+      }
+    } catch (err: any) {
+      setOpenRouterKeyNotice(`Validation failed: ${err?.message || err}`);
+    } finally {
+      setIsValidatingOpenRouter(false);
+    }
+  };
+
+  const handleSaveOpenRouterKey = async () => {
+    if (!newOpenRouterKeyInput.trim()) return;
+    setIsSavingOpenRouterKey(true);
+    setOpenRouterKeyNotice(null);
+    try {
+      const updated = await setOpenRouterApiKey(newOpenRouterKeyInput.trim());
+      setOpenRouterKeyStatus(updated);
+      setNewOpenRouterKeyInput('');
+      setIsEditingOpenRouterKey(false);
+      setOpenRouterKeyNotice('OpenRouter API key securely saved to Windows Credential Manager');
+      setTimeout(() => setOpenRouterKeyNotice(null), 4000);
+    } catch (err: any) {
+      setOpenRouterKeyNotice(`Failed to save OpenRouter key: ${err?.message || err}`);
+    } finally {
+      setIsSavingOpenRouterKey(false);
+    }
+  };
+
+  const handleDeleteOpenRouterKey = async () => {
+    try {
+      await deleteOpenRouterApiKey();
+      setOpenRouterKeyStatus({ has_key: false, masked_key: '', status_text: 'Not configured' });
+      setOpenRouterKeyNotice('OpenRouter API key removed from Windows Credential Manager');
+      setTimeout(() => setOpenRouterKeyNotice(null), 3000);
+    } catch (err: any) {
+      setOpenRouterKeyNotice(`Failed to remove OpenRouter key: ${err?.message || err}`);
+    }
+  };
+
+  const handleSelectDefaultWorkerType = async (workerType: 'local' | 'groq' | 'openrouter') => {
     if (workerType === 'groq' && !groqKeyStatus?.has_key) {
       if (onOpenOnboarding) {
         onOpenOnboarding(3);
@@ -379,24 +461,59 @@ export const SettingsPage: FC<SettingsPageProps> = ({
       return;
     }
 
+    if (workerType === 'openrouter' && !openRouterKeyStatus?.has_key) {
+      if (onOpenOnboarding) {
+        onOpenOnboarding(3);
+      } else {
+        scrollToSection('apikey');
+        setIsEditingOpenRouterKey(true);
+      }
+      return;
+    }
+
     if (!selectedWorkspacePath) return;
 
     setIsUpdatingModel(true);
     setModelNotice(null);
     try {
+      const targetModel = workerType === 'groq'
+        ? (workspaceWorkerConfig?.groq_model || 'openai/gpt-oss-120b')
+        : workerType === 'openrouter'
+        ? (workspaceWorkerConfig?.groq_model || 'qwen/qwen-2.5-coder-32b-instruct:free')
+        : currentWorkerModel;
+
       await setWorkspaceWorkerConfig(
         selectedWorkspacePath,
         workerType,
-        workspaceWorkerConfig?.groq_model || 'openai/gpt-oss-120b'
+        targetModel
       );
       setWorkspaceWorkerConfigState({
         worker_type: workerType,
-        groq_model: workspaceWorkerConfig?.groq_model || 'openai/gpt-oss-120b',
+        groq_model: targetModel,
       });
-      setModelNotice(`Default worker set to ${workerType === 'groq' ? 'Groq (Cloud)' : 'Local (Ollama)'}`);
+      setModelNotice(`Default worker set to ${workerType === 'groq' ? 'Groq (Cloud)' : workerType === 'openrouter' ? 'OpenRouter (Free Cloud)' : 'Local (Ollama)'}`);
       setTimeout(() => setModelNotice(null), 3000);
     } catch (e: any) {
       setModelNotice(`Failed to update default worker: ${e?.message || e}`);
+    } finally {
+      setIsUpdatingModel(false);
+    }
+  };
+
+  const handleSelectOpenRouterModel = async (modelId: string) => {
+    if (!selectedWorkspacePath) return;
+    setIsUpdatingModel(true);
+    setModelNotice(null);
+    try {
+      await setWorkspaceWorkerConfig(selectedWorkspacePath, 'openrouter', modelId);
+      setWorkspaceWorkerConfigState({
+        worker_type: 'openrouter',
+        groq_model: modelId,
+      });
+      setModelNotice(`OpenRouter worker model set to ${modelId}`);
+      setTimeout(() => setModelNotice(null), 3000);
+    } catch (e: any) {
+      setModelNotice(`Failed to update OpenRouter model: ${e?.message || e}`);
     } finally {
       setIsUpdatingModel(false);
     }
@@ -715,6 +832,13 @@ export const SettingsPage: FC<SettingsPageProps> = ({
               </div>
             )}
 
+            {openRouterKeyNotice && (
+              <div className="p-2.5 bg-[#f5f4ee] border border-[#5f8a5a]/30 rounded-lg text-xs text-[#5f8a5a] flex items-center gap-2">
+                <Check className="w-3.5 h-3.5 shrink-0" />
+                <span>{openRouterKeyNotice}</span>
+              </div>
+            )}
+
             <div className="space-y-0 divide-y divide-[#dad9d4]">
               {/* Planning Model (Gemini) Row matching PDF Page 5 */}
               <div className="py-3.5 space-y-2">
@@ -892,6 +1016,116 @@ export const SettingsPage: FC<SettingsPageProps> = ({
                         onClick={() => {
                           setIsEditingGroqKey(false);
                           setNewGroqKeyInput('');
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg text-xs text-[#83827d] hover:text-[#141413] cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Cloud Worker (OpenRouter Free Tier) Row */}
+              <div className="py-3.5 space-y-2">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-[#141413] font-sans">
+                        Cloud worker (OpenRouter Free Tier)
+                      </span>
+                      <a
+                        href="https://openrouter.ai/collections/free-models"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[11px] text-[#c96442] hover:underline flex items-center gap-1 font-medium font-sans"
+                        title="Browse OpenRouter Free Models Collection"
+                      >
+                        <span>Free Models Catalog</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                    <div className="text-xs text-[#83827d] font-mono truncate">
+                      {openRouterKeyStatus?.has_key
+                        ? (openRouterKeyStatus.masked_key || 'sk-or-v1-••••••••••••••••')
+                        : 'Not configured'}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span
+                      className={`text-[11px] px-2 py-0.5 rounded font-sans font-medium ${
+                        openRouterKeyStatus?.has_key
+                          ? 'text-[#5f8a5a] bg-[#5f8a5a]/10 border border-[#5f8a5a]/20'
+                          : 'text-[#83827d] bg-[#ede9de] border border-[#dad9d4]'
+                      }`}
+                    >
+                      {openRouterKeyStatus?.has_key ? 'Valid' : 'Empty'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingOpenRouterKey(!isEditingOpenRouterKey)}
+                      className="text-xs text-[#c96442] hover:text-[#b5523f] font-medium font-sans transition-colors cursor-pointer"
+                    >
+                      {openRouterKeyStatus?.has_key ? 'Replace' : 'Add key'}
+                    </button>
+                    {openRouterKeyStatus?.has_key && (
+                      <button
+                        type="button"
+                        onClick={handleDeleteOpenRouterKey}
+                        className="text-xs text-[#83827d] hover:text-[#c96442] font-sans transition-colors cursor-pointer"
+                        title="Delete OpenRouter key"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Inline OpenRouter Key Form */}
+                {isEditingOpenRouterKey && (
+                  <div className="p-3 bg-[#f5f4ee] border border-[#dad9d4] rounded-xl space-y-2 mt-2">
+                    <div className="flex items-center gap-2">
+                      <div className="relative flex-1">
+                        <input
+                          type={showOpenRouterKeyText ? 'text' : 'password'}
+                          value={newOpenRouterKeyInput}
+                          onChange={(e) => setNewOpenRouterKeyInput(e.target.value)}
+                          placeholder="Paste OpenRouter API key (sk-or-v1-...)"
+                          className="w-full bg-[#faf9f5] border border-[#dad9d4] focus:border-[#c96442] rounded-lg px-3 py-1.5 text-xs text-[#141413] placeholder-[#83827d] font-mono focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowOpenRouterKeyText(!showOpenRouterKeyText)}
+                          className="absolute right-2 top-2 text-[#83827d] hover:text-[#141413]"
+                        >
+                          {showOpenRouterKeyText ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleValidateOpenRouter}
+                        disabled={!newOpenRouterKeyInput.trim() || isValidatingOpenRouter}
+                        className="px-2.5 py-1.5 rounded-lg border border-[#dad9d4] bg-[#ede9de] hover:bg-[#e9e6dc] text-xs text-[#141413] transition-colors disabled:opacity-40 cursor-pointer"
+                      >
+                        {isValidatingOpenRouter ? <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c96442]" /> : 'Validate'}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleSaveOpenRouterKey}
+                        disabled={!newOpenRouterKeyInput.trim() || isSavingOpenRouterKey}
+                        className="px-3 py-1.5 rounded-lg bg-[#c96442] hover:bg-[#b5523f] text-white font-medium text-xs disabled:opacity-40 transition-colors shadow-sm cursor-pointer"
+                      >
+                        {isSavingOpenRouterKey ? 'Saving...' : 'Save'}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsEditingOpenRouterKey(false);
+                          setNewOpenRouterKeyInput('');
                         }}
                         className="px-2.5 py-1.5 rounded-lg text-xs text-[#83827d] hover:text-[#141413] cursor-pointer"
                       >
@@ -1098,14 +1332,14 @@ export const SettingsPage: FC<SettingsPageProps> = ({
               </div>
             )}
 
-            {/* Local vs Groq Card Choice */}
-            <div className="grid grid-cols-2 gap-3">
+            {/* Worker Engine Card Choice */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
               {/* Option 1: Local (Ollama) */}
               <div
                 onClick={() => handleSelectDefaultWorkerType('local')}
                 className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between space-y-2 ${
                   currentDefaultWorker === 'local'
-                    ? 'bg-[#f5f4ee] border-[#c96442] shadow-sm'
+                    ? 'bg-[#f5f4ee] border-[#c96442] shadow-sm ring-1 ring-[#c96442]'
                     : 'bg-[#faf9f5] border-[#dad9d4] hover:bg-[#f5f4ee]'
                 }`}
               >
@@ -1130,7 +1364,7 @@ export const SettingsPage: FC<SettingsPageProps> = ({
                 onClick={() => handleSelectDefaultWorkerType('groq')}
                 className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between space-y-2 ${
                   currentDefaultWorker === 'groq'
-                    ? 'bg-[#f5f4ee] border-[#c96442] shadow-sm'
+                    ? 'bg-[#f5f4ee] border-[#c96442] shadow-sm ring-1 ring-[#c96442]'
                     : 'bg-[#faf9f5] border-[#dad9d4] hover:bg-[#f5f4ee]'
                 }`}
               >
@@ -1147,6 +1381,31 @@ export const SettingsPage: FC<SettingsPageProps> = ({
                 </div>
                 <p className="text-[11px] text-[#535146] leading-relaxed">
                   Cloud worker via fast Groq LPU inference. Requires your own Groq API key.
+                </p>
+              </div>
+
+              {/* Option 3: OpenRouter (Cloud, Free Tier) */}
+              <div
+                onClick={() => handleSelectDefaultWorkerType('openrouter')}
+                className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between space-y-2 ${
+                  currentDefaultWorker === 'openrouter'
+                    ? 'bg-[#f5f4ee] border-[#c96442] shadow-sm ring-1 ring-[#c96442]'
+                    : 'bg-[#faf9f5] border-[#dad9d4] hover:bg-[#f5f4ee]'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Globe className={`w-4 h-4 ${currentDefaultWorker === 'openrouter' ? 'text-[#3d7aed]' : 'text-[#83827d]'}`} />
+                    <span className="text-xs font-semibold text-[#141413]">OpenRouter (Free)</span>
+                  </div>
+                  {currentDefaultWorker === 'openrouter' && (
+                    <span className="text-[10px] text-[#3d7aed] bg-[#3d7aed]/10 px-1.5 py-0.5 rounded font-medium">
+                      Active
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-[#535146] leading-relaxed">
+                  High-context open models (Qwen 32B, Llama 70B, DeepSeek R1) without 8k TPM cap.
                 </p>
               </div>
             </div>
@@ -1178,6 +1437,84 @@ export const SettingsPage: FC<SettingsPageProps> = ({
                       </div>
                     );
                   })}
+                </div>
+              </div>
+            ) : currentDefaultWorker === 'openrouter' ? (
+              <div className="p-4 bg-[#f5f4ee] border border-[#dad9d4] rounded-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold text-[#141413]">OpenRouter Free Models Catalog</div>
+                  <a
+                    href="https://openrouter.ai/collections/free-models"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[11px] text-[#c96442] hover:underline flex items-center gap-1 font-medium font-sans"
+                  >
+                    <span>Browse openrouter.ai/collections/free-models</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+                <div className="space-y-1.5">
+                  {OPENROUTER_FREE_MODELS.map((item) => {
+                    const isSelected = (workspaceWorkerConfig?.groq_model || 'qwen/qwen-2.5-coder-32b-instruct:free') === item.id;
+                    return (
+                      <div
+                        key={item.id}
+                        onClick={() => handleSelectOpenRouterModel(item.id)}
+                        className={`p-2.5 rounded-lg border transition-colors cursor-pointer flex items-center justify-between ${
+                          isSelected
+                            ? 'bg-[#ede9de] border-[#dad9d4] text-[#141413]'
+                            : 'bg-[#faf9f5] border-[#dad9d4] text-[#535146] hover:bg-[#ede9de]/50'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-medium text-[#141413]">{item.name}</span>
+                            <span className="text-[9px] px-1.5 py-0.2 rounded font-mono bg-[#ede9de] border border-[#dad9d4] text-[#535146]">
+                              {item.badge}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-[#83827d] font-mono mt-0.5">{item.id} &bull; {item.desc}</div>
+                        </div>
+                        {isSelected && (
+                          <span className="text-[10px] text-[#3d7aed] font-medium">Selected</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Custom OpenRouter model input */}
+                <div className="pt-2 border-t border-[#dad9d4]/60">
+                  <span className="text-[11px] font-medium text-[#141413] block mb-1">
+                    Use Custom OpenRouter Model Slug:
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={customOpenRouterModel}
+                      onChange={(e) => setCustomOpenRouterModel(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && customOpenRouterModel.trim()) {
+                          handleSelectOpenRouterModel(customOpenRouterModel.trim());
+                        }
+                      }}
+                      placeholder="e.g. meta-llama/llama-3.1-405b..."
+                      className="flex-1 bg-[#faf9f5] border border-[#dad9d4] rounded-lg px-2.5 py-1 text-xs font-mono text-[#141413] placeholder:text-[#83827d] focus:outline-none focus:border-[#c96442]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (customOpenRouterModel.trim()) {
+                          handleSelectOpenRouterModel(customOpenRouterModel.trim());
+                        }
+                      }}
+                      disabled={!customOpenRouterModel.trim()}
+                      className="px-3 py-1 bg-[#ede9de] hover:bg-[#dad9d4] border border-[#dad9d4] text-[#141413] rounded-lg text-xs font-medium transition-colors disabled:opacity-40 cursor-pointer flex items-center gap-1"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>Apply</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : (
