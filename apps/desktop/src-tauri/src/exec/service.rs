@@ -173,6 +173,19 @@ impl ExecutionService {
     pub fn detect_build_system(dir: &Path) -> BuildSystemType {
         if dir.join("Cargo.toml").exists() {
             BuildSystemType::Cargo
+        } else if dir.join("pubspec.yaml").exists() {
+            BuildSystemType::Flutter
+        } else if dir.join("build.gradle.kts").exists()
+            || dir.join("build.gradle").exists()
+            || dir.join("settings.gradle.kts").exists()
+            || dir.join("settings.gradle").exists()
+            || dir.join("app/src/main/AndroidManifest.xml").exists()
+        {
+            BuildSystemType::AndroidGradle
+        } else if dir.join("Package.swift").exists() || dir.join("Podfile").exists() {
+            BuildSystemType::IosXcode
+        } else if dir.join("bun.lockb").exists() {
+            BuildSystemType::Bun
         } else if dir.join("pnpm-lock.yaml").exists() {
             BuildSystemType::Pnpm
         } else if dir.join("package-lock.json").exists() {
@@ -183,6 +196,10 @@ impl ExecutionService {
             BuildSystemType::Npm
         } else if dir.join("go.mod").exists() {
             BuildSystemType::Go
+        } else if dir.join("pom.xml").exists() {
+            BuildSystemType::Maven
+        } else if dir.join("CMakeLists.txt").exists() {
+            BuildSystemType::CMake
         } else if dir.join("pyproject.toml").exists() || dir.join("requirements.txt").exists() {
             BuildSystemType::Python
         } else {

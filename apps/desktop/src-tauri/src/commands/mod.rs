@@ -2993,6 +2993,99 @@ pub async fn detect_project_commands(
                 description: "Run pytest".into(),
             },
         ],
+        BuildSystemType::Bun => vec![
+            RecommendedCommand {
+                name: "Test".into(),
+                program: "bun".into(),
+                args: vec!["test".into()],
+                description: "Run tests with Bun".into(),
+            },
+            RecommendedCommand {
+                name: "Build".into(),
+                program: "bun".into(),
+                args: vec!["run".into(), "build".into()],
+                description: "Run build script with Bun".into(),
+            },
+        ],
+        BuildSystemType::AndroidGradle => {
+            let gradlew = if cfg!(windows) { "gradlew.bat" } else { "./gradlew" };
+            vec![
+                RecommendedCommand {
+                    name: "Assemble Debug".into(),
+                    program: gradlew.into(),
+                    args: vec!["assembleDebug".into()],
+                    description: "Compile and build Android debug APK".into(),
+                },
+                RecommendedCommand {
+                    name: "Unit Tests".into(),
+                    program: gradlew.into(),
+                    args: vec!["testDebugUnitTest".into()],
+                    description: "Run Android unit test suite".into(),
+                },
+                RecommendedCommand {
+                    name: "Lint".into(),
+                    program: gradlew.into(),
+                    args: vec!["lintDebug".into()],
+                    description: "Run Android lint checks".into(),
+                },
+            ]
+        },
+        BuildSystemType::Flutter => vec![
+            RecommendedCommand {
+                name: "Analyze".into(),
+                program: "flutter".into(),
+                args: vec!["analyze".into()],
+                description: "Analyze Dart code and verify types".into(),
+            },
+            RecommendedCommand {
+                name: "Test".into(),
+                program: "flutter".into(),
+                args: vec!["test".into()],
+                description: "Run Flutter widget and unit tests".into(),
+            },
+            RecommendedCommand {
+                name: "Build APK".into(),
+                program: "flutter".into(),
+                args: vec!["build".into(), "apk".into()],
+                description: "Build Android APK bundle".into(),
+            },
+        ],
+        BuildSystemType::IosXcode => vec![
+            RecommendedCommand {
+                name: "Test".into(),
+                program: "swift".into(),
+                args: vec!["test".into()],
+                description: "Run Swift package tests".into(),
+            },
+            RecommendedCommand {
+                name: "Build".into(),
+                program: "swift".into(),
+                args: vec!["build".into()],
+                description: "Build Swift targets".into(),
+            },
+        ],
+        BuildSystemType::Maven => vec![
+            RecommendedCommand {
+                name: "Test".into(),
+                program: "mvn".into(),
+                args: vec!["test".into()],
+                description: "Run Maven test suite".into(),
+            },
+            RecommendedCommand {
+                name: "Package".into(),
+                program: "mvn".into(),
+                args: vec!["package".into()],
+                description: "Compile and package application JAR".into(),
+            },
+        ],
+        BuildSystemType::CMake => vec![
+            RecommendedCommand {
+                name: "Build".into(),
+                program: "cmake".into(),
+                args: vec!["--build".into(), "build".into()],
+                description: "Build CMake project".into(),
+            },
+        ],
         BuildSystemType::Unknown => vec![],
     };
 

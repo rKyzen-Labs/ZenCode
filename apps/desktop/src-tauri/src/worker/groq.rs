@@ -497,6 +497,13 @@ or: COMMAND: npm test
             }
         }
 
+        let detected_stack = zencode_core::detect_stack_from_dir(worktree_path);
+        let workspace_skills = zencode_core::discover_workspace_skills(worktree_path);
+        if detected_stack != zencode_core::ProjectStack::Generic || !workspace_skills.is_empty() {
+            user_prompt.push_str("\n\n");
+            user_prompt.push_str(&zencode_core::format_dynamic_stack_context(&detected_stack, &workspace_skills));
+        }
+
         if let Some(preset) = zencode_core::detect_design_system_intent(plan_summary) {
             user_prompt.push_str("\n\n");
             user_prompt.push_str(&zencode_core::format_design_system_guideline(preset));

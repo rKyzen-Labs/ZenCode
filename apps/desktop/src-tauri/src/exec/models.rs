@@ -6,8 +6,14 @@ pub enum BuildSystemType {
     Pnpm,
     Npm,
     Yarn,
+    Bun,
     Go,
     Python,
+    AndroidGradle,
+    Flutter,
+    IosXcode,
+    Maven,
+    CMake,
     Unknown,
 }
 
@@ -18,8 +24,14 @@ impl BuildSystemType {
             Self::Pnpm => "pnpm (Node.js)",
             Self::Npm => "npm (Node.js)",
             Self::Yarn => "Yarn (Node.js)",
+            Self::Bun => "Bun",
             Self::Go => "Go",
             Self::Python => "Python",
+            Self::AndroidGradle => "Android (Gradle)",
+            Self::Flutter => "Flutter",
+            Self::IosXcode => "Xcode / Swift",
+            Self::Maven => "Maven (Java)",
+            Self::CMake => "CMake (C/C++)",
             Self::Unknown => "Generic",
         }
     }
