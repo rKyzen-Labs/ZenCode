@@ -9,12 +9,12 @@ import {
   Eye,
   EyeOff,
   Cpu,
-  Cloud,
   Check,
   X,
   GitBranch,
   Terminal,
   Zap,
+  Globe,
 } from 'lucide-react';
 import {
   getGeminiKeyStatus,
@@ -23,9 +23,12 @@ import {
   getGroqKeyStatus,
   setGroqApiKey,
   validateGroqApiKey,
+  getOpenRouterKeyStatus,
+  setOpenRouterApiKey,
+  validateOpenRouterApiKey,
   verifyStartupDependencies,
 } from '../lib/ipc';
-import type { DependencyStatus, GeminiKeyStatus, GroqKeyStatus } from '../types';
+import type { DependencyStatus, GeminiKeyStatus, GroqKeyStatus, OpenRouterKeyStatus } from '../types';
 
 interface OnboardingWizardProps {
   isOpen: boolean;
@@ -58,8 +61,16 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   const [groqError, setGroqError] = useState<string | null>(null);
   const [groqSuccess, setGroqSuccess] = useState(false);
 
+  // OpenRouter Key State
+  const [openRouterKeyInput, setOpenRouterKeyInput] = useState('');
+  const [showOpenRouterKey, setShowOpenRouterKey] = useState(false);
+  const [openRouterStatus, setOpenRouterStatus] = useState<OpenRouterKeyStatus | null>(null);
+  const [isValidatingOpenRouter, setIsValidatingOpenRouter] = useState(false);
+  const [openRouterError, setOpenRouterError] = useState<string | null>(null);
+  const [openRouterSuccess, setOpenRouterSuccess] = useState(false);
+
   // Worker Selection in Onboarding
-  const [chosenWorker, setChosenWorker] = useState<'local' | 'groq'>('local');
+  const [chosenWorker, setChosenWorker] = useState<'local' | 'groq' | 'openrouter'>('local');
 
   // Dependencies State
   const [dependencies, setDependencies] = useState<DependencyStatus[]>([]);
@@ -92,6 +103,19 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
       }
     } catch (e) {
       console.warn('Failed to load Groq key status:', e);
+    }
+
+    try {
+      const orStatus = await getOpenRouterKeyStatus();
+      setOpenRouterStatus(orStatus);
+      if (orStatus?.has_key) {
+        setOpenRouterSuccess(true);
+        if (!groqStatus?.has_key) {
+          setChosenWorker('openrouter');
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load OpenRouter key status:', e);
     }
   };
 
@@ -154,6 +178,30 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
       setGroqSuccess(false);
     } finally {
       setIsValidatingGroq(false);
+    }
+  };
+
+  const handleValidateAndSaveOpenRouter = async () => {
+    const key = openRouterKeyInput.trim();
+    if (!key) {
+      setOpenRouterError('Please enter an OpenRouter API key');
+      return;
+    }
+
+    setIsValidatingOpenRouter(true);
+    setOpenRouterError(null);
+    try {
+      await validateOpenRouterApiKey(key);
+      const updated = await setOpenRouterApiKey(key);
+      setOpenRouterStatus(updated);
+      setOpenRouterSuccess(true);
+      setOpenRouterKeyInput('');
+      setChosenWorker('openrouter');
+    } catch (err: any) {
+      setOpenRouterError(typeof err === 'string' ? err : err.message || 'OpenRouter validation failed');
+      setOpenRouterSuccess(false);
+    } finally {
+      setIsValidatingOpenRouter(false);
     }
   };
 
@@ -438,11 +486,11 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
               </div>
 
               {/* Selection Cards */}
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
                 {/* Local Ollama Card */}
                 <div
                   onClick={() => setChosenWorker('local')}
-                  className={`p-5 rounded-xl border transition-all cursor-pointer space-y-3 ${
+                  className={`p-4 rounded-xl border transition-all cursor-pointer space-y-2.5 ${
                     chosenWorker === 'local'
                       ? 'bg-[#faf9f5] border-[#c96442] shadow-sm ring-1 ring-[#c96442]'
                       : 'bg-[#faf9f5]/60 border-[#dad9d4] hover:bg-[#faf9f5]'
@@ -459,9 +507,9 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     )}
                   </div>
                   <div>
-                    <h3 className="text-xs font-semibold text-[#141413]">Local Ollama Worker</h3>
+                    <h3 className="text-xs font-semibold text-[#141413]">Local Ollama</h3>
                     <p className="text-[11px] text-[#535146] mt-1 leading-relaxed">
-                      100% private and runs offline on your machine. Compatible with granite4.1:8b, qwen2.5-coder:7b, gemma3, etc.
+                      100% private offline worker. Compatible with granite4.1:8b, qwen2.5-coder, etc.
                     </p>
                   </div>
                 </div>
@@ -469,7 +517,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                 {/* Groq Cloud Card */}
                 <div
                   onClick={() => setChosenWorker('groq')}
-                  className={`p-5 rounded-xl border transition-all cursor-pointer space-y-3 ${
+                  className={`p-4 rounded-xl border transition-all cursor-pointer space-y-2.5 ${
                     chosenWorker === 'groq'
                       ? 'bg-[#faf9f5] border-[#c96442] shadow-sm ring-1 ring-[#c96442]'
                       : 'bg-[#faf9f5]/60 border-[#dad9d4] hover:bg-[#faf9f5]'
@@ -477,7 +525,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                 >
                   <div className="flex items-center justify-between">
                     <div className="w-7 h-7 rounded-lg bg-[#ede9de] flex items-center justify-center text-[#c96442]">
-                      <Cloud className="w-4 h-4" />
+                      <Zap className="w-4 h-4" />
                     </div>
                     {chosenWorker === 'groq' && (
                       <span className="text-[10px] font-bold text-[#c96442] bg-[#c96442]/10 px-2 py-0.5 rounded">
@@ -486,9 +534,36 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     )}
                   </div>
                   <div>
-                    <h3 className="text-xs font-semibold text-[#141413]">Groq Cloud (BYOK)</h3>
+                    <h3 className="text-xs font-semibold text-[#141413]">Groq Cloud LPU</h3>
                     <p className="text-[11px] text-[#535146] mt-1 leading-relaxed">
-                      Ultra-fast token streaming with automatic model cascade rotation (gpt-oss-120b → gpt-oss-20b → qwen3.8-27b).
+                      Ultra-fast token streaming with automatic cascade (gpt-oss-120b → 20b → qwen3.8).
+                    </p>
+                  </div>
+                </div>
+
+                {/* OpenRouter Free Tier Card */}
+                <div
+                  onClick={() => setChosenWorker('openrouter')}
+                  className={`p-4 rounded-xl border transition-all cursor-pointer space-y-2.5 ${
+                    chosenWorker === 'openrouter'
+                      ? 'bg-[#faf9f5] border-[#c96442] shadow-sm ring-1 ring-[#c96442]'
+                      : 'bg-[#faf9f5]/60 border-[#dad9d4] hover:bg-[#faf9f5]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="w-7 h-7 rounded-lg bg-[#ede9de] flex items-center justify-center text-[#3d7aed]">
+                      <Globe className="w-4 h-4" />
+                    </div>
+                    {chosenWorker === 'openrouter' && (
+                      <span className="text-[10px] font-bold text-[#3d7aed] bg-[#3d7aed]/10 px-2 py-0.5 rounded">
+                        Selected
+                      </span>
+                    )}
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-semibold text-[#141413]">OpenRouter (Free)</h3>
+                    <p className="text-[11px] text-[#535146] mt-1 leading-relaxed">
+                      High context (Qwen 2.5 Coder 32B, Llama 3.3 70B, DeepSeek R1) without 8k TPM cap.
                     </p>
                   </div>
                 </div>
@@ -559,6 +634,76 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                       className="px-3 py-1.5 rounded-lg bg-[#ede9de] hover:bg-[#dad9d4] text-[#141413] text-xs font-medium border border-[#dad9d4] transition-colors"
                     >
                       {isValidatingGroq ? 'Verifying...' : 'Save Groq Key'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Optional OpenRouter Key Input if OpenRouter is chosen */}
+              {chosenWorker === 'openrouter' && (
+                <div className="p-4 bg-[#faf9f5] border border-[#dad9d4] rounded-xl space-y-3 animate-fade-in">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-[#141413]">OpenRouter API Key (BYOK)</label>
+                    <a
+                      href="https://openrouter.ai/keys"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-[#c96442] hover:underline flex items-center gap-1 font-medium"
+                    >
+                      <span>Get free key from openrouter.ai/keys</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+
+                  {openRouterStatus?.has_key && (
+                    <div className="p-2.5 rounded-lg bg-[#ede9de] border border-[#5f8a5a]/30 text-xs text-[#141413] flex items-center gap-2">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-[#5f8a5a] shrink-0" />
+                      <span>
+                        Key active: <span className="font-mono text-[#535146]">{openRouterStatus.masked_key}</span>
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="relative flex items-center">
+                    <input
+                      type={showOpenRouterKey ? 'text' : 'password'}
+                      value={openRouterKeyInput}
+                      onChange={(e) => setOpenRouterKeyInput(e.target.value)}
+                      placeholder="sk-or-v1-..."
+                      className="w-full bg-[#ede9de]/50 border border-[#dad9d4] focus:border-[#c96442] rounded-lg px-3 py-2 text-xs text-[#141413] placeholder:text-[#83827d] focus:outline-none font-mono"
+                    />
+                    <div className="absolute right-2 flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setShowOpenRouterKey(!showOpenRouterKey)}
+                        className="p-1 text-[#83827d] hover:text-[#141413] rounded"
+                      >
+                        {showOpenRouterKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {openRouterError && (
+                    <div className="p-2 text-rose-800 bg-rose-50 border border-rose-200 rounded text-xs">
+                      {openRouterError}
+                    </div>
+                  )}
+
+                  {openRouterSuccess && (
+                    <div className="p-2 text-emerald-800 bg-emerald-50 border border-emerald-200 rounded text-xs flex items-center gap-2">
+                      <Check className="w-3 h-3 text-emerald-600" />
+                      <span>OpenRouter key verified!</span>
+                    </div>
+                  )}
+
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleValidateAndSaveOpenRouter}
+                      disabled={!openRouterKeyInput.trim() || isValidatingOpenRouter}
+                      className="px-3 py-1.5 rounded-lg bg-[#ede9de] hover:bg-[#dad9d4] text-[#141413] text-xs font-medium border border-[#dad9d4] transition-colors"
+                    >
+                      {isValidatingOpenRouter ? 'Verifying...' : 'Save OpenRouter Key'}
                     </button>
                   </div>
                 </div>

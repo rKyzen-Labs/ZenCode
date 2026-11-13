@@ -52,7 +52,7 @@ export const LandingPage: FC<LandingPageProps> = ({
   const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   const [recentChats, setRecentChats] = useState<ChatSummaryRecord[]>([]);
   const [isLoadingChats, setIsLoadingChats] = useState(false);
-  const [_workerType, setWorkerType] = useState<'local' | 'groq'>('local');
+  const [_workerType, setWorkerType] = useState<'local' | 'groq' | 'openrouter'>('local');
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
 

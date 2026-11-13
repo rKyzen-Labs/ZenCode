@@ -375,7 +375,7 @@ export interface WorkspaceRecord {
   name: string;
   last_opened_at: string;
   is_context_preview_trusted?: boolean;
-  default_worker_type?: 'local' | 'groq';
+  default_worker_type?: 'local' | 'groq' | 'openrouter';
   groq_model?: string;
 }
 
@@ -438,8 +438,14 @@ export interface GroqKeyStatus {
   status_text: string;
 }
 
+export interface OpenRouterKeyStatus {
+  has_key: boolean;
+  masked_key: string;
+  status_text: string;
+}
+
 export interface WorkspaceWorkerConfig {
-  worker_type: 'local' | 'groq';
+  worker_type: 'local' | 'groq' | 'openrouter';
   groq_model: string;
 }
 

@@ -903,11 +903,31 @@ export async function validateGroqApiKey(key: string): Promise<boolean> {
   return await safeInvoke<boolean>('validate_groq_api_key', { key });
 }
 
-export async function getWorkspaceWorkerConfig(workspacePath: string): Promise<{ worker_type: 'local' | 'groq'; groq_model: string }> {
-  return await safeInvoke<{ worker_type: 'local' | 'groq'; groq_model: string }>('get_workspace_worker_config', { workspacePath });
+export async function getOpenRouterKeyStatus(): Promise<{ has_key: boolean; masked_key: string; status_text: string }> {
+  return await safeInvoke<{ has_key: boolean; masked_key: string; status_text: string }>('get_openrouter_key_status');
 }
 
-export async function setWorkspaceWorkerConfig(workspacePath: string, workerType: 'local' | 'groq', groqModel?: string): Promise<void> {
+export async function setOpenRouterApiKey(key: string): Promise<{ has_key: boolean; masked_key: string; status_text: string }> {
+  return await safeInvoke<{ has_key: boolean; masked_key: string; status_text: string }>('set_openrouter_api_key_command', { key });
+}
+
+export async function deleteOpenRouterApiKey(): Promise<void> {
+  return await safeInvoke<void>('delete_openrouter_api_key_command');
+}
+
+export async function validateOpenRouterApiKey(key: string): Promise<boolean> {
+  return await safeInvoke<boolean>('validate_openrouter_api_key', { key });
+}
+
+export async function refreshStartupProviderLimits(): Promise<QuotaUpdateEvent> {
+  return await safeInvoke<QuotaUpdateEvent>('refresh_startup_provider_limits');
+}
+
+export async function getWorkspaceWorkerConfig(workspacePath: string): Promise<{ worker_type: 'local' | 'groq' | 'openrouter'; groq_model: string }> {
+  return await safeInvoke<{ worker_type: 'local' | 'groq' | 'openrouter'; groq_model: string }>('get_workspace_worker_config', { workspacePath });
+}
+
+export async function setWorkspaceWorkerConfig(workspacePath: string, workerType: 'local' | 'groq' | 'openrouter', groqModel?: string): Promise<void> {
   return await safeInvoke<void>('set_workspace_worker_config', { workspacePath, workerType, groqModel });
 }
 

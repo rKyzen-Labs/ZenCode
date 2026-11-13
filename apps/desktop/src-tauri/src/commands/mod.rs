@@ -1496,6 +1496,136 @@ pub async fn start_worker_session(
         return Ok(session_id);
     }
 
+    if worker_type == "openrouter" {
+        // OpenRouter Cloud Worker Mode (Free Tier / BYOK)
+        let openrouter_api_key = CredentialService::get_openrouter_api_key().map_err(|_| WorkerStartError {
+            error_type: "MISSING_OPENROUTER_KEY".into(),
+            message: "OpenRouter API key not found in Windows Credential Manager. Please configure your OpenRouter API key in Settings or Onboarding.".into(),
+            uncommitted_files: None,
+        })?;
+
+        let session_id = format!("openrouter_session_{}", tid);
+        let openrouter_client = crate::worker::GroqWorkerClient::new_openrouter(openrouter_api_key);
+        let worktree_buf = PathBuf::from(&worktree_info.worktree_path);
+        let tid_clone = tid.clone();
+        let ses_id_clone = session_id.clone();
+        let plan_summary = plan.task_summary.clone();
+        let plan_steps = plan.steps.clone();
+        let app_clone = app_handle.clone();
+        let active_task_inventories = state.active_task_inventories.clone();
+        let task_state_arc = state.task_state.clone();
+        let db_arc = state.db.clone();
+        let exec_service_or = state.execution_service.clone();
+        let preferred_model = preferred_groq_model.unwrap_or_else(|| "qwen/qwen-2.5-coder-32b-instruct:free".to_string());
+
+        // Update state to WorkerRunning
+        {
+            let mut task = state.task_state.lock().await;
+            *task = TaskState::WorkerRunning {
+                session_id: session_id.clone(),
+            };
+        }
+
+        let _ = app_handle.emit(
+            "worker:status",
+            &TaskState::WorkerRunning {
+                session_id: session_id.clone(),
+            },
+        );
+
+        tokio::spawn(async move {
+            match openrouter_client
+                .execute_session(
+                    &worktree_buf,
+                    &tid_clone,
+                    &ses_id_clone,
+                    &plan_summary,
+                    &plan_steps,
+                    Some(&preferred_model),
+                    exec_service_or,
+                    app_clone.clone(),
+                )
+                .await
+            {
+                Ok((inventory, _modified_files)) => {
+                    {
+                        let mut invs = active_task_inventories.lock().await;
+                        invs.insert(tid_clone.clone(), inventory.clone());
+                    }
+                    let summary = if !inventory.files.is_empty() {
+                        let file_names: Vec<String> = inventory
+                            .files
+                            .iter()
+                            .map(|f| {
+                                PathBuf::from(&f.path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(&f.path)
+                                    .to_string()
+                            })
+                            .collect();
+                        format!(
+                            "Updated {} in worktree. Inspect changes below.",
+                            file_names.join(", ")
+                        )
+                    } else {
+                        "Generated implementation files in worktree.".to_string()
+                    };
+
+                    let inv_json = serde_json::to_string(&inventory).ok();
+                    let record = {
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let rec = crate::db::models::ChatMessageRecord {
+                            id: format!("msg_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()),
+                            chat_id: tid_clone.clone(),
+                            role: "assistant".to_string(),
+                            content: summary.clone(),
+                            plan_json: None,
+                            worker_summary: Some(summary.clone()),
+                            files_changed_json: inv_json,
+                            created_at: now,
+                            commit_hash: None,
+                        };
+                        let _ = db_arc.add_chat_message(&rec);
+                        rec
+                    };
+                    let _ = app_clone.emit("chat:message_added", &record);
+
+                    let _ = app_clone.emit("review:inventory_ready", &inventory);
+                    let mut task = task_state_arc.lock().await;
+                    *task = TaskState::Complete;
+                    let _ = app_clone.emit("worker:status", &TaskState::Complete);
+                }
+                Err(e) => {
+                    eprintln!("OpenRouter worker error: {e}");
+                    let mut task = task_state_arc.lock().await;
+                    *task = TaskState::Failed(e.clone());
+                    let _ = app_clone.emit("worker:status", &TaskState::Failed(e.clone()));
+
+                    let err_summary = format!(
+                        "### OpenRouter Worker Error\n\nThe OpenRouter cloud worker could not complete the code execution:\n\n> {}\n\nPlease check your OpenRouter API key or try switching to another model.",
+                        e
+                    );
+                    let err_record = crate::db::models::ChatMessageRecord {
+                        id: format!("msg_err_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()),
+                        chat_id: tid_clone.clone(),
+                        role: "assistant".to_string(),
+                        content: err_summary.clone(),
+                        plan_json: None,
+                        worker_summary: Some(err_summary.clone()),
+                        files_changed_json: None,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        commit_hash: None,
+                    };
+                    let _ = db_arc.add_chat_message(&err_record);
+                    let _ = app_clone.emit("chat:message_added", &err_record);
+                }
+            }
+        });
+
+        return Ok(session_id);
+    }
+
     // 5. Native Direct Ollama Execution (or fallback to sidecar only if explicitly present)
     if EngineSupervisor::locate_pinned_binary().is_err() {
         let session_id = format!("ollama_session_{}", tid);
@@ -3794,6 +3924,130 @@ pub async fn validate_groq_api_key(
         let err_txt = resp.text().await.unwrap_or_default();
         Err(format!("Validation failed with status {}: {err_txt}", status))
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OpenRouterKeyStatus {
+    pub has_key: bool,
+    pub masked_key: String,
+    pub status_text: String,
+}
+
+/// Query OpenRouter API key status from Windows Credential Manager.
+#[tauri::command]
+pub async fn get_openrouter_key_status() -> Result<OpenRouterKeyStatus, String> {
+    match CredentialService::get_openrouter_api_key() {
+        Ok(key) if !key.is_empty() => {
+            let masked = if key.len() > 8 {
+                format!("{}...{}", &key[..4], &key[key.len() - 4..])
+            } else {
+                "********".to_string()
+            };
+            Ok(OpenRouterKeyStatus {
+                has_key: true,
+                masked_key: masked,
+                status_text: "Configured in Windows Credential Manager".to_string(),
+            })
+        }
+        _ => Ok(OpenRouterKeyStatus {
+            has_key: false,
+            masked_key: String::new(),
+            status_text: "Not configured".to_string(),
+        }),
+    }
+}
+
+/// Update OpenRouter API key in Windows Credential Manager.
+#[tauri::command]
+pub async fn set_openrouter_api_key_command(key: String) -> Result<OpenRouterKeyStatus, String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err("API key cannot be empty".to_string());
+    }
+    CredentialService::set_openrouter_api_key(trimmed)
+        .map_err(|e| format!("Failed to save key: {e}"))?;
+    get_openrouter_key_status().await
+}
+
+/// Remove OpenRouter API key from Windows Credential Manager.
+#[tauri::command]
+pub async fn delete_openrouter_api_key_command() -> Result<(), String> {
+    CredentialService::delete_openrouter_api_key()
+        .map_err(|e| format!("Failed to delete key: {e}"))
+}
+
+/// Validate an OpenRouter API key via a lightweight test request.
+#[tauri::command]
+pub async fn validate_openrouter_api_key(key: String) -> Result<bool, String> {
+    let trimmed = key.trim();
+    if trimmed.is_empty() {
+        return Err("API key cannot be empty".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .get("https://openrouter.ai/api/v1/auth/key")
+        .header("Authorization", format!("Bearer {trimmed}"))
+        .send()
+        .await
+        .map_err(|e| format!("Network request failed: {e}"))?;
+
+    let status = resp.status();
+    if status.is_success() {
+        Ok(true)
+    } else {
+        let err_txt = resp.text().await.unwrap_or_default();
+        Err(format!("Validation failed with status {}: {err_txt}", status))
+    }
+}
+
+/// Lightweight startup probe checking live rate limits from configured providers (Groq & OpenRouter).
+#[tauri::command]
+pub async fn refresh_startup_provider_limits(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<QuotaUpdateEvent, String> {
+    // 1. Probe Groq live rate limit headers if key is configured
+    if let Ok(groq_key) = CredentialService::get_groq_api_key() {
+        let trimmed = groq_key.trim();
+        if !trimmed.is_empty() {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default();
+
+            let body = serde_json::json!({
+                "model": "openai/gpt-oss-120b",
+                "messages": [{ "role": "user", "content": "ping" }],
+                "max_tokens": 1
+            });
+
+            if let Ok(resp) = client
+                .post("https://api.groq.com/openai/v1/chat/completions")
+                .header("Authorization", format!("Bearer {trimmed}"))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+            {
+                let groq_headers = crate::planner::quota::parse_groq_headers(resp.headers());
+                let mut tracker = state.planner_client.quota_tracker.lock().await;
+                tracker.update_groq_server_headers("openai/gpt-oss-120b", &groq_headers);
+            }
+        }
+    }
+
+    let event = {
+        let mut tracker = state.planner_client.quota_tracker.lock().await;
+        let active = tracker.pinned_model.clone().unwrap_or_else(|| MODEL_PRIMARY.to_string());
+        tracker.to_quota_update_event(&active)
+    };
+    let _ = app_handle.emit("planner:quota_update", &event);
+    Ok(event)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -30,6 +30,7 @@ import {
   subscribeToWorkerStatus,
   subscribeToEngineHealth,
   getQuotaState,
+  refreshStartupProviderLimits,
   setPinnedModel,
   subscribeToQuotaUpdates,
   undoTaskChanges,
@@ -252,7 +253,7 @@ export default function App() {
       Notification.requestPermission().catch(() => {});
     }
 
-    // Fetch initial rate-limit telemetry
+    // Fetch initial rate-limit telemetry and probe live provider limits on startup
     getQuotaState()
       .then((qs) => {
         setQuotaState(qs);
@@ -261,6 +262,14 @@ export default function App() {
         }
       })
       .catch((err) => console.warn('Could not fetch initial quota state:', err));
+
+    refreshStartupProviderLimits()
+      .then((qs) => {
+        if (qs) {
+          setQuotaState(qs);
+        }
+      })
+      .catch((err) => console.warn('Could not refresh provider limits on startup:', err));
 
     // Restore last opened workspace on launch
     listWorkspaces()

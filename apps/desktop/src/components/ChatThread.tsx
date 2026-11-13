@@ -22,12 +22,18 @@ import {
   CheckCircle2,
   Paperclip,
   RotateCcw,
+  Globe,
+  Zap,
+  Sparkles,
+  Plus,
 } from 'lucide-react';
 import {
   pickFile,
   getGroqKeyStatus,
+  getOpenRouterKeyStatus,
   getWorkspaceWorkerConfig,
   setWorkspaceWorkerConfig,
+  listInstalledOllamaModels,
 } from '../lib/ipc';
 import type {
   ProjectState,
@@ -98,11 +104,78 @@ interface ChatThreadProps {
   onResetChat?: () => void;
 }
 
-const AVAILABLE_DIRECTOR_MODELS = [
-  { id: 'gemini-3.5-flash-lite', label: 'Director: Gemini 3.5 Flash Lite' },
-  { id: 'gemini-3.8-flash', label: 'Director: Gemini 3.8 Flash' },
-  { id: 'gemini-4-hydrogen', label: 'Director: Gemini 4 Hydrogen' },
-  { id: 'granite4.1:8b', label: 'Agent: Ollama granite4.1:8b' },
+export interface DirectorModelOption {
+  id: string;
+  name: string;
+  desc: string;
+  badge?: string;
+  category: 'Gemini' | 'OpenRouter Free' | 'Local Ollama';
+}
+
+export const AVAILABLE_DIRECTOR_MODELS: DirectorModelOption[] = [
+  { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash Lite', desc: 'Fast, high-reasoning primary director', badge: '15 RPM · Primary', category: 'Gemini' },
+  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', desc: 'Deep architectural planning & contracts', badge: '15 RPM · 1M TPM', category: 'Gemini' },
+  { id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen', desc: 'Frontier multimodal reasoning engine', badge: '5 RPM · Frontier', category: 'Gemini' },
+  { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash Exp (Free)', desc: 'OpenRouter cloud free multimodal director', badge: 'Free Tier', category: 'OpenRouter Free' },
+  { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B (Free)', desc: '128k context architectural reasoning', badge: 'Free Tier', category: 'OpenRouter Free' },
+  { id: 'granite4.1:8b', name: 'Ollama granite4.1:8b', desc: '100% offline local enterprise planner', badge: 'Offline', category: 'Local Ollama' },
+];
+
+export interface WorkerModelItem {
+  id: string;
+  name: string;
+  desc: string;
+  badge?: string;
+}
+
+export interface WorkerProviderOption {
+  id: 'groq' | 'openrouter' | 'local';
+  name: string;
+  tagline: string;
+  badge: string;
+  icon: typeof Cloud;
+  models: WorkerModelItem[];
+}
+
+export const WORKER_PROVIDERS: WorkerProviderOption[] = [
+  {
+    id: 'groq',
+    name: 'Groq Cloud LPU',
+    tagline: '500+ tok/s ultra-fast generation',
+    badge: 'Blazing Fast',
+    icon: Zap,
+    models: [
+      { id: 'openai/gpt-oss-120b', name: 'OpenAI GPT-OSS 120B', desc: 'Highest intelligence reasoning worker', badge: 'Primary' },
+      { id: 'openai/gpt-oss-20b', name: 'OpenAI GPT-OSS 20B', desc: 'High throughput, low latency worker', badge: 'Fast' },
+      { id: 'qwen/qwen3.8-27b', name: 'Qwen 3.8 27B', desc: 'Specialized code generation', badge: 'Code' },
+    ],
+  },
+  {
+    id: 'openrouter',
+    name: 'OpenRouter Free Tier',
+    tagline: '32k–128k context without 8K TPM cap',
+    badge: 'High Headroom',
+    icon: Globe,
+    models: [
+      { id: 'qwen/qwen-2.5-coder-32b-instruct:free', name: 'Qwen 2.5 Coder 32B', desc: 'Top open coding model in the world', badge: 'Recommended' },
+      { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B Instruct', desc: '128k context full project generation', badge: 'Flagship' },
+      { id: 'deepseek/deepseek-r1:free', name: 'DeepSeek R1', desc: 'Chain-of-thought algorithm & logic solver', badge: 'Reasoning' },
+      { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash Exp', desc: 'Fast, multimodal instruction following', badge: 'Multimodal' },
+      { id: 'mistralai/mistral-7b-instruct:free', name: 'Mistral 7B Instruct', desc: 'Lightweight, rapid execution', badge: 'Lean' },
+    ],
+  },
+  {
+    id: 'local',
+    name: 'Ollama (Local)',
+    tagline: '100% private, offline on your device',
+    badge: 'Zero Cloud',
+    icon: Cpu,
+    models: [
+      { id: 'qwen2.5-coder:7b', name: 'qwen2.5-coder:7b', desc: 'Balanced local coding model', badge: 'Local' },
+      { id: 'qwen2.5-coder:14b', name: 'qwen2.5-coder:14b', desc: 'Higher reasoning capacity', badge: 'Local' },
+      { id: 'granite4.1:8b', name: 'granite4.1:8b', desc: 'IBM enterprise local model', badge: 'Local' },
+    ],
+  },
 ];
 
 /** Renders colored file-type icon strictly matching reference images (Zero emojis) */
@@ -1115,8 +1188,40 @@ export const ChatThread: FC<ChatThreadProps> = ({
   onOpenTerminalTab,
   onResetChat,
 }) => {
-  // Worker selection state per workspace (Local vs Groq BYOK)
-  const [workerType, setWorkerType] = useState<'local' | 'groq'>('local');
+  // Worker selection state per workspace (Local vs Groq BYOK vs OpenRouter Free)
+  const [workerType, setWorkerType] = useState<'local' | 'groq' | 'openrouter'>('local');
+  const [workerModel, setWorkerModel] = useState<string>('openai/gpt-oss-120b');
+  const [activeWorkerProvider, setActiveWorkerProvider] = useState<'local' | 'groq' | 'openrouter'>('groq');
+  const [isPlannerMenuOpen, setIsPlannerMenuOpen] = useState(false);
+  const [isWorkerMenuOpen, setIsWorkerMenuOpen] = useState(false);
+  const [customModelInput, setCustomModelInput] = useState('');
+  const [installedOllamaModels, setInstalledOllamaModels] = useState<Array<{ name: string; size: string; is_recommended: boolean }>>([]);
+
+  const plannerMenuRef = useRef<HTMLDivElement>(null);
+  const workerMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (plannerMenuRef.current && !plannerMenuRef.current.contains(e.target as Node)) {
+        setIsPlannerMenuOpen(false);
+      }
+      if (workerMenuRef.current && !workerMenuRef.current.contains(e.target as Node)) {
+        setIsWorkerMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    listInstalledOllamaModels()
+      .then((models) => {
+        if (models && models.length > 0) {
+          setInstalledOllamaModels(models);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (project?.path) {
@@ -1124,22 +1229,26 @@ export const ChatThread: FC<ChatThreadProps> = ({
         .then((cfg) => {
           if (cfg?.worker_type) {
             setWorkerType(cfg.worker_type);
+            setActiveWorkerProvider(cfg.worker_type);
           } else {
-            // Default to Groq if Groq API key is already configured
             getGroqKeyStatus()
               .then((status) => {
                 if (status?.has_key) {
                   setWorkerType('groq');
+                  setActiveWorkerProvider('groq');
                 }
               })
               .catch(() => {});
+          }
+          if (cfg?.groq_model) {
+            setWorkerModel(cfg.groq_model);
           }
         })
         .catch(() => {});
     }
   }, [project?.path]);
 
-  const handleWorkerChange = async (newType: 'local' | 'groq') => {
+  const handleSelectWorker = async (newType: 'local' | 'groq' | 'openrouter', model: string) => {
     if (newType === 'groq') {
       try {
         const status = await getGroqKeyStatus();
@@ -1151,11 +1260,24 @@ export const ChatThread: FC<ChatThreadProps> = ({
         onOpenOnboarding?.(3);
         return;
       }
+    } else if (newType === 'openrouter') {
+      try {
+        const status = await getOpenRouterKeyStatus();
+        if (!status?.has_key) {
+          onOpenOnboarding?.(3);
+          return;
+        }
+      } catch {
+        onOpenOnboarding?.(3);
+        return;
+      }
     }
     setWorkerType(newType);
+    setWorkerModel(model);
+    setIsWorkerMenuOpen(false);
     if (project?.path) {
       try {
-        await setWorkspaceWorkerConfig(project.path, newType);
+        await setWorkspaceWorkerConfig(project.path, newType, model);
       } catch (e) {
         console.warn('Failed to save worker config to workspace:', e);
       }
@@ -1956,43 +2078,255 @@ export const ChatThread: FC<ChatThreadProps> = ({
                   <Paperclip className="w-3.5 h-3.5" />
                 </button>
 
-                {/* Director Model Selector Dropdown Pill */}
-                <div className="relative flex items-center">
-                  <select
-                    value={selectedModel}
-                    onChange={(e) => onSelectModel && onSelectModel(e.target.value)}
-                    className="h-6 px-2 pr-6 rounded-md bg-[#ede9de] hover:bg-[#e9e6dc] border border-[#dad9d4] text-[11px] text-[#141413] font-sans focus:outline-none cursor-pointer appearance-none transition-colors"
+                {/* Director Model Selector Popover */}
+                <div className="relative" ref={plannerMenuRef}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsPlannerMenuOpen((prev) => !prev);
+                      setIsWorkerMenuOpen(false);
+                    }}
+                    className="h-6 px-2 rounded-md bg-[#ede9de] hover:bg-[#e9e6dc] border border-[#dad9d4] text-[11px] text-[#141413] font-sans flex items-center gap-1.5 transition-colors cursor-pointer select-none"
+                    title="Select Director / Planner Model"
                   >
-                    {AVAILABLE_DIRECTOR_MODELS.map((m) => (
-                      <option key={m.id} value={m.id} className="bg-[#faf9f5] text-[#141413]">
-                        Planner · {m.label}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown className="w-2.5 h-2.5 text-[#83827d] absolute right-2 pointer-events-none" />
+                    <Sparkles className="w-3 h-3 text-[#c96442]" />
+                    <span className="max-w-[120px] truncate font-medium">
+                      {AVAILABLE_DIRECTOR_MODELS.find((m) => m.id === selectedModel)?.name || selectedModel}
+                    </span>
+                    <ChevronDown className="w-2.5 h-2.5 text-[#83827d]" />
+                  </button>
+
+                  {isPlannerMenuOpen && (
+                    <div className="absolute bottom-full mb-2 left-0 w-80 bg-[#faf9f5] border border-[#dad9d4] rounded-xl shadow-xl z-50 overflow-hidden font-sans animate-fade-in p-1">
+                      <div className="px-3 py-2 border-b border-[#dad9d4]/60 bg-[#ede9de]/40 flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-[#141413]">Planner / Director Model</span>
+                        <span className="text-[10px] text-[#83827d]">Architecture & Strategy</span>
+                      </div>
+                      <div className="max-h-72 overflow-y-auto p-1 space-y-1">
+                        {AVAILABLE_DIRECTOR_MODELS.map((m) => {
+                          const isSelected = m.id === selectedModel;
+                          return (
+                            <button
+                              key={m.id}
+                              type="button"
+                              onClick={() => {
+                                onSelectModel && onSelectModel(m.id);
+                                setIsPlannerMenuOpen(false);
+                              }}
+                              className={`w-full text-left p-2 rounded-lg transition-colors flex items-start justify-between gap-2 cursor-pointer ${
+                                isSelected
+                                  ? 'bg-[#ede9de] border border-[#dad9d4]'
+                                  : 'hover:bg-[#ede9de]/60 border border-transparent'
+                              }`}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-xs font-medium text-[#141413] truncate">{m.name}</span>
+                                  {m.badge && (
+                                    <span className="text-[9px] px-1.5 py-0.2 rounded font-mono bg-[#ede9de] border border-[#dad9d4] text-[#535146] shrink-0">
+                                      {m.badge}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-[10px] text-[#83827d] mt-0.5 leading-snug line-clamp-1">{m.desc}</p>
+                              </div>
+                              {isSelected && <Check className="w-3.5 h-3.5 text-[#c96442] shrink-0 mt-0.5" />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                {/* Worker Selector Dropdown Pill (Local Ollama vs Groq Cloud BYOK) */}
-                <div className="relative flex items-center bg-[#ede9de] hover:bg-[#e9e6dc] border border-[#dad9d4] rounded-md px-2 h-6 gap-1.5 transition-colors">
-                  {workerType === 'groq' ? (
-                    <Cloud className="w-3 h-3 text-[#c96442] shrink-0" />
-                  ) : (
-                    <Cpu className="w-3 h-3 text-[#5f8a5a] shrink-0" />
-                  )}
-                  <select
-                    value={workerType}
-                    onChange={(e) => handleWorkerChange(e.target.value as 'local' | 'groq')}
-                    className="bg-transparent text-[11px] text-[#141413] font-sans focus:outline-none cursor-pointer appearance-none pr-4"
-                    title="Worker Model: Ollama (Local) vs Groq (Cloud, BYOK)"
+                {/* Nested Worker Selector Popover (Provider List -> Models Submenu) */}
+                <div className="relative" ref={workerMenuRef}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsWorkerMenuOpen((prev) => !prev);
+                      setIsPlannerMenuOpen(false);
+                    }}
+                    className="h-6 px-2 rounded-md bg-[#ede9de] hover:bg-[#e9e6dc] border border-[#dad9d4] text-[11px] text-[#141413] font-sans flex items-center gap-1.5 transition-colors cursor-pointer select-none"
+                    title="Select Worker Engine & Model"
                   >
-                    <option value="local" className="bg-[#faf9f5] text-[#141413]">
-                      Worker · Ollama
-                    </option>
-                    <option value="groq" className="bg-[#faf9f5] text-[#141413]">
-                      Worker · Groq
-                    </option>
-                  </select>
-                  <ChevronDown className="w-2.5 h-2.5 text-[#83827d] absolute right-1.5 pointer-events-none" />
+                    {workerType === 'groq' ? (
+                      <Zap className="w-3 h-3 text-[#c96442] shrink-0" />
+                    ) : workerType === 'openrouter' ? (
+                      <Globe className="w-3 h-3 text-[#3d7aed] shrink-0" />
+                    ) : (
+                      <Cpu className="w-3 h-3 text-[#5f8a5a] shrink-0" />
+                    )}
+                    <span className="max-w-[130px] truncate font-medium">
+                      Worker · {workerType === 'groq' ? 'Groq' : workerType === 'openrouter' ? 'OpenRouter' : 'Ollama'}
+                    </span>
+                    <ChevronDown className="w-2.5 h-2.5 text-[#83827d]" />
+                  </button>
+
+                  {isWorkerMenuOpen && (
+                    <div className="absolute bottom-full mb-2 left-0 w-[460px] bg-[#faf9f5] border border-[#dad9d4] rounded-xl shadow-xl z-50 overflow-hidden font-sans animate-fade-in flex flex-col">
+                      <div className="px-3.5 py-2 border-b border-[#dad9d4]/60 bg-[#ede9de]/40 flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-[#141413]">Worker Engine &amp; Model</span>
+                        <span className="text-[10px] text-[#83827d]">Diff Generation &amp; Execution</span>
+                      </div>
+
+                      <div className="flex h-72">
+                        {/* Left column: Providers list */}
+                        <div className="w-[180px] border-r border-[#dad9d4]/60 bg-[#f7f6f2] p-1.5 flex flex-col gap-1 shrink-0">
+                          <span className="text-[10px] font-semibold text-[#83827d] uppercase tracking-wider px-2 py-1">
+                            Providers
+                          </span>
+                          {WORKER_PROVIDERS.map((provider) => {
+                            const IconComponent = provider.icon;
+                            const isActiveProvider = activeWorkerProvider === provider.id;
+                            const isChosenProvider = workerType === provider.id;
+                            return (
+                              <button
+                                key={provider.id}
+                                type="button"
+                                onMouseEnter={() => setActiveWorkerProvider(provider.id)}
+                                onClick={() => setActiveWorkerProvider(provider.id)}
+                                className={`w-full text-left p-2 rounded-lg transition-colors flex items-center justify-between cursor-pointer ${
+                                  isActiveProvider
+                                    ? 'bg-[#ede9de] border border-[#dad9d4] shadow-xs'
+                                    : 'hover:bg-[#ede9de]/50 border border-transparent'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div
+                                    className={`w-5 h-5 rounded flex items-center justify-center shrink-0 ${
+                                      provider.id === 'groq'
+                                        ? 'text-[#c96442]'
+                                        : provider.id === 'openrouter'
+                                        ? 'text-[#3d7aed]'
+                                        : 'text-[#5f8a5a]'
+                                    }`}
+                                  >
+                                    <IconComponent className="w-3.5 h-3.5" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1">
+                                      <span className="text-xs font-medium text-[#141413] truncate">
+                                        {provider.name}
+                                      </span>
+                                    </div>
+                                    <span className="text-[9px] text-[#83827d] block truncate">
+                                      {provider.badge}
+                                    </span>
+                                  </div>
+                                </div>
+                                {isChosenProvider && (
+                                  <span className="w-1.5 h-1.5 rounded-full bg-[#c96442] shrink-0 mr-1" />
+                                )}
+                                <ChevronRight className="w-3 h-3 text-[#83827d] shrink-0" />
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {/* Right column: Models submenu */}
+                        <div className="flex-1 p-2 bg-[#faf9f5] flex flex-col overflow-y-auto">
+                          {(() => {
+                            const currentProvider = WORKER_PROVIDERS.find((p) => p.id === activeWorkerProvider);
+                            if (!currentProvider) return null;
+
+                            // If local, combine static models with installed Ollama models
+                            let displayModels = [...currentProvider.models];
+                            if (activeWorkerProvider === 'local' && installedOllamaModels.length > 0) {
+                              const dynamicModels: WorkerModelItem[] = installedOllamaModels.map((m) => ({
+                                id: m.name,
+                                name: m.name,
+                                desc: `Installed local model (${m.size || 'Ollama'})`,
+                                badge: m.is_recommended ? 'Recommended' : 'Installed',
+                              }));
+                              const seen = new Set<string>();
+                              displayModels = [...dynamicModels, ...displayModels].filter((m) => {
+                                if (seen.has(m.id)) return false;
+                                seen.add(m.id);
+                                return true;
+                              });
+                            }
+
+                            return (
+                              <div className="space-y-1">
+                                <div className="px-2 py-1 text-[10px] text-[#83827d] border-b border-[#dad9d4]/40 mb-1 flex items-center justify-between">
+                                  <span>{currentProvider.tagline}</span>
+                                  <span className="font-mono text-[9px]">{displayModels.length} models</span>
+                                </div>
+
+                                {displayModels.map((m) => {
+                                  const isSelected = workerType === activeWorkerProvider && workerModel === m.id;
+                                  return (
+                                    <button
+                                      key={m.id}
+                                      type="button"
+                                      onClick={() => handleSelectWorker(activeWorkerProvider, m.id)}
+                                      className={`w-full text-left p-2 rounded-lg transition-colors flex items-start justify-between gap-2 cursor-pointer ${
+                                        isSelected
+                                          ? 'bg-[#ede9de] border border-[#dad9d4]'
+                                          : 'hover:bg-[#ede9de]/60 border border-transparent'
+                                      }`}
+                                    >
+                                      <div className="min-w-0 flex-1">
+                                        <div className="flex items-center gap-1.5">
+                                          <span className="text-xs font-medium text-[#141413] truncate">{m.name}</span>
+                                          {m.badge && (
+                                            <span className="text-[9px] px-1.5 py-0.2 rounded font-mono bg-[#ede9de] border border-[#dad9d4] text-[#535146] shrink-0">
+                                              {m.badge}
+                                            </span>
+                                          )}
+                                        </div>
+                                        <p className="text-[10px] text-[#83827d] mt-0.5 leading-snug line-clamp-1">
+                                          {m.desc}
+                                        </p>
+                                      </div>
+                                      {isSelected && <Check className="w-3.5 h-3.5 text-[#c96442] shrink-0 mt-0.5" />}
+                                    </button>
+                                  );
+                                })}
+
+                                {/* Custom model input for OpenRouter */}
+                                {activeWorkerProvider === 'openrouter' && (
+                                  <div className="pt-2 mt-1 border-t border-[#dad9d4]/40">
+                                    <span className="text-[10px] font-medium text-[#535146] block mb-1">
+                                      Use Custom OpenRouter Model ID:
+                                    </span>
+                                    <div className="flex items-center gap-1.5">
+                                      <input
+                                        type="text"
+                                        value={customModelInput}
+                                        onChange={(e) => setCustomModelInput(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter' && customModelInput.trim()) {
+                                            handleSelectWorker('openrouter', customModelInput.trim());
+                                          }
+                                        }}
+                                        placeholder="e.g. meta-llama/llama-3.1-405b..."
+                                        className="flex-1 bg-[#ede9de]/60 border border-[#dad9d4] rounded px-2 py-1 text-[11px] font-mono text-[#141413] placeholder:text-[#83827d] focus:outline-none focus:border-[#c96442]"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (customModelInput.trim()) {
+                                            handleSelectWorker('openrouter', customModelInput.trim());
+                                          }
+                                        }}
+                                        disabled={!customModelInput.trim()}
+                                        className="h-6 px-2 bg-[#ede9de] hover:bg-[#dad9d4] border border-[#dad9d4] text-[#141413] rounded flex items-center justify-center text-[10px] font-medium transition-colors disabled:opacity-40 cursor-pointer"
+                                        title="Select custom model"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Mode selector */}

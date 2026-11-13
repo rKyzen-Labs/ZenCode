@@ -194,6 +194,14 @@ impl GroqWorkerClient {
         }
     }
 
+    pub fn new_openrouter(api_key: String) -> Self {
+        Self {
+            endpoint_url: "https://openrouter.ai/api/v1/chat/completions".to_string(),
+            api_key,
+            quota_tracker: None,
+        }
+    }
+
     /// Executes the plan step-by-step in the isolated task worktree using Groq cloud models or local Ollama.
     pub async fn execute_session(
         &self,
@@ -531,6 +539,8 @@ or: COMMAND: npm test
         let mut chosen_model = if let Some(ref tracker_arc) = self.quota_tracker {
             let mut tracker = tracker_arc.lock().await;
             tracker.select_groq_model(preferred_model)?
+        } else if self.endpoint_url.contains("openrouter.ai") {
+            preferred_model.unwrap_or("qwen/qwen-2.5-coder-32b-instruct:free").to_string()
         } else {
             preferred_model.unwrap_or("qwen2.5-coder:7b").to_string()
         };
@@ -563,8 +573,15 @@ or: COMMAND: npm test
         while attempts < max_attempts {
             attempts += 1;
 
-            let is_ollama = self.quota_tracker.is_none();
-            let provider_label = if is_ollama { "Ollama (Local)" } else { "Groq (Cloud)" };
+            let is_ollama = self.api_key == "ollama";
+            let is_openrouter = self.endpoint_url.contains("openrouter.ai");
+            let provider_label = if is_ollama {
+                "Ollama (Local)"
+            } else if is_openrouter {
+                "OpenRouter (Cloud Free)"
+            } else {
+                "Groq (Cloud)"
+            };
 
             // Emit reasoning thought and active generation activity
             let _ = app_handle.emit(
@@ -618,6 +635,12 @@ or: COMMAND: npm test
             let mut req_builder = client
                 .post(&self.endpoint_url)
                 .header("Content-Type", "application/json");
+
+            if self.endpoint_url.contains("openrouter.ai") {
+                req_builder = req_builder
+                    .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
+                    .header("X-Title", "ZenCode");
+            }
 
             if !self.api_key.is_empty() && self.api_key != "ollama" {
                 req_builder = req_builder.header("Authorization", format!("Bearer {}", self.api_key));
@@ -708,6 +731,12 @@ or: COMMAND: npm test
                             let mut cont_builder = client
                                 .post(&self.endpoint_url)
                                 .header("Content-Type", "application/json");
+
+                            if self.endpoint_url.contains("openrouter.ai") {
+                                cont_builder = cont_builder
+                                    .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
+                                    .header("X-Title", "ZenCode");
+                            }
 
                             if !self.api_key.is_empty() && self.api_key != "ollama" {
                                 cont_builder = cont_builder.header("Authorization", format!("Bearer {}", self.api_key));
@@ -922,6 +951,12 @@ or: COMMAND: npm test
                 let mut req_builder = client
                     .post(&self.endpoint_url)
                     .header("Content-Type", "application/json");
+
+                if self.endpoint_url.contains("openrouter.ai") {
+                    req_builder = req_builder
+                        .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
+                        .header("X-Title", "ZenCode");
+                }
 
                 if !self.api_key.is_empty() && self.api_key != "ollama" {
                     req_builder = req_builder.header("Authorization", format!("Bearer {}", self.api_key));

@@ -10,6 +10,7 @@ pub enum SecurityError {
 
 pub const ZENCODE_GEMINI_KEY_TARGET: &str = "zencode:gemini_api_key";
 pub const ZENCODE_GROQ_KEY_TARGET: &str = "zencode:groq_api_key";
+pub const ZENCODE_OPENROUTER_KEY_TARGET: &str = "zencode:openrouter_api_key";
 
 pub struct CredentialService;
 
@@ -70,6 +71,42 @@ impl CredentialService {
 
     #[cfg(not(windows))]
     pub fn delete_groq_api_key() -> Result<(), SecurityError> {
+        Err(SecurityError::WindowsCredentialError(
+            "Windows Credential Manager is only supported on Windows".into(),
+        ))
+    }
+
+    #[cfg(windows)]
+    pub fn get_openrouter_api_key() -> Result<String, SecurityError> {
+        Self::get_generic_credential(ZENCODE_OPENROUTER_KEY_TARGET)
+    }
+
+    #[cfg(not(windows))]
+    pub fn get_openrouter_api_key() -> Result<String, SecurityError> {
+        Err(SecurityError::WindowsCredentialError(
+            "Windows Credential Manager is only supported on Windows".into(),
+        ))
+    }
+
+    #[cfg(windows)]
+    pub fn set_openrouter_api_key(key: &str) -> Result<(), SecurityError> {
+        Self::set_generic_credential(ZENCODE_OPENROUTER_KEY_TARGET, "zencode", key)
+    }
+
+    #[cfg(not(windows))]
+    pub fn set_openrouter_api_key(_key: &str) -> Result<(), SecurityError> {
+        Err(SecurityError::WindowsCredentialError(
+            "Windows Credential Manager is only supported on Windows".into(),
+        ))
+    }
+
+    #[cfg(windows)]
+    pub fn delete_openrouter_api_key() -> Result<(), SecurityError> {
+        Self::delete_generic_credential(ZENCODE_OPENROUTER_KEY_TARGET)
+    }
+
+    #[cfg(not(windows))]
+    pub fn delete_openrouter_api_key() -> Result<(), SecurityError> {
         Err(SecurityError::WindowsCredentialError(
             "Windows Credential Manager is only supported on Windows".into(),
         ))
