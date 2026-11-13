@@ -304,10 +304,10 @@ impl GroqWorkerClient {
             shredded_files_summary.push_str("\n=== KEY ENTRYPOINTS & MODULE OUTLINES (AST SIGNATURES) ===\n");
 
             let mut current_tokens = estimate_tokens(&shredded_files_summary);
-            const EXPLORATION_TOKEN_BUDGET: usize = 3_000;
+            let exploration_token_budget: usize = if self.quota_tracker.is_some() { 1_800 } else { 3_500 };
 
             for fpath in &files_to_scan {
-                if current_tokens >= EXPLORATION_TOKEN_BUDGET {
+                if current_tokens >= exploration_token_budget {
                     shredded_files_summary.push_str("\n... [Additional project files summarized in file tree above to stay within safe token limits] ...\n");
                     break;
                 }
@@ -330,7 +330,7 @@ impl GroqWorkerClient {
                         let outline = shred_file_context(fpath, &code);
                         let section = format!("\n--- Outline: {rel_str} ---\n{outline}\n");
                         let section_tokens = estimate_tokens(&section);
-                        if current_tokens + section_tokens <= EXPLORATION_TOKEN_BUDGET {
+                        if current_tokens + section_tokens <= exploration_token_budget {
                             shredded_files_summary.push_str(&section);
                             current_tokens += section_tokens;
                         }
@@ -344,7 +344,7 @@ impl GroqWorkerClient {
             shredded_files_summary.push_str("=== WORKSPACE STRUCTURAL SUMMARY ===\n");
             let mut target_files_count = 0;
             let mut current_tokens = estimate_tokens(&shredded_files_summary);
-            const EDIT_TOKEN_BUDGET: usize = 4_000;
+            let edit_token_budget: usize = if self.quota_tracker.is_some() { 2_000 } else { 4_500 };
 
             for fpath in &files_to_scan {
                 let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
@@ -390,12 +390,12 @@ impl GroqWorkerClient {
                     }
                 } else {
                     // Non-target files MUST be shredded with function bodies stripped
-                    if current_tokens < EDIT_TOKEN_BUDGET {
+                    if current_tokens < edit_token_budget {
                         if let Ok(code) = std::fs::read_to_string(fpath) {
                             let outline = shred_file_context(fpath, &code);
                             let section = format!("\n--- Context Outline (Shredded): {rel_str} ---\n{outline}\n");
                             let section_tokens = estimate_tokens(&section);
-                            if current_tokens + section_tokens <= EDIT_TOKEN_BUDGET {
+                            if current_tokens + section_tokens <= edit_token_budget {
                                 shredded_files_summary.push_str(&section);
                                 current_tokens += section_tokens;
                             }
@@ -524,13 +524,19 @@ or: COMMAND: npm test
             preferred_model.unwrap_or("qwen2.5-coder:7b").to_string()
         };
 
-        // Pre-Flight Payload Size Check (Step 3 Safeguard):
-        // Avoid Groq 8K TPM rate limit traps or 400 "Please reduce the length of the messages"
-        let estimated_total_tokens = estimate_tokens(system_prompt) + estimate_tokens(&user_prompt);
-        println!("[Groq Worker Payload] Estimated tokens: {estimated_total_tokens}, Target Model: {chosen_model}");
+        // Pre-Flight Payload Size Check (Groq 8K TPM Safeguard):
+        // Groq enforces (prompt_tokens + max_tokens) <= model TPM (8,000 for on-demand tier).
+        let prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(&user_prompt);
+        let dynamic_max_tokens = if self.quota_tracker.is_some() {
+            let available_headroom = 7_500usize.saturating_sub(prompt_tokens);
+            available_headroom.clamp(1_024, 4_096) as u32
+        } else {
+            4_096
+        };
+        println!("[Groq Worker Payload] Estimated prompt tokens: {prompt_tokens}, Dynamic max_tokens: {dynamic_max_tokens}, Target Model: {chosen_model}");
 
-        if self.quota_tracker.is_some() && estimated_total_tokens > 6_000 {
-            eprintln!("Payload estimated tokens ({estimated_total_tokens}) exceeds Groq safe limit. Falling back to local Ollama worker...");
+        if self.quota_tracker.is_some() && (prompt_tokens > 5_500 || prompt_tokens + (dynamic_max_tokens as usize) > 7_600) {
+            eprintln!("Payload estimated tokens ({prompt_tokens} prompt + {dynamic_max_tokens} output) exceeds Groq safe TPM limit. Falling back to local Ollama worker...");
             let _ = app_handle.emit(
                 "worker:message",
                 &WorkerEventPayload {
@@ -541,7 +547,7 @@ or: COMMAND: npm test
                         "properties": {
                             "part": {
                                 "type": "reasoning",
-                                "text": format!("This request is too large for the cloud worker (estimated ~{estimated_total_tokens} tokens, exceeding cloud limit) — running it locally with Ollama instead.")
+                                "text": format!("This request requires ~{prompt_tokens} tokens which exceeds Groq's 8K on-demand TPM limit — executing locally with Ollama instead to ensure complete code generation without interruption.")
                             }
                         }
                     }).to_string(),
@@ -617,7 +623,7 @@ or: COMMAND: npm test
                     { "role": "user", "content": user_prompt }
                 ],
                 "temperature": 0.2,
-                "max_tokens": 4096
+                "max_tokens": dynamic_max_tokens
             });
 
             let mut req_builder = client
@@ -707,7 +713,7 @@ or: COMMAND: npm test
                                     { "role": "user", "content": cont_prompt }
                                 ],
                                 "temperature": 0.2,
-                                "max_tokens": 4096
+                                "max_tokens": dynamic_max_tokens
                             });
 
                             let mut cont_builder = client
@@ -752,10 +758,18 @@ or: COMMAND: npm test
                         } else {
                             return Err(format!("Local Ollama model returned 429: {}", resp.text().await.unwrap_or_default()));
                         }
-                    } else if status.as_u16() == 400 {
+                    } else if status.as_u16() == 413 || status.as_u16() == 400 || !status.is_success() {
                         let err_body = resp.text().await.unwrap_or_default();
-                        eprintln!("Groq returned 400: {err_body}");
-                        if (err_body.contains("reduce the length of the messages") || err_body.contains("rate_limit") || err_body.contains("token")) && self.quota_tracker.is_some() {
+                        eprintln!("Groq returned error {status}: {err_body}");
+                        let is_payload_or_rate_limit = status.as_u16() == 413
+                            || status.as_u16() == 429
+                            || err_body.contains("ratelimitexceeded")
+                            || err_body.contains("Request too large")
+                            || err_body.contains("Payload Too Large")
+                            || err_body.contains("reduce the length of the messages")
+                            || err_body.contains("tokens per minute");
+
+                        if is_payload_or_rate_limit && self.quota_tracker.is_some() {
                             let _ = app_handle.emit(
                                 "worker:message",
                                 &WorkerEventPayload {
@@ -766,7 +780,7 @@ or: COMMAND: npm test
                                         "properties": {
                                             "part": {
                                                 "type": "reasoning",
-                                                "text": "Cloud worker payload exceeded message limit (400) — falling back to local Ollama worker to complete task."
+                                                "text": "Groq cloud worker rate limit reached (413 Payload Too Large / TPM Limit) — seamlessly continuing execution locally with Ollama..."
                                             }
                                         }
                                     }).to_string(),
@@ -913,6 +927,14 @@ or: COMMAND: npm test
                     compiler_errors.trim()
                 );
 
+                let repair_tokens = estimate_tokens(system_prompt) + estimate_tokens(&user_prompt) + estimate_tokens(&response_text) + estimate_tokens(&repair_prompt);
+                let repair_max_tokens = if self.quota_tracker.is_some() {
+                    let headroom = 7_500usize.saturating_sub(repair_tokens);
+                    headroom.clamp(512, 4_096) as u32
+                } else {
+                    4_096
+                };
+
                 let repair_body = serde_json::json!({
                     "model": chosen_model,
                     "messages": [
@@ -922,7 +944,7 @@ or: COMMAND: npm test
                         { "role": "user", "content": repair_prompt }
                     ],
                     "temperature": 0.1,
-                    "max_tokens": 4096
+                    "max_tokens": repair_max_tokens
                 });
 
                 let mut req_builder = client
