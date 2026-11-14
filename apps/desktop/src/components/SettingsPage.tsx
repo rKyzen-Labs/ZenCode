@@ -82,23 +82,10 @@ const GROQ_MODELS = [
 ];
 
 const OPENROUTER_FREE_MODELS = [
-  { id: 'nvidia/nemotron-3-ultra:free', name: 'NVIDIA Nemotron 3 Ultra', desc: 'Flagship reasoning & agentic execution', badge: 'Ultra' },
-  { id: 'nvidia/nemotron-3.5-super-vl:free', name: 'NVIDIA Nemotron 3.5 Super VL', desc: 'Multimodal vision-language architectural engine', badge: 'Vision' },
-  { id: 'nvidia/nemotron-3.5-lightning:free', name: 'NVIDIA Nemotron 3.5 Lightning', desc: 'Ultra-fast low-latency diff generation', badge: 'Fast' },
-  { id: 'cohere/north-mini-code:free', name: 'Cohere North Mini Code', desc: 'Specialized code generation & refactoring', badge: 'Code' },
-  { id: 'google/gemma-4-31b:free', name: 'Google Gemma 4 31B', desc: 'Frontier open model from Google DeepMind', badge: 'Frontier' },
-  { id: 'google/gemma-4-26b-a4b:free', name: 'Google Gemma 4 26B A4B', desc: 'High efficiency reasoning & coding', badge: 'Efficient' },
-  { id: 'baidu/ernie-5.5-flash-preview:free', name: 'Baidu ERNIE 5.5 Flash', desc: 'High-speed instruction following preview', badge: 'Preview' },
-  { id: 'dots-studio/dots3-note-preview:free', name: 'Dots Studio Dots3-Note', desc: 'Documentation & code note synthesizer', badge: 'Notes' },
-  { id: 'thinking-machines/inkling-2-small:free', name: 'Thinking Machines Inkling 2', desc: 'Compact logic & step-by-step reasoning', badge: 'Reasoning' },
-  { id: 'recursive/flint:free', name: 'Recursive Flint', desc: 'Deterministic code repair & verification', badge: 'Repair' },
-  { id: 'nvidia/nemotron-3-nano-omni:free', name: 'NVIDIA Nemotron 3 Nano Omni', desc: 'Lightweight omni-modal fast streaming', badge: 'Omni' },
-  { id: 'liquid/lfm-3-1.7b:free', name: 'LiquidAI LFM3 1.7B', desc: 'Liquid neural network for rapid token generation', badge: 'Liquid' },
-  { id: 'particle/particle-1:free', name: 'Particle AI Particle-1', desc: 'Task execution & file manipulation', badge: 'Agentic' },
-  { id: 'perplexity/decider-v1.3:free', name: 'Perplexity Decider V1.3', desc: 'Search-grounded algorithmic decisions', badge: 'Decider' },
-  { id: 'qwen/qwen-2.5-coder-32b-instruct:free', name: 'Qwen 2.5 Coder 32B Instruct', desc: 'Top open coding model in the world (32k context)', badge: 'Recommended' },
-  { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B Instruct', desc: '128k context full project generation', badge: 'Flagship' },
-  { id: 'deepseek/deepseek-r1:free', name: 'DeepSeek R1', desc: 'Chain-of-thought algorithm & logic solver', badge: 'Reasoning' },
+  { id: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free', name: 'NVIDIA Nemotron 3 Nano Omni (30B)', desc: 'Fast, responsive full code generation & reasoning', badge: 'Recommended' },
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'NVIDIA Nemotron 3 Ultra (550B)', desc: '550B frontier reasoning engine for complex projects', badge: 'Flagship' },
+  { id: 'nvidia/nemotron-3.5-super-vl:free', name: 'NVIDIA Nemotron 3.5 Super VL', desc: 'Multimodal vision-language architectural code generator', badge: 'Vision' },
+  { id: 'dots-studio/dots-3-note-preview:free', name: 'Dots Studio Dots-3 Note', desc: 'Reliable layout structuring & web styling generator', badge: 'Fast' },
 ];
 
 export const SettingsPage: FC<SettingsPageProps> = ({
@@ -489,7 +476,7 @@ export const SettingsPage: FC<SettingsPageProps> = ({
       const targetModel = workerType === 'groq'
         ? (workspaceWorkerConfig?.groq_model || 'openai/gpt-oss-120b')
         : workerType === 'openrouter'
-        ? (workspaceWorkerConfig?.groq_model || 'qwen/qwen-2.5-coder-32b-instruct:free')
+        ? (workspaceWorkerConfig?.groq_model || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free')
         : currentWorkerModel;
 
       await setWorkspaceWorkerConfig(
@@ -1465,7 +1452,7 @@ export const SettingsPage: FC<SettingsPageProps> = ({
                 </div>
                 <div className="space-y-1.5">
                   {OPENROUTER_FREE_MODELS.map((item) => {
-                    const isSelected = (workspaceWorkerConfig?.groq_model || 'qwen/qwen-2.5-coder-32b-instruct:free') === item.id;
+                    const isSelected = (workspaceWorkerConfig?.groq_model || 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free') === item.id;
                     return (
                       <div
                         key={item.id}

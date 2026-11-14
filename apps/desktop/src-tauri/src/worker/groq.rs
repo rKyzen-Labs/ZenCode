@@ -540,7 +540,7 @@ or: COMMAND: npm test
             let mut tracker = tracker_arc.lock().await;
             tracker.select_groq_model(preferred_model)?
         } else if self.endpoint_url.contains("openrouter.ai") {
-            preferred_model.unwrap_or("qwen/qwen-2.5-coder-32b-instruct:free").to_string()
+            preferred_model.unwrap_or("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free").to_string()
         } else {
             preferred_model.unwrap_or("qwen2.5-coder:7b").to_string()
         };

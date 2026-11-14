@@ -1516,7 +1516,7 @@ pub async fn start_worker_session(
         let task_state_arc = state.task_state.clone();
         let db_arc = state.db.clone();
         let exec_service_or = state.execution_service.clone();
-        let preferred_model = preferred_groq_model.unwrap_or_else(|| "qwen/qwen-2.5-coder-32b-instruct:free".to_string());
+        let preferred_model = preferred_groq_model.unwrap_or_else(|| "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free".to_string());
 
         // Update state to WorkerRunning
         {
