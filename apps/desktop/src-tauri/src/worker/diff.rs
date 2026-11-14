@@ -289,7 +289,7 @@ pub fn apply_diff_blocks(
                 updated.push_str(&norm_existing[match_idx + norm_search.len()..]);
                 updated
             } else {
-                // Fallback: line-trimmed match
+                // Fallback 1: line-trimmed match
                 let existing_lines: Vec<&str> = norm_existing.lines().collect();
                 let s_lines: Vec<&str> = norm_search.lines().collect();
                 if let Some(found_idx) = find_subslice_trimmed(&existing_lines, &s_lines) {
@@ -301,6 +301,33 @@ pub fn apply_diff_blocks(
                         updated_lines.push(r_line);
                     }
                     for idx in (found_idx + s_lines.len())..existing_lines.len() {
+                        updated_lines.push(existing_lines[idx]);
+                    }
+                    updated_lines.join("\n")
+                } else if let Some(found_idx) = find_fuzzy_comment_subslice(&existing_lines, &s_lines) {
+                    // Fallback 2: Comment/punctuation normalized fuzzy match
+                    // Handles differences where the model emitted `/ comment /` instead of `/* comment */`
+                    let mut updated_lines = Vec::new();
+                    for idx in 0..found_idx {
+                        updated_lines.push(existing_lines[idx]);
+                    }
+                    for r_line in norm_replace.lines() {
+                        updated_lines.push(r_line);
+                    }
+                    for idx in (found_idx + s_lines.len())..existing_lines.len() {
+                        updated_lines.push(existing_lines[idx]);
+                    }
+                    updated_lines.join("\n")
+                } else if let Some((start_idx, end_idx)) = find_anchor_subslice(&existing_lines, &s_lines) {
+                    // Fallback 3: First-and-last line anchor match
+                    let mut updated_lines = Vec::new();
+                    for idx in 0..start_idx {
+                        updated_lines.push(existing_lines[idx]);
+                    }
+                    for r_line in norm_replace.lines() {
+                        updated_lines.push(r_line);
+                    }
+                    for idx in end_idx..existing_lines.len() {
                         updated_lines.push(existing_lines[idx]);
                     }
                     updated_lines.join("\n")
@@ -535,6 +562,82 @@ fn find_subslice_trimmed(haystack: &[&str], needle: &[&str]) -> Option<usize> {
         return Some(i);
     }
     None
+}
+
+/// Normalizes a line for fuzzy comment/whitespace comparison:
+/// Strips comment delimiters like `/*`, `*/`, `//`, `#`, and trailing/leading slashes and spaces.
+fn normalize_fuzzy_line(line: &str) -> String {
+    let trimmed = line.trim();
+    let without_comments = trimmed
+        .trim_start_matches("/*")
+        .trim_end_matches("*/")
+        .trim_start_matches("//")
+        .trim_start_matches('#')
+        .trim_matches('/')
+        .trim();
+    // Collapse internal whitespace
+    without_comments.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Fallback: checks if lines match when punctuation/comment markers are normalized
+fn find_fuzzy_comment_subslice(haystack: &[&str], needle: &[&str]) -> Option<usize> {
+    let norm_needle: Vec<String> = needle.iter().map(|l| normalize_fuzzy_line(l)).collect();
+    // If needle is only empty lines after normalization, don't false match
+    if norm_needle.iter().all(|s| s.is_empty()) {
+        return None;
+    }
+    if norm_needle.len() > haystack.len() {
+        return None;
+    }
+
+    let norm_haystack: Vec<String> = haystack.iter().map(|l| normalize_fuzzy_line(l)).collect();
+
+    'outer: for i in 0..=(norm_haystack.len() - norm_needle.len()) {
+        for j in 0..norm_needle.len() {
+            if !norm_needle[j].is_empty() && norm_haystack[i + j] != norm_needle[j] {
+                continue 'outer;
+            }
+        }
+        return Some(i);
+    }
+    None
+}
+
+/// Fallback: matches using unique non-empty first and last lines as anchors
+fn find_anchor_subslice(haystack: &[&str], needle: &[&str]) -> Option<(usize, usize)> {
+    let non_empty_needle: Vec<(usize, &str)> = needle
+        .iter()
+        .enumerate()
+        .map(|(idx, l)| (idx, l.trim()))
+        .filter(|(_, l)| !l.is_empty())
+        .collect();
+
+    if non_empty_needle.len() < 2 {
+        return None;
+    }
+
+    let first_needle = non_empty_needle.first().unwrap().1;
+    let last_needle = non_empty_needle.last().unwrap().1;
+
+    let mut candidate: Option<(usize, usize)> = None;
+
+    for i in 0..haystack.len() {
+        if haystack[i].trim() == first_needle || normalize_fuzzy_line(haystack[i]) == normalize_fuzzy_line(first_needle) {
+            // Look forward for matching last anchor within reasonable window
+            let max_lookahead = (i + needle.len() + 10).min(haystack.len());
+            for j in (i + 1)..max_lookahead {
+                if haystack[j].trim() == last_needle || normalize_fuzzy_line(haystack[j]) == normalize_fuzzy_line(last_needle) {
+                    if candidate.is_some() {
+                        // Ambiguous multiple matches in file, reject anchor match to be safe
+                        return None;
+                    }
+                    candidate = Some((i, j + 1));
+                }
+            }
+        }
+    }
+
+    candidate
 }
 
 #[cfg(test)]

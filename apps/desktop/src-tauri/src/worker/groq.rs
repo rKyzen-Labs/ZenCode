@@ -690,10 +690,29 @@ or: COMMAND: npm test
                             .unwrap_or_default()
                             .to_string();
 
+                        // Fallback extraction for reasoning models / alternative JSON shapes
+                        if response_text.is_empty() {
+                            if let Some(c) = choice {
+                                if let Some(text) = c.get("text").and_then(|t| t.as_str()) {
+                                    response_text = text.to_string();
+                                } else if let Some(m) = c.get("message") {
+                                    // Some reasoning models return thinking or delta fields
+                                    if let Some(reasoning) = m.get("reasoning_content").or_else(|| m.get("reasoning")).and_then(|r| r.as_str()) {
+                                        response_text = reasoning.to_string();
+                                    }
+                                }
+                            }
+                        }
+
                         let finish_reason = choice
                             .and_then(|c| c.get("finish_reason"))
                             .and_then(|f| f.as_str())
                             .unwrap_or("stop");
+
+                        if response_text.is_empty() {
+                            println!("[Worker Warning] {provider_label} model {chosen_model} returned empty content. Full raw response: {json}");
+                            return Err(format!("{provider_label} model {chosen_model} returned an empty response. Raw payload: {json}"));
+                        }
 
                         // Auto-continuation if response was cut off by token limit
                         if finish_reason == "length" && !response_text.is_empty() {
