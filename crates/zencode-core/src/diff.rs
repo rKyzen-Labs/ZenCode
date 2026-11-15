@@ -25,12 +25,18 @@ pub fn apply_diff_blocks(
 
         // Check for file indicator: "FILE: path/to/file.ext" or "### File: path/to/file.ext"
         if let Some(rest) = line.strip_prefix("FILE:").or_else(|| line.strip_prefix("File:")) {
-            current_file = Some(rest.trim().trim_matches('`').trim().to_string());
+            let clean = sanitize_candidate_filename(rest);
+            if is_valid_filename(&clean) {
+                current_file = Some(clean);
+            }
             i += 1;
             continue;
         }
-        if let Some(rest) = line.strip_prefix("### File:") {
-            current_file = Some(rest.trim().trim_matches('`').trim().to_string());
+        if let Some(rest) = line.strip_prefix("### File:").or_else(|| line.strip_prefix("### file:")) {
+            let clean = sanitize_candidate_filename(rest);
+            if is_valid_filename(&clean) {
+                current_file = Some(clean);
+            }
             i += 1;
             continue;
         }
@@ -199,19 +205,31 @@ pub fn apply_diff_blocks(
         // Check for CREATE block: "<<<<<<< CREATE: path/to/file.ext"
         if line.starts_with("<<<<<<< CREATE") {
             let file_target = if let Some(pos) = line.find(':') {
-                line[pos + 1..].trim().trim_matches('`').to_string()
+                sanitize_candidate_filename(&line[pos + 1..])
             } else {
                 current_file.clone().ok_or_else(|| "CREATE block missing target file path".to_string())?
             };
 
             i += 1;
             let mut create_lines = Vec::new();
-            while i < lines.len() && !lines[i].trim().starts_with(">>>>>>>") {
+            while i < lines.len() && !is_replace_block_end(lines[i].trim()) {
                 create_lines.push(lines[i]);
                 i += 1;
             }
             if i < lines.len() && lines[i].trim().starts_with(">>>>>>>") {
                 i += 1; // skip >>>>>>>
+            }
+
+            // Strip accidental opening/closing markdown code fences emitted inside CREATE blocks
+            if let Some(first) = create_lines.first() {
+                if first.trim().starts_with("```") {
+                    create_lines.remove(0);
+                }
+            }
+            if let Some(last) = create_lines.last() {
+                if last.trim().starts_with("```") {
+                    create_lines.pop();
+                }
             }
 
             let full_target = worktree_dir.join(&file_target);
@@ -237,7 +255,7 @@ pub fn apply_diff_blocks(
         if line.starts_with("<<<<<<< SEARCH") {
             // Can optionally have "<<<<<<< SEARCH: path/to/file.ext"
             if let Some(pos) = line.find(':') {
-                current_file = Some(line[pos + 1..].trim().trim_matches('`').to_string());
+                current_file = Some(sanitize_candidate_filename(&line[pos + 1..]));
             }
 
             let file_target = current_file.clone().ok_or_else(|| {
@@ -246,7 +264,7 @@ pub fn apply_diff_blocks(
 
             i += 1;
             let mut search_lines = Vec::new();
-            while i < lines.len() && !lines[i].trim().starts_with("=======") {
+            while i < lines.len() && !is_search_replace_divider(lines[i].trim()) {
                 search_lines.push(lines[i]);
                 i += 1;
             }
@@ -255,10 +273,10 @@ pub fn apply_diff_blocks(
                 return Err(format!("Unclosed SEARCH block in file {file_target}"));
             }
 
-            i += 1; // skip =======
+            i += 1; // skip divider (======= or similar)
 
             let mut replace_lines = Vec::new();
-            while i < lines.len() && !lines[i].trim().starts_with(">>>>>>>") {
+            while i < lines.len() && !is_replace_block_end(lines[i].trim()) {
                 replace_lines.push(lines[i]);
                 i += 1;
             }
@@ -267,85 +285,98 @@ pub fn apply_diff_blocks(
                 i += 1; // skip >>>>>>>
             }
 
-            let full_target = worktree_dir.join(&file_target);
-            if !full_target.exists() {
-                return Err(format!("Target file for SEARCH/REPLACE does not exist: {file_target}"));
+            // Strip accidental opening/closing markdown code fences emitted inside REPLACE blocks
+            if let Some(first) = replace_lines.first() {
+                if first.trim().starts_with("```") {
+                    replace_lines.remove(0);
+                }
             }
-
-            let existing_content = std::fs::read_to_string(&full_target)
-                .map_err(|e| format!("Failed to read target file {file_target}: {e}"))?;
+            if let Some(last) = replace_lines.last() {
+                if last.trim().starts_with("```") {
+                    replace_lines.pop();
+                }
+            }
 
             let search_str = search_lines.join("\n");
             let replace_str = replace_lines.join("\n");
 
-            // Normalize line endings for reliable matching on Windows
-            let norm_existing = existing_content.replace("\r\n", "\n");
-            let norm_search = search_str.replace("\r\n", "\n");
-            let norm_replace = replace_str.replace("\r\n", "\n");
+            let mut resolved_file_target = file_target.clone();
+            let mut full_target = worktree_dir.join(&resolved_file_target);
 
-            let updated_content = if let Some(match_idx) = norm_existing.find(&norm_search) {
-                let mut updated = norm_existing[..match_idx].to_string();
-                updated.push_str(&norm_replace);
-                updated.push_str(&norm_existing[match_idx + norm_search.len()..]);
+            // If file does not exist, look for it in subdirectories or by content
+            if !full_target.exists() {
+                if let Some(alt) = find_file_by_name(worktree_dir, &resolved_file_target) {
+                    resolved_file_target = alt;
+                    full_target = worktree_dir.join(&resolved_file_target);
+                } else if let Some(alt) = find_file_matching_search(worktree_dir, &search_str, Some(&resolved_file_target)) {
+                    resolved_file_target = alt;
+                    full_target = worktree_dir.join(&resolved_file_target);
+                }
+            }
+
+            let existing_content = if full_target.exists() {
+                std::fs::read_to_string(&full_target)
+                    .map_err(|e| format!("Failed to read target file {resolved_file_target}: {e}"))?
+            } else {
+                String::new()
+            };
+
+            let updated_content = if let Some(updated) = try_apply_diff_to_content(&existing_content, &search_str, &replace_str) {
                 updated
             } else {
-                // Fallback 1: line-trimmed match
-                let existing_lines: Vec<&str> = norm_existing.lines().collect();
-                let s_lines: Vec<&str> = norm_search.lines().collect();
-                if let Some(found_idx) = find_subslice_trimmed(&existing_lines, &s_lines) {
-                    let mut updated_lines = Vec::new();
-                    for idx in 0..found_idx {
-                        updated_lines.push(existing_lines[idx]);
+                // Not found in this file! Search across the entire worktree for a matching file
+                if let Some(alt_file) = find_file_matching_search(worktree_dir, &search_str, None) {
+                    if alt_file != resolved_file_target {
+                        resolved_file_target = alt_file;
+                        current_file = Some(resolved_file_target.clone());
+                        full_target = worktree_dir.join(&resolved_file_target);
+                        let alt_content = std::fs::read_to_string(&full_target).unwrap_or_default();
+                        if let Some(updated) = try_apply_diff_to_content(&alt_content, &search_str, &replace_str) {
+                            updated
+                        } else {
+                            if let Ok(md_res) = apply_markdown_file_blocks(worktree_dir, response_text, fallback_target_file) {
+                                if !md_res.is_empty() {
+                                    return Ok(md_res);
+                                }
+                            }
+                            return Err(format!(
+                                "Could not locate SEARCH block in {resolved_file_target}.\nSEARCH snippet was:\n{search_str}"
+                            ));
+                        }
+                    } else {
+                        if let Ok(md_res) = apply_markdown_file_blocks(worktree_dir, response_text, fallback_target_file) {
+                            if !md_res.is_empty() {
+                                return Ok(md_res);
+                            }
+                        }
+                        return Err(format!(
+                            "Could not locate SEARCH block in {resolved_file_target}.\nSEARCH snippet was:\n{search_str}"
+                        ));
                     }
-                    for r_line in norm_replace.lines() {
-                        updated_lines.push(r_line);
-                    }
-                    for idx in (found_idx + s_lines.len())..existing_lines.len() {
-                        updated_lines.push(existing_lines[idx]);
-                    }
-                    updated_lines.join("\n")
-                } else if let Some(found_idx) = find_fuzzy_comment_subslice(&existing_lines, &s_lines) {
-                    // Fallback 2: Comment/punctuation normalized fuzzy match
-                    // Handles differences where the model emitted `/ comment /` instead of `/* comment */`
-                    let mut updated_lines = Vec::new();
-                    for idx in 0..found_idx {
-                        updated_lines.push(existing_lines[idx]);
-                    }
-                    for r_line in norm_replace.lines() {
-                        updated_lines.push(r_line);
-                    }
-                    for idx in (found_idx + s_lines.len())..existing_lines.len() {
-                        updated_lines.push(existing_lines[idx]);
-                    }
-                    updated_lines.join("\n")
-                } else if let Some((start_idx, end_idx)) = find_anchor_subslice(&existing_lines, &s_lines) {
-                    // Fallback 3: First-and-last line anchor match
-                    let mut updated_lines = Vec::new();
-                    for idx in 0..start_idx {
-                        updated_lines.push(existing_lines[idx]);
-                    }
-                    for r_line in norm_replace.lines() {
-                        updated_lines.push(r_line);
-                    }
-                    for idx in end_idx..existing_lines.len() {
-                        updated_lines.push(existing_lines[idx]);
-                    }
-                    updated_lines.join("\n")
                 } else {
+                    if let Ok(md_res) = apply_markdown_file_blocks(worktree_dir, response_text, fallback_target_file) {
+                        if !md_res.is_empty() {
+                            return Ok(md_res);
+                        }
+                    }
                     return Err(format!(
-                        "Could not locate SEARCH block in {file_target}.\nSEARCH snippet was:\n{search_str}"
+                        "Could not locate SEARCH block in {resolved_file_target}.\nSEARCH snippet was:\n{search_str}"
                     ));
                 }
             };
 
+            if let Some(parent) = full_target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
             std::fs::write(&full_target, &updated_content)
-                .map_err(|e| format!("Failed to write updated file {file_target}: {e}"))?;
+                .map_err(|e| format!("Failed to write updated file {resolved_file_target}: {e}"))?;
 
             let additions = replace_lines.len();
             let deletions = search_lines.len();
 
             results.push(AppliedDiffResult {
-                file_path: file_target,
+                file_path: resolved_file_target,
                 is_new: false,
                 additions,
                 deletions,
@@ -384,9 +415,9 @@ pub fn apply_markdown_file_blocks(
 
         // 1. Detect markdown file headers preceding code fences
         if let Some(rest) = line.strip_prefix("FILE:").or_else(|| line.strip_prefix("File:")).or_else(|| line.strip_prefix("Filename:")) {
-            let clean = rest.trim().trim_matches('`').trim_matches('*').trim();
-            if is_valid_filename(clean) {
-                pending_file_header = Some(clean.to_string());
+            let clean = sanitize_candidate_filename(rest);
+            if is_valid_filename(&clean) {
+                pending_file_header = Some(clean);
             }
             i += 1;
             continue;
@@ -394,30 +425,18 @@ pub fn apply_markdown_file_blocks(
 
         if line.starts_with("###") || line.starts_with("##") {
             let header_text = line.trim_start_matches('#').trim();
-            let clean = header_text
-                .trim_start_matches("File:")
-                .trim_start_matches("FILE:")
-                .trim()
-                .trim_matches('`')
-                .trim_matches('*')
-                .trim();
-            if is_valid_filename(clean) {
-                pending_file_header = Some(clean.to_string());
+            let clean = sanitize_candidate_filename(header_text);
+            if is_valid_filename(&clean) {
+                pending_file_header = Some(clean);
             }
             i += 1;
             continue;
         }
 
         if (line.starts_with("**") || line.starts_with("__")) && (line.ends_with("**") || line.ends_with("__:") || line.ends_with("**:") || line.ends_with("__")) {
-            let clean = line
-                .trim_end_matches(':')
-                .trim()
-                .trim_matches('*')
-                .trim_matches('_')
-                .trim()
-                .trim_matches('`');
-            if is_valid_filename(clean) {
-                pending_file_header = Some(clean.to_string());
+            let clean = sanitize_candidate_filename(line);
+            if is_valid_filename(&clean) {
+                pending_file_header = Some(clean);
             }
             i += 1;
             continue;
@@ -429,26 +448,29 @@ pub fn apply_markdown_file_blocks(
             let mut file_from_fence: Option<String> = None;
 
             if let Some(pos) = fence_info.find(':') {
-                let candidate = fence_info[pos + 1..].trim().trim_matches('"').trim_matches('\'');
-                if is_valid_filename(candidate) {
-                    file_from_fence = Some(candidate.to_string());
+                let candidate = sanitize_candidate_filename(&fence_info[pos + 1..]);
+                if is_valid_filename(&candidate) {
+                    file_from_fence = Some(candidate);
                 }
             } else if let Some(pos) = fence_info.find("file=") {
-                let candidate = fence_info[pos + 5..].trim().trim_matches('"').trim_matches('\'');
-                if is_valid_filename(candidate) {
-                    file_from_fence = Some(candidate.to_string());
+                let candidate = sanitize_candidate_filename(&fence_info[pos + 5..]);
+                if is_valid_filename(&candidate) {
+                    file_from_fence = Some(candidate);
                 }
             } else if fence_info.contains(' ') {
                 let parts: Vec<&str> = fence_info.split_whitespace().collect();
                 for part in parts {
-                    let clean = part.trim().trim_matches('"').trim_matches('\'');
-                    if is_valid_filename(clean) {
-                        file_from_fence = Some(clean.to_string());
+                    let clean = sanitize_candidate_filename(part);
+                    if is_valid_filename(&clean) {
+                        file_from_fence = Some(clean);
                         break;
                     }
                 }
-            } else if is_valid_filename(fence_info) {
-                file_from_fence = Some(fence_info.to_string());
+            } else {
+                let clean = sanitize_candidate_filename(fence_info);
+                if is_valid_filename(&clean) {
+                    file_from_fence = Some(clean);
+                }
             }
 
             i += 1;
@@ -476,8 +498,9 @@ pub fn apply_markdown_file_blocks(
                     .trim_end_matches("-->")
                     .trim()
                     .trim_matches('`');
-                if is_valid_filename(comment_candidate) {
-                    resolved_file = Some(comment_candidate.to_string());
+                let candidate_clean = sanitize_candidate_filename(comment_candidate);
+                if is_valid_filename(&candidate_clean) {
+                    resolved_file = Some(candidate_clean);
                     // Remove the comment header line so file is clean
                     block_lines.remove(0);
                 }
@@ -532,9 +555,23 @@ pub fn apply_markdown_file_blocks(
     Ok(results)
 }
 
+fn sanitize_candidate_filename(s: &str) -> String {
+    let mut clean = s.trim().trim_matches('`').trim_matches('"').trim_matches('\'').trim();
+    for prefix in &["modified ", "created ", "updated ", "added ", "new ", "file: ", "file "] {
+        if clean.to_lowercase().starts_with(prefix) {
+            clean = clean[prefix.len()..].trim();
+        }
+    }
+    clean.trim_matches(|c: char| c.is_whitespace() || c == ':' || c == '*' || c == '`').to_string()
+}
+
 fn is_valid_filename(s: &str) -> bool {
-    let clean = s.trim().trim_matches('`').trim_matches('"').trim_matches('\'');
+    let clean = sanitize_candidate_filename(s);
     if clean.is_empty() || clean.contains('\n') || clean.len() > 120 {
+        return false;
+    }
+    // Reject git diff markers or headers
+    if clean.starts_with("---") || clean.starts_with("+++") || clean.starts_with("@@") {
         return false;
     }
     // Must contain a period with an extension (e.g. .html, .js, .css, .py, .rs, .json, .toml)
@@ -567,6 +604,7 @@ fn find_subslice_trimmed(haystack: &[&str], needle: &[&str]) -> Option<usize> {
 
 /// Normalizes a line for fuzzy comment/whitespace comparison:
 /// Strips comment delimiters like `/*`, `*/`, `//`, `#`, and trailing/leading slashes and spaces.
+/// Also strips markdown formatting characters (*, `, _) so that markdown-stripped asterisks or code formatting won't prevent matching.
 fn normalize_fuzzy_line(line: &str) -> String {
     let trimmed = line.trim();
     let without_comments = trimmed
@@ -576,8 +614,12 @@ fn normalize_fuzzy_line(line: &str) -> String {
         .trim_start_matches('#')
         .trim_matches('/')
         .trim();
+    let stripped: String = without_comments
+        .chars()
+        .filter(|&c| c != '`' && c != '*' && c != '_')
+        .collect();
     // Collapse internal whitespace
-    without_comments.split_whitespace().collect::<Vec<_>>().join(" ")
+    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Fallback: checks if lines match when punctuation/comment markers are normalized
@@ -639,6 +681,196 @@ fn find_anchor_subslice(haystack: &[&str], needle: &[&str]) -> Option<(usize, us
     }
 
     candidate
+}
+
+fn is_search_replace_divider(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    s.starts_with("=======")
+        || s.starts_with("======")
+        || s.starts_with("--- REPLACE")
+        || s.starts_with("--- replace")
+        || s.starts_with("======= REPLACE")
+        || s.starts_with("<<<<<<< END")
+        || s.starts_with("<<<<<<< REPLACE")
+        || lower.starts_with("end of search")
+        || s == "---"
+}
+
+fn is_replace_block_end(s: &str) -> bool {
+    s.starts_with(">>>>>>>")
+        || s.starts_with("<<<<<<< END")
+        || s.starts_with("<<<<<<< CREATE")
+        || s.starts_with("<<<<<<< SEARCH")
+        || s.starts_with("<<<<<<< DELETE")
+        || s.starts_with("<<<<<<< MKDIR")
+        || s.starts_with("<<<<<<< MOVE")
+        || s.starts_with("### File:")
+        || s.starts_with("FILE:")
+}
+
+/// Recursively scans text files in the worktree, excluding VCS and build folders.
+fn scan_worktree_files(worktree_dir: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut dirs_to_visit = vec![worktree_dir.to_path_buf()];
+    while let Some(current_dir) = dirs_to_visit.pop() {
+        if let Ok(entries) = std::fs::read_dir(&current_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if let Ok(rel) = p.strip_prefix(worktree_dir) {
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    if rel_str.starts_with(".git")
+                        || rel_str.starts_with("target")
+                        || rel_str.starts_with("node_modules")
+                        || rel_str.starts_with(".gemini")
+                        || rel_str.starts_with("dist")
+                    {
+                        continue;
+                    }
+                    if p.is_dir() {
+                        dirs_to_visit.push(p);
+                    } else if p.is_file() {
+                        files.push(rel_str);
+                    }
+                }
+            }
+        }
+    }
+    files
+}
+
+/// Looks for a file in the worktree by relative path or matching file basename.
+fn find_file_by_name(worktree_dir: &Path, filename: &str) -> Option<String> {
+    let clean = sanitize_candidate_filename(filename).replace('\\', "/");
+    let target_base = Path::new(&clean).file_name()?.to_str()?;
+    let files = scan_worktree_files(worktree_dir);
+    for f in &files {
+        if f == &clean {
+            return Some(f.clone());
+        }
+        if let Some(base) = Path::new(f).file_name().and_then(|s| s.to_str()) {
+            if base.eq_ignore_ascii_case(target_base) {
+                return Some(f.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Attempts to apply a SEARCH/REPLACE diff to text content using exact, trimmed, fuzzy, or anchor matching.
+fn try_apply_diff_to_content(
+    existing_content: &str,
+    search_str: &str,
+    replace_str: &str,
+) -> Option<String> {
+    let norm_existing = existing_content.replace("\r\n", "\n");
+    let norm_search = search_str.replace("\r\n", "\n");
+    let norm_replace = replace_str.replace("\r\n", "\n");
+
+    if norm_existing.trim().is_empty() && norm_search.trim().is_empty() {
+        return Some(norm_replace);
+    }
+
+    if let Some(match_idx) = norm_existing.find(&norm_search) {
+        let mut updated = norm_existing[..match_idx].to_string();
+        updated.push_str(&norm_replace);
+        updated.push_str(&norm_existing[match_idx + norm_search.len()..]);
+        return Some(updated);
+    }
+
+    let existing_lines: Vec<&str> = norm_existing.lines().collect();
+    let s_lines: Vec<&str> = norm_search.lines().collect();
+
+    // Fallback 1: line-trimmed match
+    if let Some(found_idx) = find_subslice_trimmed(&existing_lines, &s_lines) {
+        let mut updated_lines = Vec::new();
+        for idx in 0..found_idx {
+            updated_lines.push(existing_lines[idx]);
+        }
+        for r_line in norm_replace.lines() {
+            updated_lines.push(r_line);
+        }
+        for idx in (found_idx + s_lines.len())..existing_lines.len() {
+            updated_lines.push(existing_lines[idx]);
+        }
+        return Some(updated_lines.join("\n"));
+    }
+
+    // Fallback 2: Comment/punctuation normalized fuzzy match
+    if let Some(found_idx) = find_fuzzy_comment_subslice(&existing_lines, &s_lines) {
+        let mut updated_lines = Vec::new();
+        for idx in 0..found_idx {
+            updated_lines.push(existing_lines[idx]);
+        }
+        for r_line in norm_replace.lines() {
+            updated_lines.push(r_line);
+        }
+        for idx in (found_idx + s_lines.len())..existing_lines.len() {
+            updated_lines.push(existing_lines[idx]);
+        }
+        return Some(updated_lines.join("\n"));
+    }
+
+    // Fallback 3: Anchor match
+    if let Some((start_idx, end_idx)) = find_anchor_subslice(&existing_lines, &s_lines) {
+        let mut updated_lines = Vec::new();
+        for idx in 0..start_idx {
+            updated_lines.push(existing_lines[idx]);
+        }
+        for r_line in norm_replace.lines() {
+            updated_lines.push(r_line);
+        }
+        for idx in end_idx..existing_lines.len() {
+            updated_lines.push(existing_lines[idx]);
+        }
+        return Some(updated_lines.join("\n"));
+    }
+
+    None
+}
+
+/// Searches all files in the worktree for one that matches `search_str`.
+fn find_file_matching_search(
+    worktree_dir: &Path,
+    search_str: &str,
+    preferred_file: Option<&str>,
+) -> Option<String> {
+    if search_str.trim().is_empty() {
+        return None;
+    }
+    let files = scan_worktree_files(worktree_dir);
+    let mut matching_files = Vec::new();
+
+    for f in &files {
+        let full = worktree_dir.join(f);
+        if let Ok(content) = std::fs::read_to_string(&full) {
+            if try_apply_diff_to_content(&content, search_str, "").is_some() {
+                matching_files.push(f.clone());
+            }
+        }
+    }
+
+    if let Some(pref) = preferred_file {
+        let clean_pref = sanitize_candidate_filename(pref).replace('\\', "/");
+        if let Some(found) = matching_files.iter().find(|m| *m == &clean_pref) {
+            return Some(found.clone());
+        }
+    }
+
+    if matching_files.len() == 1 {
+        return Some(matching_files[0].clone());
+    }
+
+    // If multiple matched, pick the one that matches file extension if preferred was given
+    if let Some(pref) = preferred_file {
+        if let Some(dot_idx) = pref.rfind('.') {
+            let ext = &pref[dot_idx..];
+            if let Some(found) = matching_files.iter().find(|m| m.ends_with(ext)) {
+                return Some(found.clone());
+            }
+        }
+    }
+
+    matching_files.first().cloned()
 }
 
 #[cfg(test)]
@@ -780,6 +1012,96 @@ console.log("App loaded successfully");
 
         let js_content = std::fs::read_to_string(temp.join("app.js")).unwrap();
         assert!(js_content.contains("App loaded successfully"));
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_multi_file_search_redirect() {
+        let temp = std::env::temp_dir().join(format!("test_redirect_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        std::fs::write(temp.join("index.html"), "<!DOCTYPE html><html><body><h1>Hello</h1></body></html>").unwrap();
+        std::fs::write(temp.join("style.css"), "/* Reset */\n*, *::before, *::after {\n    box-sizing: border-box;\n}\n").unwrap();
+
+        // Model mislabels the file as index.html, but the SEARCH snippet is CSS that uniquely exists in style.css!
+        let diff_response = r#"
+FILE: index.html
+<<<<<<< SEARCH
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+=======
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+>>>>>>> REPLACE
+"#;
+
+        let results = apply_diff_blocks(&temp, diff_response, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path, "style.css");
+
+        let updated_css = std::fs::read_to_string(temp.join("style.css")).unwrap();
+        assert!(updated_css.contains("margin: 0;"));
+        assert!(updated_css.contains("padding: 0;"));
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_fuzzy_asterisk_and_divider_delimiters() {
+        let temp = std::env::temp_dir().join(format!("test_fuzzy_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        std::fs::write(temp.join("style.css"), "/* Global Reset & Typography */\n*, *::before, *::after {\n    box-sizing: border-box;\n}\n").unwrap();
+
+        // Model emits `/ Global Reset /` and `, ::before, *::after` and uses `<<<<<<< END` divider
+        let diff_response = r#"
+FILE: style.css
+<<<<<<< SEARCH
+/ Global Reset & Typography /
+, ::before, *::after {
+    box-sizing: border-box;
+}
+<<<<<<< END
+/* Global Reset & Typography */
+*, *::before, *::after {
+    box-sizing: border-box;
+    font-family: 'JetBrains Mono', monospace;
+}
+>>>>>>>
+"#;
+
+        let results = apply_diff_blocks(&temp, diff_response, None).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let updated_css = std::fs::read_to_string(temp.join("style.css")).unwrap();
+        assert!(updated_css.contains("font-family: 'JetBrains Mono', monospace;"));
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_create_block_strips_nested_markdown_fence() {
+        let temp = std::env::temp_dir().join(format!("test_fence_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let diff_response = r#"
+<<<<<<< CREATE: app.js
+```javascript
+console.log("Clean code");
+```
+>>>>>>>
+"#;
+
+        let results = apply_diff_blocks(&temp, diff_response, None).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let code = std::fs::read_to_string(temp.join("app.js")).unwrap();
+        assert_eq!(code.trim(), "console.log(\"Clean code\");");
 
         let _ = std::fs::remove_dir_all(&temp);
     }

@@ -292,6 +292,7 @@ async fn execute_task_flow(prompt: &str, cli: &Cli) {
     println!("{}\n", "==============================================".bold());
 
     // 3. Create Isolated Worktree
+    let current_branch = GitService::get_current_branch(&cwd).unwrap_or_else(|_| "main".to_string());
     let task_id = format!("cli_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
     let worktree_info = match GitService::create_task_worktree(&cwd, &task_id, true) {
         Ok(info) => info,
@@ -311,7 +312,7 @@ async fn execute_task_flow(prompt: &str, cli: &Cli) {
                 Ok(k) if !k.is_empty() => k,
                 _ => {
                     println!("{}", "Missing Groq API Key. Run 'zencode auth login groq'.".red());
-                    let _ = GitService::reject_task_changes(&cwd, &task_id);
+                    let _ = GitService::reject_task_changes(&worktree_path, &task_id);
                     return;
                 }
             };
@@ -322,7 +323,7 @@ async fn execute_task_flow(prompt: &str, cli: &Cli) {
                 Ok(k) if !k.is_empty() => k,
                 _ => {
                     println!("{}", "Missing OpenRouter API Key. Run 'zencode auth login openrouter'.".red());
-                    let _ = GitService::reject_task_changes(&cwd, &task_id);
+                    let _ = GitService::reject_task_changes(&worktree_path, &task_id);
                     return;
                 }
             };
@@ -331,7 +332,7 @@ async fn execute_task_flow(prompt: &str, cli: &Cli) {
         "local" | "ollama" => CliWorkerClient::new_ollama(cli.model.clone()),
         other => {
             println!("{} Unknown worker provider '{}'. Use groq, openrouter, or local.", "Error:".red(), other);
-            let _ = GitService::reject_task_changes(&cwd, &task_id);
+            let _ = GitService::reject_task_changes(&worktree_path, &task_id);
             return;
         }
     };
@@ -349,7 +350,8 @@ async fn execute_task_flow(prompt: &str, cli: &Cli) {
         }
         Err(e) => {
             worker_spinner.finish_with_message(format!("Execution failed: {e}").red().to_string());
-            let _ = GitService::reject_task_changes(&cwd, &task_id);
+            eprintln!("\n{} Worker error detail: {}\n", "ERROR:".red().bold(), e);
+            let _ = GitService::reject_task_changes(&worktree_path, &task_id);
             return;
         }
     };
@@ -378,12 +380,66 @@ async fn execute_task_flow(prompt: &str, cli: &Cli) {
     };
 
     if should_merge {
-        match GitService::accept_task_changes(&cwd, &task_id, true) {
+        match GitService::accept_task_changes(&worktree_path, &current_branch, true) {
             Ok(merge_res) => {
                 match merge_res {
                     zencode_core::git::MergeResult::Success { commit_sha } => {
                         println!("\n{} Changes merged into main branch successfully!", "SUCCESS:".green().bold());
                         println!("Commit Hash: {}", commit_sha.cyan());
+
+                        // 8. Grounded Summary Generation
+                        let summary_spinner = ProgressBar::new_spinner();
+                        summary_spinner.set_style(ProgressStyle::default_spinner().template("{spinner:.cyan} {msg}").unwrap());
+                        summary_spinner.set_message("Generating and verifying grounded task summary...".to_string());
+                        summary_spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+
+                        let mut files_summary = String::new();
+                        let mut modified_file_paths = Vec::new();
+                        for d in &diff_results {
+                            files_summary.push_str(&format!("- {} (+{} lines, -{} lines)\n", d.file_path, d.additions, d.deletions));
+                            modified_file_paths.push(d.file_path.clone());
+                        }
+                        let diff_excerpts = format!("Total {} file(s) modified across worktree.", diff_results.len());
+
+                        let (raw_summary, _usage) = match planner_client
+                            .summarize_task_outcome_grounded(
+                                &gemini_key,
+                                &plan.task_summary,
+                                &files_summary,
+                                &diff_excerpts,
+                                "",
+                                "",
+                            )
+                            .await
+                        {
+                            Ok((sum, usage)) => {
+                                summary_spinner.finish_and_clear();
+                                (sum, usage)
+                            }
+                            Err(_) => {
+                                summary_spinner.finish_and_clear();
+                                (
+                                    format!(
+                                        "Successfully applied changes across {} file(s) (+{}/-{} lines).",
+                                        diff_results.len(),
+                                        diff_results.iter().map(|d| d.additions).sum::<usize>(),
+                                        diff_results.iter().map(|d| d.deletions).sum::<usize>()
+                                    ),
+                                    Default::default(),
+                                )
+                            }
+                        };
+
+                        let verified_summary = zencode_core::verify_and_reconcile_summary(
+                            &raw_summary,
+                            &modified_file_paths,
+                            &[],
+                            &[],
+                        );
+
+                        println!("\n{}", "================ TASK SUMMARY ================".bold().cyan());
+                        println!("{}", verified_summary.trim());
+                        println!("{}\n", "==============================================".bold().cyan());
                     }
                     zencode_core::git::MergeResult::Conflict { conflicting_files } => {
                         println!("\n{} Merge conflicts encountered in files: {:?}", "CONFLICT:".yellow().bold(), conflicting_files);
@@ -396,7 +452,7 @@ async fn execute_task_flow(prompt: &str, cli: &Cli) {
         }
     } else {
         println!("{}", "Changes rejected. Cleaning up isolated worktree...".yellow());
-        let _ = GitService::reject_task_changes(&cwd, &task_id);
+        let _ = GitService::reject_task_changes(&worktree_path, &task_id);
         println!("{}", "Worktree safely removed without touching main directory.".green());
     }
 }

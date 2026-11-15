@@ -123,6 +123,19 @@ impl GitService {
         }
     }
 
+    /// Gets the current branch name of the repository (or "main" if detached or empty).
+    pub fn get_current_branch(repo_path: &Path) -> Result<String, GitError> {
+        let (ok, out, _) = Self::run_cmd_allow_err(repo_path, &["branch", "--show-current"])?;
+        if ok && !out.trim().is_empty() {
+            return Ok(out.trim().to_string());
+        }
+        let (ok_head, head_ref, _) = Self::run_cmd_allow_err(repo_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        if ok_head && !head_ref.trim().is_empty() && head_ref.trim() != "HEAD" {
+            return Ok(head_ref.trim().to_string());
+        }
+        Ok("main".to_string())
+    }
+
     /// Checks if the repository has at least one commit (HEAD is not unborn).
     pub fn has_commits(repo_path: &Path) -> Result<bool, GitError> {
         let (has_head, head_sha, _) = Self::run_cmd_allow_err(

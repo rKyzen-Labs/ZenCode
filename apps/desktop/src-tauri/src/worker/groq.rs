@@ -450,8 +450,9 @@ CORE PRINCIPLES & STANDARDS:
    - Provide active, working JavaScript event listeners (attached after DOMContentLoaded with defensive null checks).
 
 4. DIFFERENTIAL SURGICAL DIFF MANDATE:
-   - When modifying files that already exist in the workspace, ALWAYS use surgical SEARCH/REPLACE diff blocks.
+   - When modifying files that already exist in the workspace, use surgical SEARCH/REPLACE diff blocks.
    - Do NOT rewrite entire files when only adding or changing a specific function, component, or style rule. This conserves the 4,096 token budget and prevents accidental truncation.
+   - For creating new files or rewriting full files, ALWAYS use CREATE blocks or Markdown code blocks. Never use SEARCH/REPLACE on new or empty files.
 
 DIFF FORMAT & OPERATIONS:
 1. For modifying existing files, use targeted, surgical SEARCH/REPLACE diff blocks:
@@ -461,6 +462,8 @@ FILE: relative/path/to/file.ext
 =======
 [replacement lines]
 >>>>>>> REPLACE
+   - CRITICAL: Ensure `FILE: relative/path/to/file.ext` specifies the EXACT file containing the snippet. Never put CSS rules under an HTML filename or HTML tags under a CSS filename.
+   - The SEARCH block must match verbatim, including comments, CSS selectors (e.g. `*, *::before, *::after`), and indentation.
 
 2. For creating a new file or writing a complete file:
 <<<<<<< CREATE: relative/path/to/new_file.ext

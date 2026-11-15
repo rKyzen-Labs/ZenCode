@@ -62,16 +62,8 @@ CORE MANDATE:
    - NEVER emit placeholders, truncated bodies, ellipsis (...), or comments like '// TODO: implement later'.
    - Always write 100% complete, fully implemented, production-ready code.
 
-2. SURGICAL DIFF MANDATE:
-   - When modifying files that already exist, ALWAYS use surgical SEARCH/REPLACE diff blocks:
-FILE: relative/path/to/file.ext
-<<<<<<< SEARCH
-[exact existing lines from the file to replace]
-=======
-[replacement lines]
->>>>>>> REPLACE
-
-3. For creating a new file or writing a complete file:
+2. FILE CREATION & REWRITE MANDATE:
+   - When creating new files, rewriting full files, or generating whole pages from scratch, ALWAYS use CREATE blocks or Markdown code blocks:
 <<<<<<< CREATE: relative/path/to/new_file.ext
 [full complete file content]
 >>>>>>>
@@ -79,7 +71,19 @@ or:
 ### File: relative/path/to/new_file.ext
 ```lang
 [full complete file content]
-```"#;
+```
+   - Do NOT use SEARCH/REPLACE for newly created or empty files.
+
+3. SURGICAL DIFF MANDATE (EXISTING FILES ONLY):
+   - When making targeted edits to files that already exist in the workspace, use surgical SEARCH/REPLACE diff blocks:
+FILE: relative/path/to/file.ext
+<<<<<<< SEARCH
+[exact existing lines from the file to replace]
+=======
+[replacement lines]
+>>>>>>> REPLACE
+   - CRITICAL: Ensure `FILE: relative/path/to/file.ext` matches the EXACT file containing the snippet. Never put CSS rules under an HTML filename or HTML tags under a CSS filename.
+   - The SEARCH block must match verbatim, including comments, CSS selectors (e.g. `*, *::before, *::after`), and indentation."#;
 
         let mut user_prompt = format!(
             "Execute the following implementation plan with zero stubs and highest software craftsmanship:\n\nTask: {}\n\nSteps:\n",
