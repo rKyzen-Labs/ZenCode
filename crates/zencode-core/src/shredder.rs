@@ -16,6 +16,8 @@ pub fn shred_file_context(path: &Path, content: &str) -> String {
         "ts" | "tsx" | "js" | "jsx" => shred_typescript(content),
         "go" => shred_go(content),
         "toml" | "json" | "yaml" | "yml" => shred_config(content),
+        "html" | "htm" | "svg" => shred_html(content),
+        "css" | "scss" | "less" => shred_css(content),
         _ => shred_generic(content),
     }
 }
@@ -280,6 +282,41 @@ fn shred_config(content: &str) -> String {
     } else {
         let mut truncated = lines[..50].join("\n");
         truncated.push_str("\n... [config structure truncated for token conservation] ...");
+        truncated
+    }
+}
+
+/// Preserves HTML markup structure, elements, classes, and IDs for CSS/JS context.
+fn shred_html(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= 250 {
+        content.to_string()
+    } else {
+        let mut out = Vec::new();
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with("<path d=") || trimmed.starts_with("d=\"M") {
+                out.push("    <!-- [svg path omitted] -->".to_string());
+            } else {
+                out.push(line.to_string());
+            }
+            if out.len() >= 200 {
+                out.push("... [remaining HTML markup omitted] ...".to_string());
+                break;
+            }
+        }
+        out.join("\n")
+    }
+}
+
+/// Preserves CSS rules, selectors, and variables for styling context.
+fn shred_css(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= 300 {
+        content.to_string()
+    } else {
+        let mut truncated = lines[..250].join("\n");
+        truncated.push_str("\n... [remaining CSS selectors truncated for token conservation] ...");
         truncated
     }
 }
