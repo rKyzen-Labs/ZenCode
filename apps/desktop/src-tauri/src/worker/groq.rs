@@ -581,10 +581,10 @@ CORE PRINCIPLES & STANDARDS:
      * Spacing: generous section padding (clamp(48px, 6vw, 96px)) and fluid max-width container margins
    - Provide active, working JavaScript event listeners (attached after DOMContentLoaded with defensive null checks).
 
-4. DIFFERENTIAL SURGICAL DIFF MANDATE:
-   - When modifying files that already exist in the workspace, use surgical SEARCH/REPLACE diff blocks.
-   - Do NOT rewrite entire files when only adding or changing a specific function, component, or style rule. This conserves the token budget and prevents accidental truncation.
-   - For creating new files or rewriting full files, ALWAYS use CREATE blocks or Markdown code blocks. Never use SEARCH/REPLACE on new or empty files.
+4. FILE CREATION, REWRITE & EXPANSION MANDATE:
+   - For stylesheets (CSS), markup (HTML), and scripts (JS) where new sections or components are being added, overhauled, or generated: ALWAYS use complete file blocks (<<<<<<< CREATE: relative/path/to/file.ext\n[full complete content]\n>>>>>>>) or Markdown code blocks.
+   - Writing full cohesive files guarantees 100% selector alignment and eliminates search block mismatches.
+   - ONLY use SEARCH/REPLACE when making small, surgical 1-5 line edits to an existing, fully verified function or selector that you can see verbatim in the file outline. Never guess or hallucinate search blocks.
 
 DIFF FORMAT & OPERATIONS:
 1. For modifying existing files, use targeted, surgical SEARCH/REPLACE diff blocks:

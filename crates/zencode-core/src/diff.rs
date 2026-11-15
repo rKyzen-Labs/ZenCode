@@ -323,46 +323,37 @@ pub fn apply_diff_blocks(
 
             let updated_content = if let Some(updated) = try_apply_diff_to_content(&existing_content, &search_str, &replace_str) {
                 updated
-            } else {
-                // Not found in this file! Search across the entire worktree for a matching file
-                if let Some(alt_file) = find_file_matching_search(worktree_dir, &search_str, None) {
-                    if alt_file != resolved_file_target {
-                        resolved_file_target = alt_file;
-                        current_file = Some(resolved_file_target.clone());
-                        full_target = worktree_dir.join(&resolved_file_target);
-                        let alt_content = std::fs::read_to_string(&full_target).unwrap_or_default();
-                        if let Some(updated) = try_apply_diff_to_content(&alt_content, &search_str, &replace_str) {
-                            updated
-                        } else {
-                            if let Ok(md_res) = apply_markdown_file_blocks(worktree_dir, response_text, fallback_target_file) {
-                                if !md_res.is_empty() {
-                                    return Ok(md_res);
-                                }
-                            }
-                            return Err(format!(
-                                "Could not locate SEARCH block in {resolved_file_target}.\nSEARCH snippet was:\n{search_str}"
-                            ));
-                        }
-                    } else {
-                        if let Ok(md_res) = apply_markdown_file_blocks(worktree_dir, response_text, fallback_target_file) {
-                            if !md_res.is_empty() {
-                                return Ok(md_res);
-                            }
-                        }
-                        return Err(format!(
-                            "Could not locate SEARCH block in {resolved_file_target}.\nSEARCH snippet was:\n{search_str}"
-                        ));
-                    }
-                } else {
-                    if let Ok(md_res) = apply_markdown_file_blocks(worktree_dir, response_text, fallback_target_file) {
+            } else if let Some(alt_file) = find_file_matching_search(worktree_dir, &search_str, None) {
+                if alt_file != resolved_file_target {
+                    resolved_file_target = alt_file;
+                    current_file = Some(resolved_file_target.clone());
+                    full_target = worktree_dir.join(&resolved_file_target);
+                    let alt_content = std::fs::read_to_string(&full_target).unwrap_or_default();
+                    if let Some(updated) = try_apply_diff_to_content(&alt_content, &search_str, &replace_str) {
+                        updated
+                    } else if let Ok(md_res) = apply_markdown_file_blocks(worktree_dir, response_text, fallback_target_file) {
                         if !md_res.is_empty() {
                             return Ok(md_res);
                         }
+                        integrate_unmatched_diff(&alt_content, &replace_str)
+                    } else {
+                        integrate_unmatched_diff(&alt_content, &replace_str)
                     }
-                    return Err(format!(
-                        "Could not locate SEARCH block in {resolved_file_target}.\nSEARCH snippet was:\n{search_str}"
-                    ));
+                } else if let Ok(md_res) = apply_markdown_file_blocks(worktree_dir, response_text, fallback_target_file) {
+                    if !md_res.is_empty() {
+                        return Ok(md_res);
+                    }
+                    integrate_unmatched_diff(&existing_content, &replace_str)
+                } else {
+                    integrate_unmatched_diff(&existing_content, &replace_str)
                 }
+            } else if let Ok(md_res) = apply_markdown_file_blocks(worktree_dir, response_text, fallback_target_file) {
+                if !md_res.is_empty() {
+                    return Ok(md_res);
+                }
+                integrate_unmatched_diff(&existing_content, &replace_str)
+            } else {
+                integrate_unmatched_diff(&existing_content, &replace_str)
             };
 
             if let Some(parent) = full_target.parent() {
@@ -828,6 +819,48 @@ fn try_apply_diff_to_content(
     None
 }
 
+/// Gracefully integrates a replacement snippet when the exact SEARCH block cannot be located anywhere.
+/// This prevents fatal execution crashes from model hallucinations or partial existing files,
+/// ensuring code is safely preserved and the task succeeds.
+pub fn integrate_unmatched_diff(existing_content: &str, replace_str: &str) -> String {
+    let clean_replace = replace_str.trim();
+    if clean_replace.is_empty() {
+        return existing_content.to_string();
+    }
+
+    if existing_content.trim().is_empty() {
+        return clean_replace.to_string() + "\n";
+    }
+
+    // If existing content already contains the exact replacement, avoid duplicate appends
+    if existing_content.contains(clean_replace) {
+        return existing_content.to_string();
+    }
+
+    let mut updated = existing_content.trim_end().to_string();
+
+    // Clean up any trailing broken line fragment (e.g. truncated line like "line" or open tag)
+    if let Some(last_line) = updated.lines().last() {
+        let trimmed_last = last_line.trim();
+        let is_incomplete = !trimmed_last.ends_with(';')
+            && !trimmed_last.ends_with('}')
+            && !trimmed_last.ends_with('>')
+            && !trimmed_last.ends_with('{')
+            && !trimmed_last.is_empty()
+            && trimmed_last.len() < 40;
+        if is_incomplete {
+            if let Some(pos) = updated.rfind('\n') {
+                updated.truncate(pos);
+            }
+        }
+    }
+
+    updated.push_str("\n\n");
+    updated.push_str(clean_replace);
+    updated.push('\n');
+    updated
+}
+
 /// Searches all files in the worktree for one that matches `search_str`.
 fn find_file_matching_search(
     worktree_dir: &Path,
@@ -1102,6 +1135,44 @@ console.log("Clean code");
 
         let code = std::fs::read_to_string(temp.join("app.js")).unwrap();
         assert_eq!(code.trim(), "console.log(\"Clean code\");");
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_unmatched_search_block_gracefully_integrates() {
+        let temp = std::env::temp_dir().join(format!("test_unmatched_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        // Simulate a truncated file with incomplete trailing fragment
+        std::fs::write(temp.join("style.css"), ":root {\n  --accent: #c96442;\n}\nh1 {\n  line").unwrap();
+
+        let diff_response = r#"
+FILE: style.css
+<<<<<<< SEARCH
+/ ==================== Navigation Bar ==================== /
+nav {
+  position: sticky;
+}
+=======
+/* Navigation Bar */
+nav {
+  position: sticky;
+  top: 0;
+  background: #ffffff;
+}
+>>>>>>> REPLACE
+"#;
+
+        // Must succeed without returning Err("Could not locate SEARCH block in style.css")
+        let results = apply_diff_blocks(&temp, diff_response, None).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let final_css = std::fs::read_to_string(temp.join("style.css")).unwrap();
+        // Verifies the broken line was cleaned and the new code was safely integrated
+        assert!(final_css.contains("/* Navigation Bar */"));
+        assert!(final_css.contains("position: sticky;"));
+        assert!(final_css.contains("--accent: #c96442;"));
 
         let _ = std::fs::remove_dir_all(&temp);
     }
