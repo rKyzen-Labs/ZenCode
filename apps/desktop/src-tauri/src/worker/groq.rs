@@ -202,7 +202,311 @@ impl GroqWorkerClient {
         }
     }
 
-    /// Executes the plan step-by-step in the isolated task worktree using Groq cloud models or local Ollama.
+    /// Sends a single prompt to the configured LLM worker (Groq, OpenRouter, or Ollama)
+    /// with automatic TPM budgeting, retry/model rotation on 429, and length continuation.
+    pub async fn send_llm_request(
+        &self,
+        client: &reqwest::Client,
+        app_handle: &AppHandle,
+        session_id: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        preferred_model: Option<&str>,
+    ) -> Result<String, String> {
+        let is_groq = self.quota_tracker.is_some();
+        let is_ollama = self.api_key == "ollama";
+        let is_openrouter = self.endpoint_url.contains("openrouter.ai");
+        let provider_label = if is_ollama {
+            "Ollama (Local)"
+        } else if is_openrouter {
+            "OpenRouter (Cloud Free)"
+        } else {
+            "Groq (Cloud)"
+        };
+
+        let mut attempts = 0;
+        let mut chosen_model = if let Some(ref tracker_arc) = self.quota_tracker {
+            let mut tracker = tracker_arc.lock().await;
+            tracker.select_groq_model(preferred_model)?
+        } else if is_openrouter {
+            preferred_model.unwrap_or("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free").to_string()
+        } else {
+            preferred_model.unwrap_or("qwen2.5-coder:7b").to_string()
+        };
+
+        let mut trimmed_user_prompt = user_prompt.to_string();
+        if is_groq {
+            let p_tokens = estimate_tokens(system_prompt) + estimate_tokens(&trimmed_user_prompt);
+            if p_tokens > 3_500 {
+                if let Some(pos) = trimmed_user_prompt.rfind("\n--- Context Outline (Shredded):") {
+                    trimmed_user_prompt.truncate(pos);
+                    trimmed_user_prompt.push_str("\n[Additional non-target file outlines omitted to stay strictly within Groq TPM limit]");
+                }
+            }
+        }
+
+        let prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(&trimmed_user_prompt);
+        let dynamic_max_tokens = if is_groq {
+            let available_headroom = 7_500usize.saturating_sub(prompt_tokens);
+            available_headroom.clamp(1_024, 4_096) as u32
+        } else {
+            4_096
+        };
+
+        let max_attempts = if is_groq { 3 } else { 1 };
+        let mut response_text = String::new();
+
+        while attempts < max_attempts {
+            attempts += 1;
+
+            let _ = app_handle.emit(
+                "worker:message",
+                &WorkerEventPayload {
+                    session_id: session_id.to_string(),
+                    event_type: "message.part.updated".into(),
+                    content: serde_json::json!({
+                        "type": "message.part.updated",
+                        "properties": {
+                            "part": {
+                                "type": "reasoning",
+                                "text": format!("Sending prompt to {provider_label} model: {chosen_model}")
+                            }
+                        }
+                    }).to_string(),
+                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                },
+            );
+
+            let _ = app_handle.emit(
+                "worker:message",
+                &WorkerEventPayload {
+                    session_id: session_id.to_string(),
+                    event_type: "message.part.updated".into(),
+                    content: serde_json::json!({
+                        "type": "message.part.updated",
+                        "properties": {
+                            "part": {
+                                "type": "tool",
+                                "tool": "write",
+                                "callID": format!("call_write_{}_{attempts}", session_id),
+                                "state": { "input": { "filePath": format!("{chosen_model}") } }
+                            }
+                        }
+                    }).to_string(),
+                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                },
+            );
+
+            let body = serde_json::json!({
+                "model": chosen_model,
+                "messages": [
+                    { "role": "system", "content": system_prompt },
+                    { "role": "user", "content": trimmed_user_prompt }
+                ],
+                "temperature": 0.2,
+                "max_tokens": dynamic_max_tokens
+            });
+
+            let mut req_builder = client
+                .post(&self.endpoint_url)
+                .header("Content-Type", "application/json");
+
+            if is_openrouter {
+                req_builder = req_builder
+                    .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
+                    .header("X-Title", "ZenCode");
+            }
+
+            if !self.api_key.is_empty() && self.api_key != "ollama" {
+                req_builder = req_builder.header("Authorization", format!("Bearer {}", self.api_key));
+            }
+
+            let req_resp = req_builder.json(&body).send().await;
+
+            match req_resp {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if let Some(ref tracker_arc) = self.quota_tracker {
+                        let groq_headers = crate::planner::quota::parse_groq_headers(resp.headers());
+                        let mut tracker = tracker_arc.lock().await;
+                        tracker.update_groq_server_headers(&chosen_model, &groq_headers);
+                        let event = tracker.to_quota_update_event(&chosen_model);
+                        let _ = app_handle.emit("planner:quota_update", &event);
+                    }
+
+                    if status.is_success() {
+                        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+                        if let Some(ref tracker_arc) = self.quota_tracker {
+                            let tokens = json
+                                .get("usage")
+                                .and_then(|u| u.get("total_tokens"))
+                                .and_then(|t| t.as_u64())
+                                .unwrap_or(1000) as u32;
+
+                            let mut tracker = tracker_arc.lock().await;
+                            tracker.record_actual_usage(&chosen_model, tokens);
+                            let event = tracker.to_quota_update_event(&chosen_model);
+                            let _ = app_handle.emit("planner:quota_update", &event);
+                        }
+
+                        let choice = json
+                            .get("choices")
+                            .and_then(|c| c.as_array())
+                            .and_then(|arr| arr.first());
+
+                        response_text = choice
+                            .and_then(|c| c.get("message"))
+                            .and_then(|m| m.get("content"))
+                            .and_then(|c| c.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+
+                        if response_text.is_empty() {
+                            if let Some(c) = choice {
+                                if let Some(text) = c.get("text").and_then(|t| t.as_str()) {
+                                    response_text = text.to_string();
+                                } else if let Some(m) = c.get("message") {
+                                    if let Some(reasoning) = m.get("reasoning_content").or_else(|| m.get("reasoning")).and_then(|r| r.as_str()) {
+                                        response_text = reasoning.to_string();
+                                    }
+                                }
+                            }
+                        }
+
+                        let finish_reason = choice
+                            .and_then(|c| c.get("finish_reason"))
+                            .and_then(|f| f.as_str())
+                            .unwrap_or("stop");
+
+                        if response_text.is_empty() {
+                            return Err(format!("{provider_label} model {chosen_model} returned an empty response."));
+                        }
+
+                        // Auto-continuation if response was cut off by token limit
+                        if finish_reason == "length" && !response_text.is_empty() {
+                            let _ = app_handle.emit(
+                                "worker:message",
+                                &WorkerEventPayload {
+                                    session_id: session_id.to_string(),
+                                    event_type: "message.part.updated".into(),
+                                    content: serde_json::json!({
+                                        "type": "message.part.updated",
+                                        "properties": {
+                                            "part": {
+                                                "type": "reasoning",
+                                                "text": "Output token limit reached. Automatically retrieving remaining code continuation..."
+                                            }
+                                        }
+                                    }).to_string(),
+                                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                                },
+                            );
+
+                            let cont_prompt = "You reached the maximum output token limit. Continue generating the exact remaining diff/file code without repeating what you already wrote:";
+                            let cont_body = serde_json::json!({
+                                "model": chosen_model,
+                                "messages": [
+                                    { "role": "system", "content": system_prompt },
+                                    { "role": "user", "content": trimmed_user_prompt },
+                                    { "role": "assistant", "content": response_text },
+                                    { "role": "user", "content": cont_prompt }
+                                ],
+                                "temperature": 0.2,
+                                "max_tokens": dynamic_max_tokens
+                            });
+
+                            let mut cont_builder = client
+                                .post(&self.endpoint_url)
+                                .header("Content-Type", "application/json");
+
+                            if is_openrouter {
+                                cont_builder = cont_builder
+                                    .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
+                                    .header("X-Title", "ZenCode");
+                            }
+
+                            if !self.api_key.is_empty() && self.api_key != "ollama" {
+                                cont_builder = cont_builder.header("Authorization", format!("Bearer {}", self.api_key));
+                            }
+
+                            if let Ok(cont_resp) = cont_builder.json(&cont_body).send().await {
+                                if cont_resp.status().is_success() {
+                                    if let Ok(cont_json) = cont_resp.json::<serde_json::Value>().await {
+                                        let continuation_chunk = cont_json
+                                            .get("choices")
+                                            .and_then(|c| c.as_array())
+                                            .and_then(|arr| arr.first())
+                                            .and_then(|c| c.get("message"))
+                                            .and_then(|m| m.get("content"))
+                                            .and_then(|c| c.as_str())
+                                            .unwrap_or_default();
+                                        if !continuation_chunk.is_empty() {
+                                            response_text.push('\n');
+                                            response_text.push_str(continuation_chunk);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        return Ok(response_text);
+                    } else if status.as_u16() == 429 || status.as_u16() == 413 {
+                        let err_body = resp.text().await.unwrap_or_default();
+                        eprintln!("{provider_label} returned rate/size error {status}: {err_body}");
+                        if let Some(ref tracker_arc) = self.quota_tracker {
+                            let next_model = {
+                                let mut tracker = tracker_arc.lock().await;
+                                tracker.select_groq_model(None)
+                            };
+                            match next_model {
+                                Ok(m) if m != chosen_model => {
+                                    println!("Groq rate limit on {chosen_model}. Rotating to Groq model {m}...");
+                                    let _ = app_handle.emit(
+                                        "worker:message",
+                                        &WorkerEventPayload {
+                                            session_id: session_id.to_string(),
+                                            event_type: "message.part.updated".into(),
+                                            content: serde_json::json!({
+                                                "type": "message.part.updated",
+                                                "properties": {
+                                                    "part": {
+                                                        "type": "reasoning",
+                                                        "text": format!("Groq model {chosen_model} hit rate/capacity limits ({status}). Rotating to Groq model {m}...")
+                                                    }
+                                                }
+                                            }).to_string(),
+                                            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                                        },
+                                    );
+                                    chosen_model = m;
+                                    continue;
+                                }
+                                _ => {
+                                    return Err(format!("Groq cloud rate limit reached on {chosen_model} ({status}): {err_body}. All Groq models are currently at capacity."));
+                                }
+                            }
+                        } else {
+                            return Err(format!("{provider_label} model returned {status}: {err_body}"));
+                        }
+                    } else {
+                        let err_body = resp.text().await.unwrap_or_default();
+                        return Err(format!("{provider_label} API request failed ({status}): {err_body}"));
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("Network failure calling {provider_label} API: {e}"));
+                }
+            }
+        }
+
+        if !response_text.is_empty() {
+            Ok(response_text)
+        } else {
+            Err("Worker failed to generate a response.".to_string())
+        }
+    }
+
+    /// Executes the plan step-by-step in the isolated task worktree using Groq cloud models, OpenRouter, or local Ollama.
     pub async fn execute_session(
         &self,
         worktree_path: &Path,
@@ -252,179 +556,7 @@ impl GroqWorkerClient {
             },
         );
 
-        // 2. Build Context Shredded Workspace Outline
-        let mut likely_files_set = std::collections::HashSet::new();
-        for step in steps {
-            for lf in &step.likely_files {
-                let clean = lf.trim().trim_matches('`').trim_start_matches("./").replace('\\', "/");
-                for part in clean.split(',') {
-                    let p = part.trim().to_lowercase();
-                    if !p.is_empty() {
-                        likely_files_set.insert(p);
-                    }
-                }
-            }
-        }
-
-        let plan_lower = plan_summary.to_lowercase();
-        let is_exploration_task = likely_files_set.is_empty()
-            || likely_files_set.len() > 6
-            || plan_lower.contains("explore")
-            || plan_lower.contains("analyze")
-            || plan_lower.contains("overview")
-            || plan_lower.contains("architecture")
-            || plan_lower.contains("structure")
-            || plan_lower.contains("understand")
-            || plan_lower.contains("review");
-
-        // Walk worktree files and collect structural summaries
-        let mut files_to_scan = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(worktree_path) {
-            collect_worktree_files(worktree_path, entries, &mut files_to_scan, 0);
-        }
-
-        // Sort files: prioritize explicit target files first so they are guaranteed full context
-        if !is_exploration_task {
-            files_to_scan.sort_by(|a, b| {
-                let a_rel = a.strip_prefix(worktree_path).unwrap_or(a).to_string_lossy().to_lowercase().replace('\\', "/");
-                let b_rel = b.strip_prefix(worktree_path).unwrap_or(b).to_string_lossy().to_lowercase().replace('\\', "/");
-                let a_base = Path::new(&a_rel).file_name().and_then(|f| f.to_str()).unwrap_or(&a_rel);
-                let b_base = Path::new(&b_rel).file_name().and_then(|f| f.to_str()).unwrap_or(&b_rel);
-                let a_is_target = likely_files_set.iter().any(|lf| lf == &a_rel || lf == a_base || a_rel.ends_with(lf));
-                let b_is_target = likely_files_set.iter().any(|lf| lf == &b_rel || lf == b_base || b_rel.ends_with(lf));
-                b_is_target.cmp(&a_is_target).then_with(|| a.cmp(b))
-            });
-        } else {
-            files_to_scan.sort();
-        }
-
-        let mut shredded_files_summary = String::new();
-
-        if is_exploration_task {
-            // EXPLORATION / PROJECT-WIDE MODE:
-            // Send high-level breadth: Directory tree + top-level AST signatures of entry points.
-            // Capped strictly under a 3,000 token budget to avoid 8K TPM traps.
-            shredded_files_summary.push_str("=== WORKSPACE FILE TREE ===\n");
-            for fpath in &files_to_scan {
-                let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
-                shredded_files_summary.push_str(&format!("- {}\n", rel_path.to_string_lossy().replace('\\', "/")));
-            }
-            shredded_files_summary.push_str("\n=== KEY ENTRYPOINTS & MODULE OUTLINES (AST SIGNATURES) ===\n");
-
-            let mut current_tokens = estimate_tokens(&shredded_files_summary);
-            let exploration_token_budget: usize = if self.quota_tracker.is_some() { 1_800 } else { 3_500 };
-
-            for fpath in &files_to_scan {
-                if current_tokens >= exploration_token_budget {
-                    shredded_files_summary.push_str("\n... [Additional project files summarized in file tree above to stay within safe token limits] ...\n");
-                    break;
-                }
-                let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
-                let rel_str = rel_path.to_string_lossy().replace('\\', "/");
-                let rel_str_lower = rel_str.to_lowercase();
-
-                // Prioritize top-level manifest, configuration, and entrypoints
-                let is_entrypoint = rel_str_lower.contains("main")
-                    || rel_str_lower.contains("index")
-                    || rel_str_lower.contains("app.")
-                    || rel_str_lower.contains("lib.")
-                    || rel_str_lower.ends_with("cargo.toml")
-                    || rel_str_lower.ends_with("package.json")
-                    || rel_str_lower.ends_with("requirements.txt")
-                    || rel_str_lower.ends_with("pyproject.toml");
-
-                if is_entrypoint || files_to_scan.len() <= 15 {
-                    if let Ok(code) = std::fs::read_to_string(fpath) {
-                        let outline = shred_file_context(fpath, &code);
-                        let section = format!("\n--- Outline: {rel_str} ---\n{outline}\n");
-                        let section_tokens = estimate_tokens(&section);
-                        if current_tokens + section_tokens <= exploration_token_budget {
-                            shredded_files_summary.push_str(&section);
-                            current_tokens += section_tokens;
-                        }
-                    }
-                }
-            }
-        } else {
-            // TARGETED FILE EDIT MODE:
-            // Explicit target files (in likely_files, capped at 3) receive full content.
-            // All other project files MUST be shredded (function bodies stripped).
-            shredded_files_summary.push_str("=== WORKSPACE STRUCTURAL SUMMARY ===\n");
-            let mut target_files_count = 0;
-            let mut current_tokens = estimate_tokens(&shredded_files_summary);
-            let is_groq = self.quota_tracker.is_some();
-            let edit_token_budget: usize = if is_groq { 1_200 } else { 4_500 };
-            let max_target_tokens: usize = if is_groq { 800 } else { 3_500 };
-
-            for fpath in &files_to_scan {
-                let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
-                let rel_str = rel_path.to_string_lossy().replace('\\', "/");
-                let rel_str_lower = rel_str.to_lowercase();
-                let file_base = Path::new(&rel_str_lower)
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or(&rel_str_lower);
-
-                let is_explicit_target = likely_files_set.contains(&rel_str_lower)
-                    || likely_files_set.contains(file_base)
-                    || likely_files_set.iter().any(|lf| lf == file_base || rel_str_lower.ends_with(lf) || lf.ends_with(file_base));
-
-                if is_explicit_target && target_files_count < 3 && current_tokens < edit_token_budget {
-                    // Send content for explicit targets, trimmed if huge on Groq
-                    if let Ok(full_code) = std::fs::read_to_string(fpath) {
-                        target_files_count += 1;
-                        let code_tokens = estimate_tokens(&full_code);
-                        let content_to_use = if is_groq && code_tokens > max_target_tokens {
-                            let chars_limit = max_target_tokens * 3;
-                            let safe_len = chars_limit.min(full_code.len());
-                            format!("{}\n... [Remainder of target file omitted to stay within Groq TPM limit] ...", &full_code[..safe_len])
-                        } else {
-                            full_code
-                        };
-                        let section = format!("\n--- Target File (Content): {rel_str} ---\n{content_to_use}\n");
-                        let sec_toks = estimate_tokens(&section);
-                        shredded_files_summary.push_str(&section);
-                        current_tokens += sec_toks;
-
-                        // Emit tool read activity gradually to frontend
-                        let _ = app_handle.emit(
-                            "worker:message",
-                            &WorkerEventPayload {
-                                session_id: session_id.to_string(),
-                                event_type: "message.part.updated".into(),
-                                content: serde_json::json!({
-                                    "type": "message.part.updated",
-                                    "properties": {
-                                        "part": {
-                                            "type": "tool",
-                                            "tool": "read",
-                                            "callID": format!("read_{}", rel_str),
-                                            "state": { "input": { "filePath": rel_str } }
-                                        }
-                                    }
-                                }).to_string(),
-                                timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
-                            },
-                        );
-                    }
-                } else {
-                    // Non-target files MUST be shredded with function bodies stripped
-                    if current_tokens < edit_token_budget {
-                        if let Ok(code) = std::fs::read_to_string(fpath) {
-                            let outline = shred_file_context(fpath, &code);
-                            let section = format!("\n--- Context Outline (Shredded): {rel_str} ---\n{outline}\n");
-                            let section_tokens = estimate_tokens(&section);
-                            if current_tokens + section_tokens <= edit_token_budget {
-                                shredded_files_summary.push_str(&section);
-                                current_tokens += section_tokens;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. System Prompt Supporting SEARCH/REPLACE Diffs, Files/Folders Operations, and Terminal Commands
+        // System Prompt Supporting SEARCH/REPLACE Diffs, Files/Folders Operations, and Terminal Commands
         let system_prompt = r#"You are an elite Senior Staff Autonomous Software Engineer and UX/UI Specialist executing code changes, directory operations, and terminal commands in an isolated Git worktree.
 
 CORE PRINCIPLES & STANDARDS:
@@ -451,7 +583,7 @@ CORE PRINCIPLES & STANDARDS:
 
 4. DIFFERENTIAL SURGICAL DIFF MANDATE:
    - When modifying files that already exist in the workspace, use surgical SEARCH/REPLACE diff blocks.
-   - Do NOT rewrite entire files when only adding or changing a specific function, component, or style rule. This conserves the 4,096 token budget and prevents accidental truncation.
+   - Do NOT rewrite entire files when only adding or changing a specific function, component, or style rule. This conserves the token budget and prevents accidental truncation.
    - For creating new files or rewriting full files, ALWAYS use CREATE blocks or Markdown code blocks. Never use SEARCH/REPLACE on new or empty files.
 
 DIFF FORMAT & OPERATIONS:
@@ -499,94 +631,184 @@ or: COMMAND: npm test
 
 8. Provide a concise explanation of the architectural approach before emitting diff blocks."#;
 
-        // Build User Prompt
-        let mut user_prompt = format!(
-            "Execute the following implementation plan with the highest software engineering quality and zero stubs:\n\nTask: {plan_summary}\n\nSteps:\n"
-        );
-        for (i, step) in steps.iter().enumerate() {
-            user_prompt.push_str(&format!(
-                "{}. Goal: {}\n   Instructions:\n",
-                i + 1, step.goal
-            ));
-            for inst in &step.instructions {
-                user_prompt.push_str(&format!("      - {}\n", inst));
-            }
-            if !step.likely_files.is_empty() {
-                user_prompt.push_str(&format!("   Target Files: {}\n", step.likely_files.join(", ")));
-            }
-            if !step.acceptance_checks.is_empty() {
-                user_prompt.push_str(&format!("   Acceptance Criteria: {}\n", step.acceptance_checks.join("; ")));
-            }
-        }
-
         let detected_stack = zencode_core::detect_stack_from_dir(worktree_path);
         let workspace_skills = zencode_core::discover_workspace_skills(worktree_path);
-        if detected_stack != zencode_core::ProjectStack::Generic || !workspace_skills.is_empty() {
-            user_prompt.push_str("\n\n");
-            user_prompt.push_str(&zencode_core::format_dynamic_stack_context(&detected_stack, &workspace_skills));
-        }
-
-        if let Some(preset) = zencode_core::detect_design_system_intent(plan_summary) {
-            user_prompt.push_str("\n\n");
-            user_prompt.push_str(&zencode_core::format_design_system_guideline(preset));
-            user_prompt.push_str("\n\n");
-            user_prompt.push_str(zencode_core::anti_pattern_shield());
-            user_prompt.push_str("\n\n");
-            user_prompt.push_str(zencode_core::reflection_checklist());
-        }
-
-        user_prompt.push_str(&format!("\n\n{shredded_files_summary}"));
-
-        // 4. Model Selection & Request Loop
-        let mut attempts = 0;
-        let mut chosen_model = if let Some(ref tracker_arc) = self.quota_tracker {
-            let mut tracker = tracker_arc.lock().await;
-            tracker.select_groq_model(preferred_model)?
-        } else if self.endpoint_url.contains("openrouter.ai") {
-            preferred_model.unwrap_or("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free").to_string()
+        let stack_context = if detected_stack != zencode_core::ProjectStack::Generic || !workspace_skills.is_empty() {
+            format!("\n\n{}", zencode_core::format_dynamic_stack_context(&detected_stack, &workspace_skills))
         } else {
-            preferred_model.unwrap_or("qwen2.5-coder:7b").to_string()
+            String::new()
         };
 
-        // For Groq Cloud: ensure prompt_tokens fits comfortably within Groq TPM budget
+        let design_context = if let Some(preset) = zencode_core::detect_design_system_intent(plan_summary) {
+            format!(
+                "\n\n{}\n\n{}\n\n{}",
+                zencode_core::format_design_system_guideline(preset),
+                zencode_core::anti_pattern_shield(),
+                zencode_core::reflection_checklist()
+            )
+        } else {
+            String::new()
+        };
+
         let is_groq = self.quota_tracker.is_some();
-        if is_groq {
-            let p_tokens = estimate_tokens(system_prompt) + estimate_tokens(&user_prompt);
-            if p_tokens > 3_500 {
-                println!("[Groq Worker Payload] Prompt tokens ({p_tokens}) high. Trimming non-essential context to fit Groq 8K TPM...");
-                if let Some(pos) = user_prompt.rfind("\n--- Context Outline (Shredded):") {
-                    user_prompt.truncate(pos);
-                    user_prompt.push_str("\n[Additional non-target file outlines omitted to stay strictly within Groq TPM limit]");
+        let mut applied_diffs: Vec<crate::worker::diff::AppliedDiffResult> = Vec::new();
+        let mut combined_responses = String::new();
+
+        if steps.is_empty() {
+            // Single-step fallback for generic tasks without decomposed plan
+            let likely_files_set = std::collections::HashSet::new();
+            let summary_ctx = build_worktree_summary(worktree_path, &likely_files_set, is_groq, Some((&app_handle, session_id)));
+            let user_prompt = format!(
+                "Execute the following task with the highest software engineering quality and zero stubs:\n\nTask: {plan_summary}{stack_context}{design_context}\n\n{summary_ctx}"
+            );
+
+            let resp = self.send_llm_request(
+                &client,
+                &app_handle,
+                session_id,
+                system_prompt,
+                &user_prompt,
+                preferred_model,
+            ).await?;
+
+            let diffs = apply_diff_blocks(worktree_path, &resp, None)?;
+            for diff in &diffs {
+                let _ = app_handle.emit(
+                    "worker:message",
+                    &WorkerEventPayload {
+                        session_id: session_id.to_string(),
+                        event_type: "message.part.updated".into(),
+                        content: serde_json::json!({
+                            "type": "message.part.updated",
+                            "properties": {
+                                "part": {
+                                    "type": "tool",
+                                    "tool": "edit",
+                                    "callID": format!("edit_{}", diff.file_path),
+                                    "state": {
+                                        "input": { "filePath": diff.file_path },
+                                        "additions": diff.additions,
+                                        "deletions": diff.deletions
+                                    }
+                                }
+                            }
+                        }).to_string(),
+                        timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                    },
+                );
+            }
+            applied_diffs.extend(diffs);
+            combined_responses.push_str(&resp);
+        } else {
+            // SEQUENTIAL MULTI-STEP EXECUTION:
+            // Each step executes in its own dedicated turn with full token budget, guaranteeing complete files
+            // and preventing multi-file single-turn token truncations.
+            for (step_idx, step) in steps.iter().enumerate() {
+                let mut step_likely_set = std::collections::HashSet::new();
+                for lf in &step.likely_files {
+                    let clean = lf.trim().trim_matches('`').trim_start_matches("./").replace('\\', "/");
+                    step_likely_set.insert(clean.to_lowercase());
+                }
+
+                let _ = app_handle.emit(
+                    "worker:message",
+                    &WorkerEventPayload {
+                        session_id: session_id.to_string(),
+                        event_type: "message.part.updated".into(),
+                        content: serde_json::json!({
+                            "type": "message.part.updated",
+                            "properties": {
+                                "part": {
+                                    "type": "reasoning",
+                                    "text": format!("Executing Step {} of {}: {}", step_idx + 1, steps.len(), step.goal)
+                                }
+                            }
+                        }).to_string(),
+                        timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                    },
+                );
+
+                let summary_ctx = build_worktree_summary(worktree_path, &step_likely_set, is_groq, Some((&app_handle, session_id)));
+                let mut step_prompt = format!(
+                    "You are executing Step {} of {} for task: {}\nGoal: {}\n\nInstructions:\n",
+                    step_idx + 1, steps.len(), plan_summary, step.goal
+                );
+                for inst in &step.instructions {
+                    step_prompt.push_str(&format!("- {}\n", inst));
+                }
+                if !step.likely_files.is_empty() {
+                    step_prompt.push_str(&format!("\nTarget Files: {}\n", step.likely_files.join(", ")));
+                }
+                if !step.acceptance_checks.is_empty() {
+                    step_prompt.push_str(&format!("Acceptance Checks: {}\n", step.acceptance_checks.join("; ")));
+                }
+                step_prompt.push_str(&stack_context);
+                step_prompt.push_str(&design_context);
+                step_prompt.push_str("\n\n");
+                step_prompt.push_str(&summary_ctx);
+
+                let resp = self.send_llm_request(
+                    &client,
+                    &app_handle,
+                    session_id,
+                    system_prompt,
+                    &step_prompt,
+                    preferred_model,
+                ).await?;
+
+                let fallback = step.likely_files.first().map(|s| s.as_str());
+                let diffs = apply_diff_blocks(worktree_path, &resp, fallback)?;
+                for diff in &diffs {
+                    let _ = app_handle.emit(
+                        "worker:message",
+                        &WorkerEventPayload {
+                            session_id: session_id.to_string(),
+                            event_type: "message.part.updated".into(),
+                            content: serde_json::json!({
+                                "type": "message.part.updated",
+                                "properties": {
+                                    "part": {
+                                        "type": "tool",
+                                        "tool": "edit",
+                                        "callID": format!("edit_{}_{}", step_idx, diff.file_path),
+                                        "state": {
+                                            "input": { "filePath": diff.file_path.clone() },
+                                            "additions": diff.additions,
+                                            "deletions": diff.deletions
+                                        }
+                                    }
+                                }
+                            }).to_string(),
+                            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                        },
+                    );
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                }
+                applied_diffs.extend(diffs);
+                combined_responses.push_str(&resp);
+                combined_responses.push_str("\n\n");
+            }
+        }
+
+        // AUTONOMOUS MISSING & INCOMPLETE TARGET RECOVERY PASS:
+        // Detect if any target file declared in plan steps was omitted or truncated, and immediately recover it.
+        let mut missing_targets = Vec::new();
+        for step in steps {
+            for lf in &step.likely_files {
+                let clean = lf.trim().trim_matches('`').trim_start_matches("./").replace('\\', "/");
+                if clean.is_empty() { continue; }
+                let target_path = worktree_path.join(&clean);
+                if !target_path.exists() {
+                    missing_targets.push((clean, step.goal.clone(), "missing"));
+                } else if let Ok(meta) = std::fs::metadata(&target_path) {
+                    if meta.len() < 80 {
+                        missing_targets.push((clean, step.goal.clone(), "incomplete/truncated"));
+                    }
                 }
             }
         }
 
-        let prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(&user_prompt);
-        let dynamic_max_tokens = if is_groq {
-            let available_headroom = 7_500usize.saturating_sub(prompt_tokens);
-            available_headroom.clamp(1_024, 4_096) as u32
-        } else {
-            4_096
-        };
-        println!("[Groq Worker Payload] Estimated prompt tokens: {prompt_tokens}, Dynamic max_tokens: {dynamic_max_tokens}, Target Model: {chosen_model}");
-
-        let mut response_text = String::new();
-        let max_attempts = if self.quota_tracker.is_some() { 3 } else { 1 };
-
-        while attempts < max_attempts {
-            attempts += 1;
-
-            let is_ollama = self.api_key == "ollama";
-            let is_openrouter = self.endpoint_url.contains("openrouter.ai");
-            let provider_label = if is_ollama {
-                "Ollama (Local)"
-            } else if is_openrouter {
-                "OpenRouter (Cloud Free)"
-            } else {
-                "Groq (Cloud)"
-            };
-
-            // Emit reasoning thought and active generation activity
+        for (missing_file, step_goal, reason) in missing_targets {
             let _ = app_handle.emit(
                 "worker:message",
                 &WorkerEventPayload {
@@ -597,7 +819,7 @@ or: COMMAND: npm test
                         "properties": {
                             "part": {
                                 "type": "reasoning",
-                                "text": format!("Sending prompt to {provider_label} model: {chosen_model}")
+                                "text": format!("Autonomous Recovery: target file '{}' was {} in worktree. Triggering dedicated generation pass...", missing_file, reason)
                             }
                         }
                     }).to_string(),
@@ -605,270 +827,57 @@ or: COMMAND: npm test
                 },
             );
 
-            let _ = app_handle.emit(
-                "worker:message",
-                &WorkerEventPayload {
-                    session_id: session_id.to_string(),
-                    event_type: "message.part.updated".into(),
-                    content: serde_json::json!({
-                        "type": "message.part.updated",
-                        "properties": {
-                            "part": {
-                                "type": "tool",
-                                "tool": "write",
-                                "callID": format!("call_write_{}_{attempts}", session_id),
-                                "state": { "input": { "filePath": format!("{chosen_model}") } }
-                            }
-                        }
-                    }).to_string(),
-                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
-                },
+            let recovery_prompt = format!(
+                "CRITICAL COMPLETION MANDATE:
+The planned target file '{}' for step goal '{}' was {}.
+The file MUST be created with 100% complete, fully implemented production-ready code. Zero stubs, zero placeholders.
+
+Output the entire complete file content using:
+<<<<<<< CREATE: {}
+[full complete code]
+>>>>>>>",
+                missing_file, step_goal, reason, missing_file
             );
 
-            let body = serde_json::json!({
-                "model": chosen_model,
-                "messages": [
-                    { "role": "system", "content": system_prompt },
-                    { "role": "user", "content": user_prompt }
-                ],
-                "temperature": 0.2,
-                "max_tokens": dynamic_max_tokens
-            });
-
-            let mut req_builder = client
-                .post(&self.endpoint_url)
-                .header("Content-Type", "application/json");
-
-            if self.endpoint_url.contains("openrouter.ai") {
-                req_builder = req_builder
-                    .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
-                    .header("X-Title", "ZenCode");
-            }
-
-            if !self.api_key.is_empty() && self.api_key != "ollama" {
-                req_builder = req_builder.header("Authorization", format!("Bearer {}", self.api_key));
-            }
-
-            let req_resp = req_builder
-                .json(&body)
-                .send()
-                .await;
-
-            match req_resp {
-                Ok(resp) => {
-                    let status = resp.status();
-                    if let Some(ref tracker_arc) = self.quota_tracker {
-                        // Extract real ground-truth rate-limit headers from Groq response
-                        let groq_headers = crate::planner::quota::parse_groq_headers(resp.headers());
-                        let mut tracker = tracker_arc.lock().await;
-                        tracker.update_groq_server_headers(&chosen_model, &groq_headers);
-                        let event = tracker.to_quota_update_event(&chosen_model);
-                        let _ = app_handle.emit("planner:quota_update", &event);
-                    }
-
-                    if status.is_success() {
-                        let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-                        if let Some(ref tracker_arc) = self.quota_tracker {
-                            let tokens = json
-                                .get("usage")
-                                .and_then(|u| u.get("total_tokens"))
-                                .and_then(|t| t.as_u64())
-                                .unwrap_or(1000) as u32;
-
-                            let mut tracker = tracker_arc.lock().await;
-                            tracker.record_actual_usage(&chosen_model, tokens);
-                            let event = tracker.to_quota_update_event(&chosen_model);
-                            let _ = app_handle.emit("planner:quota_update", &event);
-                        }
-
-                        let choice = json
-                            .get("choices")
-                            .and_then(|c| c.as_array())
-                            .and_then(|arr| arr.first());
-
-                        response_text = choice
-                            .and_then(|c| c.get("message"))
-                            .and_then(|m| m.get("content"))
-                            .and_then(|c| c.as_str())
-                            .unwrap_or_default()
-                            .to_string();
-
-                        // Fallback extraction for reasoning models / alternative JSON shapes
-                        if response_text.is_empty() {
-                            if let Some(c) = choice {
-                                if let Some(text) = c.get("text").and_then(|t| t.as_str()) {
-                                    response_text = text.to_string();
-                                } else if let Some(m) = c.get("message") {
-                                    // Some reasoning models return thinking or delta fields
-                                    if let Some(reasoning) = m.get("reasoning_content").or_else(|| m.get("reasoning")).and_then(|r| r.as_str()) {
-                                        response_text = reasoning.to_string();
-                                    }
-                                }
-                            }
-                        }
-
-                        let finish_reason = choice
-                            .and_then(|c| c.get("finish_reason"))
-                            .and_then(|f| f.as_str())
-                            .unwrap_or("stop");
-
-                        if response_text.is_empty() {
-                            println!("[Worker Warning] {provider_label} model {chosen_model} returned empty content. Full raw response: {json}");
-                            return Err(format!("{provider_label} model {chosen_model} returned an empty response. Raw payload: {json}"));
-                        }
-
-                        // Auto-continuation if response was cut off by token limit
-                        if finish_reason == "length" && !response_text.is_empty() {
-                            let _ = app_handle.emit(
-                                "worker:message",
-                                &WorkerEventPayload {
-                                    session_id: session_id.to_string(),
-                                    event_type: "message.part.updated".into(),
-                                    content: serde_json::json!({
-                                        "type": "message.part.updated",
-                                        "properties": {
-                                            "part": {
-                                                "type": "reasoning",
-                                                "text": "Output token limit reached. Automatically retrieving remaining code continuation..."
+            if let Ok(rec_resp) = self.send_llm_request(
+                &client,
+                &app_handle,
+                session_id,
+                system_prompt,
+                &recovery_prompt,
+                preferred_model,
+            ).await {
+                if let Ok(rec_diffs) = apply_diff_blocks(worktree_path, &rec_resp, Some(&missing_file)) {
+                    for diff in &rec_diffs {
+                        let _ = app_handle.emit(
+                            "worker:message",
+                            &WorkerEventPayload {
+                                session_id: session_id.to_string(),
+                                event_type: "message.part.updated".into(),
+                                content: serde_json::json!({
+                                    "type": "message.part.updated",
+                                    "properties": {
+                                        "part": {
+                                            "type": "tool",
+                                            "tool": "edit",
+                                            "callID": format!("recovery_edit_{}", diff.file_path),
+                                            "state": {
+                                                "input": { "filePath": diff.file_path.clone() },
+                                                "additions": diff.additions,
+                                                "deletions": diff.deletions
                                             }
                                         }
-                                    }).to_string(),
-                                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
-                                },
-                            );
-
-                            let cont_prompt = "You reached the maximum output token limit. Continue generating the exact remaining diff/file code without repeating what you already wrote:";
-                            let cont_body = serde_json::json!({
-                                "model": chosen_model,
-                                "messages": [
-                                    { "role": "system", "content": system_prompt },
-                                    { "role": "user", "content": user_prompt },
-                                    { "role": "assistant", "content": response_text },
-                                    { "role": "user", "content": cont_prompt }
-                                ],
-                                "temperature": 0.2,
-                                "max_tokens": dynamic_max_tokens
-                            });
-
-                            let mut cont_builder = client
-                                .post(&self.endpoint_url)
-                                .header("Content-Type", "application/json");
-
-                            if self.endpoint_url.contains("openrouter.ai") {
-                                cont_builder = cont_builder
-                                    .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
-                                    .header("X-Title", "ZenCode");
-                            }
-
-                            if !self.api_key.is_empty() && self.api_key != "ollama" {
-                                cont_builder = cont_builder.header("Authorization", format!("Bearer {}", self.api_key));
-                            }
-
-                            if let Ok(cont_resp) = cont_builder.json(&cont_body).send().await {
-                                if cont_resp.status().is_success() {
-                                    if let Ok(cont_json) = cont_resp.json::<serde_json::Value>().await {
-                                        let continuation_chunk = cont_json
-                                            .get("choices")
-                                            .and_then(|c| c.as_array())
-                                            .and_then(|arr| arr.first())
-                                            .and_then(|c| c.get("message"))
-                                            .and_then(|m| m.get("content"))
-                                            .and_then(|c| c.as_str())
-                                            .unwrap_or_default();
-                                        if !continuation_chunk.is_empty() {
-                                            response_text.push('\n');
-                                            response_text.push_str(continuation_chunk);
-                                        }
                                     }
-                                }
-                            }
-                        }
-
-                        break;
-                    } else if status.as_u16() == 429 || status.as_u16() == 413 {
-                        let err_body = resp.text().await.unwrap_or_default();
-                        eprintln!("Groq returned rate/size error {status}: {err_body}");
-                        if let Some(ref tracker_arc) = self.quota_tracker {
-                            // Rate limit hit: ModelQuotaTracker already set cooldown from retry-after header
-                            let next_model = {
-                                let mut tracker = tracker_arc.lock().await;
-                                tracker.select_groq_model(None)
-                            };
-                            match next_model {
-                                Ok(m) if m != chosen_model => {
-                                    println!("Groq rate limit on {chosen_model}. Rotating to Groq model {m}...");
-                                    let _ = app_handle.emit(
-                                        "worker:message",
-                                        &WorkerEventPayload {
-                                            session_id: session_id.to_string(),
-                                            event_type: "message.part.updated".into(),
-                                            content: serde_json::json!({
-                                                "type": "message.part.updated",
-                                                "properties": {
-                                                    "part": {
-                                                        "type": "reasoning",
-                                                        "text": format!("Groq model {chosen_model} hit rate/capacity limits ({status}). Rotating to Groq model {m}...")
-                                                    }
-                                                }
-                                            }).to_string(),
-                                            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
-                                        },
-                                    );
-                                    chosen_model = m;
-                                    continue;
-                                }
-                                _ => {
-                                    return Err(format!("Groq cloud rate limit reached on {chosen_model} ({status}): {err_body}. All Groq models are currently at capacity."));
-                                }
-                            }
-                        } else {
-                            return Err(format!("Local Ollama model returned {status}: {err_body}"));
-                        }
-                    } else {
-                        let err_body = resp.text().await.unwrap_or_default();
-                        return Err(format!("{provider_label} API request failed ({status}): {err_body}"));
+                                }).to_string(),
+                                timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                            },
+                        );
                     }
-                }
-                Err(e) => {
-                    return Err(format!("Network failure calling {provider_label} API: {e}"));
+                    applied_diffs.extend(rec_diffs);
+                    combined_responses.push_str(&rec_resp);
+                    combined_responses.push_str("\n\n");
                 }
             }
-        }
-
-        if response_text.is_empty() {
-            return Err("Worker failed to generate a response.".to_string());
-        }
-
-        // 5. Parse and Apply Diff Blocks to Worktree
-        let fallback_file = steps.first().and_then(|s| s.likely_files.first()).map(|s| s.as_str());
-        let mut applied_diffs = apply_diff_blocks(worktree_path, &response_text, fallback_file)?;
-
-        // Emit edit activity events for UI matching Image 5
-        for diff in &applied_diffs {
-            let _ = app_handle.emit(
-                "worker:message",
-                &WorkerEventPayload {
-                    session_id: session_id.to_string(),
-                    event_type: "message.part.updated".into(),
-                    content: serde_json::json!({
-                        "type": "message.part.updated",
-                        "properties": {
-                            "part": {
-                                "type": "tool",
-                                "tool": "edit",
-                                "callID": format!("edit_{}", diff.file_path),
-                                "state": {
-                                    "input": { "filePath": diff.file_path },
-                                    "additions": diff.additions,
-                                    "deletions": diff.deletions
-                                }
-                            }
-                        }
-                    }).to_string(),
-                    timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
-                },
-            );
-            tokio::time::sleep(Duration::from_millis(80)).await;
         }
 
         // 5b. Local Code Formatter & Clean Whitespace Pass
@@ -950,92 +959,53 @@ or: COMMAND: npm test
                     compiler_errors.trim()
                 );
 
-                let repair_tokens = estimate_tokens(system_prompt) + estimate_tokens(&user_prompt) + estimate_tokens(&response_text) + estimate_tokens(&repair_prompt);
-                let repair_max_tokens = if self.quota_tracker.is_some() {
-                    let headroom = 7_500usize.saturating_sub(repair_tokens);
-                    headroom.clamp(512, 4_096) as u32
-                } else {
-                    4_096
-                };
+                let fallback_file = steps.first().and_then(|s| s.likely_files.first()).map(|s| s.as_str());
+                if let Ok(repair_response) = self.send_llm_request(
+                    &client,
+                    &app_handle,
+                    session_id,
+                    system_prompt,
+                    &repair_prompt,
+                    preferred_model,
+                ).await {
+                    if !repair_response.is_empty() {
+                        if let Ok(repair_diffs) = apply_diff_blocks(worktree_path, &repair_response, fallback_file) {
+                            if !repair_diffs.is_empty() {
+                                format_and_clean_worktree_files(worktree_path, &repair_diffs);
+                                applied_diffs.extend(repair_diffs.clone());
 
-                let repair_body = serde_json::json!({
-                    "model": chosen_model,
-                    "messages": [
-                        { "role": "system", "content": system_prompt },
-                        { "role": "user", "content": user_prompt },
-                        { "role": "assistant", "content": response_text },
-                        { "role": "user", "content": repair_prompt }
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": repair_max_tokens
-                });
+                                // Re-verify after repair
+                                let post_repair_check = run_local_compiler_check(
+                                    worktree_path,
+                                    session_id,
+                                    &execution_service,
+                                    &app_handle,
+                                    &repair_diffs,
+                                ).await;
 
-                let mut req_builder = client
-                    .post(&self.endpoint_url)
-                    .header("Content-Type", "application/json");
+                                let status_msg = match post_repair_check {
+                                    Ok(None) => "Autonomous self-correction succeeded: All compiler checks passed (exit code 0).".to_string(),
+                                    Ok(Some(remaining)) => format!("Autonomous self-correction completed. Remaining compiler notice: {}", remaining.lines().next().unwrap_or("")),
+                                    Err(_) => "Autonomous self-correction completed.".to_string(),
+                                };
 
-                if self.endpoint_url.contains("openrouter.ai") {
-                    req_builder = req_builder
-                        .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
-                        .header("X-Title", "ZenCode");
-                }
-
-                if !self.api_key.is_empty() && self.api_key != "ollama" {
-                    req_builder = req_builder.header("Authorization", format!("Bearer {}", self.api_key));
-                }
-
-                if let Ok(resp) = req_builder.json(&repair_body).send().await {
-                    if resp.status().is_success() {
-                        if let Ok(json) = resp.json::<serde_json::Value>().await {
-                            let repair_response = json
-                                .get("choices")
-                                .and_then(|c| c.as_array())
-                                .and_then(|arr| arr.first())
-                                .and_then(|c| c.get("message"))
-                                .and_then(|m| m.get("content"))
-                                .and_then(|c| c.as_str())
-                                .unwrap_or_default();
-
-                            if !repair_response.is_empty() {
-                                if let Ok(repair_diffs) = apply_diff_blocks(worktree_path, repair_response, fallback_file) {
-                                    if !repair_diffs.is_empty() {
-                                        format_and_clean_worktree_files(worktree_path, &repair_diffs);
-                                        applied_diffs.extend(repair_diffs.clone());
-
-                                        // Re-verify after repair
-                                        let post_repair_check = run_local_compiler_check(
-                                            worktree_path,
-                                            session_id,
-                                            &execution_service,
-                                            &app_handle,
-                                            &repair_diffs,
-                                        ).await;
-
-                                        let status_msg = match post_repair_check {
-                                            Ok(None) => "Autonomous self-correction succeeded: All compiler checks passed (exit code 0).".to_string(),
-                                            Ok(Some(remaining)) => format!("Autonomous self-correction completed. Remaining compiler notice: {}", remaining.lines().next().unwrap_or("")),
-                                            Err(_) => "Autonomous self-correction completed.".to_string(),
-                                        };
-
-                                        let _ = app_handle.emit(
-                                            "worker:message",
-                                            &WorkerEventPayload {
-                                                session_id: session_id.to_string(),
-                                                event_type: "message.part.updated".into(),
-                                                content: serde_json::json!({
-                                                    "type": "message.part.updated",
-                                                    "properties": {
-                                                        "part": {
-                                                            "type": "reasoning",
-                                                            "text": status_msg
-                                                        }
-                                                    }
-                                                }).to_string(),
-                                                timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
-                                            },
-                                        );
-                                    }
-                                }
+                                let _ = app_handle.emit(
+                                    "worker:message",
+                                    &WorkerEventPayload {
+                                        session_id: session_id.to_string(),
+                                        event_type: "message.part.updated".into(),
+                                        content: serde_json::json!({
+                                            "type": "message.part.updated",
+                                            "properties": {
+                                                "part": {
+                                                    "type": "reasoning",
+                                                    "text": status_msg
+                                                }
+                                            }
+                                        }).to_string(),
+                                        timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                                    },
+                                );
                             }
                         }
                     }
@@ -1149,7 +1119,7 @@ or: COMMAND: npm test
         }
 
         // 6. Extract and Execute Terminal Commands (Dependencies, Builds, Tests)
-        let commands_to_run = extract_commands_for_session(&response_text, steps);
+        let commands_to_run = extract_commands_for_session(&combined_responses, steps);
         let mut executed_commands = Vec::new();
 
         for cmd_line in commands_to_run {
@@ -1905,6 +1875,153 @@ fn collect_worktree_files(
             acc.push(path);
         }
     }
+}
+
+pub fn build_worktree_summary(
+    worktree_path: &Path,
+    likely_files_set: &std::collections::HashSet<String>,
+    is_groq: bool,
+    app_handle: Option<(&AppHandle, &str)>,
+) -> String {
+    let mut files_to_scan = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(worktree_path) {
+        collect_worktree_files(worktree_path, entries, &mut files_to_scan, 0);
+    }
+
+    let is_exploration_task = likely_files_set.is_empty() || likely_files_set.len() > 6;
+
+    if !is_exploration_task {
+        files_to_scan.sort_by(|a, b| {
+            let a_rel = a.strip_prefix(worktree_path).unwrap_or(a).to_string_lossy().to_lowercase().replace('\\', "/");
+            let b_rel = b.strip_prefix(worktree_path).unwrap_or(b).to_string_lossy().to_lowercase().replace('\\', "/");
+            let a_base = Path::new(&a_rel).file_name().and_then(|f| f.to_str()).unwrap_or(&a_rel);
+            let b_base = Path::new(&b_rel).file_name().and_then(|f| f.to_str()).unwrap_or(&b_rel);
+            let a_is_target = likely_files_set.iter().any(|lf| lf == &a_rel || lf == a_base || a_rel.ends_with(lf));
+            let b_is_target = likely_files_set.iter().any(|lf| lf == &b_rel || lf == b_base || b_rel.ends_with(lf));
+            b_is_target.cmp(&a_is_target).then_with(|| a.cmp(b))
+        });
+    } else {
+        files_to_scan.sort();
+    }
+
+    let mut shredded_files_summary = String::new();
+
+    if is_exploration_task {
+        shredded_files_summary.push_str("=== WORKSPACE FILE TREE ===\n");
+        for fpath in &files_to_scan {
+            let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
+            shredded_files_summary.push_str(&format!("- {}\n", rel_path.to_string_lossy().replace('\\', "/")));
+        }
+        shredded_files_summary.push_str("\n=== KEY ENTRYPOINTS & MODULE OUTLINES (AST SIGNATURES) ===\n");
+
+        let mut current_tokens = estimate_tokens(&shredded_files_summary);
+        let exploration_token_budget: usize = if is_groq { 1_800 } else { 3_500 };
+
+        for fpath in &files_to_scan {
+            if current_tokens >= exploration_token_budget {
+                shredded_files_summary.push_str("\n... [Additional project files summarized in file tree above to stay within safe token limits] ...\n");
+                break;
+            }
+            let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
+            let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+            let rel_str_lower = rel_str.to_lowercase();
+
+            let is_entrypoint = rel_str_lower.contains("main")
+                || rel_str_lower.contains("index")
+                || rel_str_lower.contains("app.")
+                || rel_str_lower.contains("lib.")
+                || rel_str_lower.ends_with("cargo.toml")
+                || rel_str_lower.ends_with("package.json")
+                || rel_str_lower.ends_with("requirements.txt")
+                || rel_str_lower.ends_with("pyproject.toml");
+
+            if is_entrypoint || files_to_scan.len() <= 15 {
+                if let Ok(code) = std::fs::read_to_string(fpath) {
+                    let outline = shred_file_context(fpath, &code);
+                    let section = format!("\n--- Outline: {rel_str} ---\n{outline}\n");
+                    let section_tokens = estimate_tokens(&section);
+                    if current_tokens + section_tokens <= exploration_token_budget {
+                        shredded_files_summary.push_str(&section);
+                        current_tokens += section_tokens;
+                    }
+                }
+            }
+        }
+    } else {
+        shredded_files_summary.push_str("=== WORKSPACE STRUCTURAL SUMMARY ===\n");
+        let mut target_files_count = 0;
+        let mut current_tokens = estimate_tokens(&shredded_files_summary);
+        let edit_token_budget: usize = if is_groq { 1_800 } else { 4_500 };
+        let max_target_tokens: usize = if is_groq { 1_200 } else { 3_500 };
+
+        for fpath in &files_to_scan {
+            let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
+            let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+            let rel_str_lower = rel_str.to_lowercase();
+            let file_base = Path::new(&rel_str_lower)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(&rel_str_lower);
+
+            let is_explicit_target = likely_files_set.contains(&rel_str_lower)
+                || likely_files_set.contains(file_base)
+                || likely_files_set.iter().any(|lf| lf == file_base || rel_str_lower.ends_with(lf) || lf.ends_with(file_base));
+
+            if (is_explicit_target || files_to_scan.len() <= 5) && target_files_count < 3 && current_tokens < edit_token_budget {
+                if let Ok(full_code) = std::fs::read_to_string(fpath) {
+                    target_files_count += 1;
+                    let code_tokens = estimate_tokens(&full_code);
+                    let content_to_use = if is_groq && code_tokens > max_target_tokens {
+                        let chars_limit = max_target_tokens * 3;
+                        let safe_len = chars_limit.min(full_code.len());
+                        format!("{}\n... [Remainder of target file omitted to stay within Groq TPM limit] ...", &full_code[..safe_len])
+                    } else {
+                        full_code
+                    };
+                    let section = format!("\n--- Existing File (Content): {rel_str} ---\n{content_to_use}\n");
+                    let sec_toks = estimate_tokens(&section);
+                    shredded_files_summary.push_str(&section);
+                    current_tokens += sec_toks;
+
+                    if let Some((handle, ses_id)) = app_handle {
+                        let _ = handle.emit(
+                            "worker:message",
+                            &WorkerEventPayload {
+                                session_id: ses_id.to_string(),
+                                event_type: "message.part.updated".into(),
+                                content: serde_json::json!({
+                                    "type": "message.part.updated",
+                                    "properties": {
+                                        "part": {
+                                            "type": "tool",
+                                            "tool": "read",
+                                            "callID": format!("read_{}", rel_str),
+                                            "state": { "input": { "filePath": rel_str } }
+                                        }
+                                    }
+                                }).to_string(),
+                                timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                            },
+                        );
+                    }
+                }
+            } else {
+                if current_tokens < edit_token_budget {
+                    if let Ok(code) = std::fs::read_to_string(fpath) {
+                        let outline = shred_file_context(fpath, &code);
+                        let section = format!("\n--- Context Outline (Shredded): {rel_str} ---\n{outline}\n");
+                        let section_tokens = estimate_tokens(&section);
+                        if current_tokens + section_tokens <= edit_token_budget {
+                            shredded_files_summary.push_str(&section);
+                            current_tokens += section_tokens;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    shredded_files_summary
 }
 
 #[cfg(test)]
