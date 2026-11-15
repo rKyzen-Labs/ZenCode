@@ -253,7 +253,7 @@ impl GroqWorkerClient {
             4_096
         };
 
-        let max_attempts = if is_groq { 3 } else { 1 };
+        let max_attempts = if is_groq { 5 } else { 2 };
         let mut response_text = String::new();
 
         while attempts < max_attempts {
@@ -482,7 +482,32 @@ impl GroqWorkerClient {
                                     continue;
                                 }
                                 _ => {
-                                    return Err(format!("Groq cloud rate limit reached on {chosen_model} ({status}): {err_body}. All Groq models are currently at capacity."));
+                                    let wait_secs = if let Some(idx) = err_body.find("Please try again in ") {
+                                        let rest = &err_body[idx + "Please try again in ".len()..];
+                                        if let Some(end_idx) = rest.find('s') {
+                                            rest[..end_idx].parse::<f64>().map(|v| v.ceil() as u64).unwrap_or(20)
+                                        } else { 20 }
+                                    } else { 20 }.min(35);
+
+                                    let _ = app_handle.emit(
+                                        "worker:message",
+                                        &WorkerEventPayload {
+                                            session_id: session_id.to_string(),
+                                            event_type: "message.part.updated".into(),
+                                            content: serde_json::json!({
+                                                "type": "message.part.updated",
+                                                "properties": {
+                                                    "part": {
+                                                        "type": "reasoning",
+                                                        "text": format!("Groq TPM token limit reached. Pausing for {}s to replenish token bucket before retrying...", wait_secs)
+                                                    }
+                                                }
+                                            }).to_string(),
+                                            timestamp_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                                        },
+                                    );
+                                    tokio::time::sleep(Duration::from_secs(wait_secs + 1)).await;
+                                    continue;
                                 }
                             }
                         } else {

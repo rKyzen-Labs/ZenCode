@@ -132,7 +132,7 @@ FILE: relative/path/to/file.ext
                 }
             }
 
-            let mut current_model = self.model.clone();
+            let current_model = self.model.clone();
             let body = json!({
                 "model": current_model,
                 "messages": [
@@ -159,10 +159,19 @@ FILE: relative/path/to/file.ext
             let mut status = resp.status();
             let mut resp_text = resp.text().await.unwrap_or_default();
 
-            if status.as_u16() == 429 && matches!(self.provider, WorkerProvider::Groq) {
-                // If 120b rate limited, automatically rotate to 20b
-                eprintln!("\n[Groq 429 Rate Limit] Rotating to openai/gpt-oss-20b for step {}...", i + 1);
-                current_model = "openai/gpt-oss-20b".to_string();
+            let mut retry_count = 0;
+            while status.as_u16() == 429 && retry_count < 3 {
+                retry_count += 1;
+                let wait_secs = if let Some(idx) = resp_text.find("Please try again in ") {
+                    let rest = &resp_text[idx + "Please try again in ".len()..];
+                    if let Some(end_idx) = rest.find('s') {
+                        rest[..end_idx].parse::<f64>().map(|v| v.ceil() as u64).unwrap_or(20)
+                    } else { 20 }
+                } else { 20 }.min(35);
+
+                eprintln!("\n[Groq 429 Rate Limit] Token bucket full. Pausing for {}s before retrying step {}...", wait_secs, i + 1);
+                tokio::time::sleep(std::time::Duration::from_secs(wait_secs + 1)).await;
+
                 let retry_body = json!({
                     "model": current_model,
                     "messages": [
@@ -172,9 +181,16 @@ FILE: relative/path/to/file.ext
                     "temperature": 0.2,
                     "max_tokens": 4096
                 });
-                let retry_req = client.post(&self.endpoint_url)
-                    .header("Content-Type", "application/json")
-                    .header("Authorization", format!("Bearer {}", self.api_key));
+                let mut retry_req = client.post(&self.endpoint_url)
+                    .header("Content-Type", "application/json");
+                if matches!(self.provider, WorkerProvider::OpenRouter) {
+                    retry_req = retry_req
+                        .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
+                        .header("X-Title", "ZenCode CLI");
+                }
+                if !self.api_key.is_empty() && self.api_key != "ollama" {
+                    retry_req = retry_req.header("Authorization", format!("Bearer {}", self.api_key));
+                }
                 resp = retry_req.json(&retry_body).send().await.map_err(|e| format!("Retry request failed: {e}"))?;
                 status = resp.status();
                 resp_text = resp.text().await.unwrap_or_default();
