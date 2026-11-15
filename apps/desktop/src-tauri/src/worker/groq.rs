@@ -245,16 +245,7 @@ impl GroqWorkerClient {
             preferred_model.unwrap_or("qwen2.5-coder:7b").to_string()
         };
 
-        let mut trimmed_user_prompt = user_prompt.to_string();
-        if is_groq {
-            let p_tokens = estimate_tokens(system_prompt) + estimate_tokens(&trimmed_user_prompt);
-            if p_tokens > 3_500 {
-                if let Some(pos) = trimmed_user_prompt.rfind("\n--- Context Outline (Shredded):") {
-                    trimmed_user_prompt.truncate(pos);
-                    trimmed_user_prompt.push_str("\n[Additional non-target file outlines omitted to stay strictly within Groq TPM limit]");
-                }
-            }
-        }
+        let trimmed_user_prompt = user_prompt.to_string();
 
         let _prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(&trimmed_user_prompt);
         let dynamic_max_tokens = 4_096u32;
@@ -1997,8 +1988,8 @@ pub fn build_worktree_summary(
         shredded_files_summary.push_str("=== WORKSPACE STRUCTURAL SUMMARY ===\n");
         let mut target_files_count = 0;
         let mut current_tokens = estimate_tokens(&shredded_files_summary);
-        let edit_token_budget: usize = if is_groq { 1_800 } else { 4_500 };
-        let max_target_tokens: usize = if is_groq { 1_200 } else { 3_500 };
+        let edit_token_budget: usize = 6_000;
+        let max_target_tokens: usize = 4_500;
 
         for fpath in &files_to_scan {
             let rel_path = fpath.strip_prefix(worktree_path).unwrap_or(fpath);
@@ -2009,18 +2000,19 @@ pub fn build_worktree_summary(
                 .and_then(|f| f.to_str())
                 .unwrap_or(&rel_str_lower);
 
+            let is_web_context = rel_str_lower.ends_with(".html") || rel_str_lower.ends_with(".css") || rel_str_lower.ends_with(".js");
             let is_explicit_target = likely_files_set.contains(&rel_str_lower)
                 || likely_files_set.contains(file_base)
                 || likely_files_set.iter().any(|lf| lf == file_base || rel_str_lower.ends_with(lf) || lf.ends_with(file_base));
 
-            if (is_explicit_target || files_to_scan.len() <= 5) && target_files_count < 3 && current_tokens < edit_token_budget {
+            if (is_explicit_target || is_web_context || files_to_scan.len() <= 6) && target_files_count < 4 && current_tokens < edit_token_budget {
                 if let Ok(full_code) = std::fs::read_to_string(fpath) {
                     target_files_count += 1;
                     let code_tokens = estimate_tokens(&full_code);
-                    let content_to_use = if is_groq && code_tokens > max_target_tokens {
+                    let content_to_use = if code_tokens > max_target_tokens {
                         let chars_limit = max_target_tokens * 3;
                         let safe_len = chars_limit.min(full_code.len());
-                        format!("{}\n... [Remainder of target file omitted to stay within Groq TPM limit] ...", &full_code[..safe_len])
+                        format!("{}\n... [Remainder of target file omitted to stay within token budget] ...", &full_code[..safe_len])
                     } else {
                         full_code
                     };
