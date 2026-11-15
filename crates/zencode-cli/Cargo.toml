@@ -1,0 +1,24 @@
+[package]
+name = "zencode-cli"
+version = "0.1.0"
+edition = "2021"
+description = "ZenCode CLI - Fast, sovereign, free-first AI coding engine for terminal workflows"
+default-run = "zencode"
+
+[[bin]]
+name = "zencode"
+path = "src/main.rs"
+
+[dependencies]
+zencode-core = { path = "../zencode-core" }
+clap = { version = "4.5", features = ["derive", "cargo"] }
+tokio = { version = "1.43", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+colored = "3.0"
+dialoguer = "0.11"
+indicatif = "0.17"
+reqwest = { version = "0.12", features = ["json"] }
+thiserror = "2.0"
+chrono = "0.4"
+base64 = "0.22"

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/zencode-core",
+    "crates/zencode-cli",
     "tests/engine-contract",
     "tests/task-flow",
     "apps/desktop/src-tauri",

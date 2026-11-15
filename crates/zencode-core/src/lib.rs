@@ -1,9 +1,14 @@
 pub mod design_system;
+pub mod diff;
+pub mod git;
 pub mod planner;
 pub mod routing;
 pub mod security;
 pub mod shredder;
 pub mod skills;
+
+pub use diff::{apply_diff_blocks, AppliedDiffResult};
+pub use git::{clean_path_for_git, ChangeInventory, FileChange, GitError, GitService, WorktreeInfo};
 
 pub use design_system::{
     anti_pattern_shield, detect_design_system_intent, format_design_system_guideline,

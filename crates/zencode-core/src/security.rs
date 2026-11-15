@@ -41,6 +41,18 @@ impl CredentialService {
     }
 
     #[cfg(windows)]
+    pub fn delete_gemini_api_key() -> Result<(), SecurityError> {
+        Self::delete_generic_credential(ZENCODE_GEMINI_KEY_TARGET)
+    }
+
+    #[cfg(not(windows))]
+    pub fn delete_gemini_api_key() -> Result<(), SecurityError> {
+        Err(SecurityError::WindowsCredentialError(
+            "Windows Credential Manager is only supported on Windows".into(),
+        ))
+    }
+
+    #[cfg(windows)]
     pub fn get_groq_api_key() -> Result<String, SecurityError> {
         Self::get_generic_credential(ZENCODE_GROQ_KEY_TARGET)
     }
