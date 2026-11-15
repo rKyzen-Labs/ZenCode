@@ -1,6 +1,17 @@
+use colored::Colorize;
 use serde_json::json;
 use std::path::Path;
 use zencode_core::AppliedDiffResult;
+
+fn parse_retry_seconds(err_body: &str) -> Option<u64> {
+    if let Some(idx) = err_body.find("Please try again in ") {
+        let rest = &err_body[idx + "Please try again in ".len()..];
+        if let Some(end_idx) = rest.find('s') {
+            return rest[..end_idx].parse::<f64>().map(|v| v.ceil() as u64).ok();
+        }
+    }
+    None
+}
 
 #[derive(Debug, Clone)]
 pub enum WorkerProvider {
@@ -245,23 +256,38 @@ FILE: relative/path/to/file.ext
                     "temperature": 0.2,
                     "max_tokens": 4096
                 });
-                let mut cont_req = client.post(&self.endpoint_url).header("Content-Type", "application/json");
-                if matches!(self.provider, WorkerProvider::OpenRouter) {
-                    cont_req = cont_req
-                        .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
-                        .header("X-Title", "ZenCode CLI");
-                }
-                if !self.api_key.is_empty() && self.api_key != "ollama" {
-                    cont_req = cont_req.header("Authorization", format!("Bearer {}", self.api_key));
-                }
-                if let Ok(cont_resp) = cont_req.json(&cont_body).send().await {
-                    if cont_resp.status().is_success() {
-                        if let Ok(cont_json) = cont_resp.json::<serde_json::Value>().await {
-                            if let Some(chunk) = cont_json.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|c| c.get("message")).and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
-                                output_content.push('\n');
-                                output_content.push_str(chunk);
+                let mut cont_attempts = 0;
+                while cont_attempts < 3 {
+                    cont_attempts += 1;
+                    let mut cont_req = client.post(&self.endpoint_url).header("Content-Type", "application/json");
+                    if matches!(self.provider, WorkerProvider::OpenRouter) {
+                        cont_req = cont_req
+                            .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
+                            .header("X-Title", "ZenCode CLI");
+                    }
+                    if !self.api_key.is_empty() && self.api_key != "ollama" {
+                        cont_req = cont_req.header("Authorization", format!("Bearer {}", self.api_key));
+                    }
+                    if let Ok(cont_resp) = cont_req.json(&cont_body).send().await {
+                        if cont_resp.status().is_success() {
+                            if let Ok(cont_json) = cont_resp.json::<serde_json::Value>().await {
+                                if let Some(chunk) = cont_json.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|c| c.get("message")).and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
+                                    output_content.push('\n');
+                                    output_content.push_str(chunk);
+                                }
                             }
+                            break;
+                        } else if cont_resp.status().as_u16() == 429 {
+                            let err_body = cont_resp.text().await.unwrap_or_default();
+                            let wait_secs = parse_retry_seconds(&err_body).unwrap_or(15);
+                            println!("{}", format!("  ⏳ Rate limit (429) on continuation. Pausing {wait_secs}s...").dimmed());
+                            tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs.min(45))).await;
+                            continue;
+                        } else {
+                            break;
                         }
+                    } else {
+                        break;
                     }
                 }
             }

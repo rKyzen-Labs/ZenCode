@@ -24,6 +24,17 @@ pub fn estimate_tokens(text: &str) -> usize {
     ((char_count as f64 / 3.8).ceil() as usize).max(((word_count as f64) * 1.3).ceil() as usize)
 }
 
+/// Parses the suggested retry cooldown in seconds from a Groq 429 response body.
+pub fn parse_retry_seconds(err_body: &str) -> Option<u64> {
+    if let Some(idx) = err_body.find("Please try again in ") {
+        let rest = &err_body[idx + "Please try again in ".len()..];
+        if let Some(end_idx) = rest.find('s') {
+            return rest[..end_idx].parse::<f64>().map(|v| v.ceil() as u64).ok();
+        }
+    }
+    None
+}
+
 /// Tracks sliding-window RPM, TPM, and 429 cooldowns per Groq model.
 #[derive(Debug, Clone)]
 pub struct GroqModelQuota {
@@ -245,13 +256,8 @@ impl GroqWorkerClient {
             }
         }
 
-        let prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(&trimmed_user_prompt);
-        let dynamic_max_tokens = if is_groq {
-            let available_headroom = 7_500usize.saturating_sub(prompt_tokens);
-            available_headroom.clamp(1_024, 4_096) as u32
-        } else {
-            4_096
-        };
+        let _prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(&trimmed_user_prompt);
+        let dynamic_max_tokens = 4_096u32;
 
         let max_attempts = if is_groq { 5 } else { 2 };
         let mut response_text = String::new();
@@ -415,36 +421,51 @@ impl GroqWorkerClient {
                                 "max_tokens": dynamic_max_tokens
                             });
 
-                            let mut cont_builder = client
-                                .post(&self.endpoint_url)
-                                .header("Content-Type", "application/json");
+                            let mut cont_attempts = 0;
+                            while cont_attempts < 3 {
+                                cont_attempts += 1;
+                                let mut req = client
+                                    .post(&self.endpoint_url)
+                                    .header("Content-Type", "application/json");
 
-                            if is_openrouter {
-                                cont_builder = cont_builder
-                                    .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
-                                    .header("X-Title", "ZenCode");
-                            }
+                                if is_openrouter {
+                                    req = req
+                                        .header("HTTP-Referer", "https://github.com/rKyzen-Labs/ZenCode")
+                                        .header("X-Title", "ZenCode");
+                                }
 
-                            if !self.api_key.is_empty() && self.api_key != "ollama" {
-                                cont_builder = cont_builder.header("Authorization", format!("Bearer {}", self.api_key));
-                            }
+                                if !self.api_key.is_empty() && self.api_key != "ollama" {
+                                    req = req.header("Authorization", format!("Bearer {}", self.api_key));
+                                }
 
-                            if let Ok(cont_resp) = cont_builder.json(&cont_body).send().await {
-                                if cont_resp.status().is_success() {
-                                    if let Ok(cont_json) = cont_resp.json::<serde_json::Value>().await {
-                                        let continuation_chunk = cont_json
-                                            .get("choices")
-                                            .and_then(|c| c.as_array())
-                                            .and_then(|arr| arr.first())
-                                            .and_then(|c| c.get("message"))
-                                            .and_then(|m| m.get("content"))
-                                            .and_then(|c| c.as_str())
-                                            .unwrap_or_default();
-                                        if !continuation_chunk.is_empty() {
-                                            response_text.push('\n');
-                                            response_text.push_str(continuation_chunk);
+                                if let Ok(cont_resp) = req.json(&cont_body).send().await {
+                                    if cont_resp.status().is_success() {
+                                        if let Ok(cont_json) = cont_resp.json::<serde_json::Value>().await {
+                                            let continuation_chunk = cont_json
+                                                .get("choices")
+                                                .and_then(|c| c.as_array())
+                                                .and_then(|arr| arr.first())
+                                                .and_then(|c| c.get("message"))
+                                                .and_then(|m| m.get("content"))
+                                                .and_then(|c| c.as_str())
+                                                .unwrap_or_default();
+                                            if !continuation_chunk.is_empty() {
+                                                response_text.push('\n');
+                                                response_text.push_str(continuation_chunk);
+                                            }
                                         }
+                                        break;
+                                    } else if cont_resp.status().as_u16() == 429 {
+                                        let err_body = cont_resp.text().await.unwrap_or_default();
+                                        let wait_secs = parse_retry_seconds(&err_body).unwrap_or(15);
+                                        eprintln!("Groq continuation rate-limited (429). Pausing {wait_secs}s for token replenishment...");
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs.min(45))).await;
+                                        continue;
+                                    } else {
+                                        break;
                                     }
+                                } else {
+                                    break;
                                 }
                             }
                         }

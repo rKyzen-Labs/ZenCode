@@ -270,7 +270,45 @@ pub fn apply_diff_blocks(
             }
 
             if i >= lines.len() {
-                return Err(format!("Unclosed SEARCH block in file {file_target}"));
+                // The search block was never closed with a divider (e.g. output truncated or model omitted divider).
+                // Do NOT crash with a fatal error!
+                let search_str = search_lines.join("\n");
+                let mut resolved_file_target = file_target.clone();
+                let mut full_target = worktree_dir.join(&resolved_file_target);
+
+                if !full_target.exists() {
+                    if let Some(alt) = find_file_by_name(worktree_dir, &resolved_file_target) {
+                        resolved_file_target = alt;
+                        full_target = worktree_dir.join(&resolved_file_target);
+                    }
+                }
+
+                let existing_content = if full_target.exists() {
+                    std::fs::read_to_string(&full_target).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                let trimmed_search = search_str.trim();
+                if !trimmed_search.is_empty() {
+                    // Check if search_str already exists in the file:
+                    // If it's already there and no replacement was given, keep existing file unchanged.
+                    if !existing_content.contains(trimmed_search) {
+                        // The model emitted code intended for the file under the SEARCH block header:
+                        let updated = integrate_unmatched_diff(&existing_content, &search_str);
+                        if let Some(parent) = full_target.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        let _ = std::fs::write(&full_target, &updated);
+                        results.push(AppliedDiffResult {
+                            file_path: resolved_file_target,
+                            is_new: !full_target.exists(),
+                            additions: search_lines.len(),
+                            deletions: 0,
+                        });
+                    }
+                }
+                continue;
             }
 
             i += 1; // skip divider (======= or similar)
@@ -675,28 +713,31 @@ fn find_anchor_subslice(haystack: &[&str], needle: &[&str]) -> Option<(usize, us
 }
 
 fn is_search_replace_divider(s: &str) -> bool {
-    let lower = s.to_lowercase();
-    s.starts_with("=======")
-        || s.starts_with("======")
-        || s.starts_with("--- REPLACE")
-        || s.starts_with("--- replace")
-        || s.starts_with("======= REPLACE")
-        || s.starts_with("<<<<<<< END")
-        || s.starts_with("<<<<<<< REPLACE")
+    let clean = s.trim_start_matches(|c: char| c == '/' || c == '*' || c == '#' || c == '-' || c == ' ' || c == '\t');
+    let lower = clean.to_lowercase();
+    clean.starts_with("===")
+        || clean.starts_with("<<<<<<< REPLACE")
+        || clean.starts_with("<<<<<<< END")
+        || lower.starts_with("replace")
         || lower.starts_with("end of search")
-        || s == "---"
+        || s.trim() == "---"
+        || s.trim() == "==="
+        || s.trim() == "===="
+        || s.trim() == "====="
 }
 
 fn is_replace_block_end(s: &str) -> bool {
-    s.starts_with(">>>>>>>")
-        || s.starts_with("<<<<<<< END")
-        || s.starts_with("<<<<<<< CREATE")
-        || s.starts_with("<<<<<<< SEARCH")
-        || s.starts_with("<<<<<<< DELETE")
-        || s.starts_with("<<<<<<< MKDIR")
-        || s.starts_with("<<<<<<< MOVE")
-        || s.starts_with("### File:")
-        || s.starts_with("FILE:")
+    let clean = s.trim_start_matches(|c: char| c == '/' || c == '*' || c == '#' || c == '-' || c == ' ' || c == '\t');
+    clean.starts_with(">>>>>>>")
+        || clean.starts_with("<<<<<<< END")
+        || clean.starts_with("<<<<<<< CREATE")
+        || clean.starts_with("<<<<<<< SEARCH")
+        || clean.starts_with("<<<<<<< DELETE")
+        || clean.starts_with("<<<<<<< MKDIR")
+        || clean.starts_with("<<<<<<< MOVE")
+        || clean.starts_with("### File:")
+        || clean.starts_with("FILE:")
+        || clean.starts_with("--- END")
 }
 
 /// Recursively scans text files in the worktree, excluding VCS and build folders.
@@ -1173,6 +1214,56 @@ nav {
         assert!(final_css.contains("/* Navigation Bar */"));
         assert!(final_css.contains("position: sticky;"));
         assert!(final_css.contains("--accent: #c96442;"));
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_unclosed_search_block_does_not_abort_and_integrates() {
+        let temp = std::env::temp_dir().join(format!("test_unclosed_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        std::fs::write(temp.join("app.js"), "console.log('init');\n").unwrap();
+
+        // Simulate an unclosed search block where output cut off or model didn't close
+        let diff_response = r#"
+<<<<<<< SEARCH: app.js
+function setupListeners() {
+  document.addEventListener('click', () => {});
+}
+"#;
+
+        // Must NOT return Err("Unclosed SEARCH block in file app.js")
+        let results = apply_diff_blocks(&temp, diff_response, None).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let code = std::fs::read_to_string(temp.join("app.js")).unwrap();
+        assert!(code.contains("console.log('init');"));
+        assert!(code.contains("setupListeners"));
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn test_comment_prefixed_divider_matches() {
+        let temp = std::env::temp_dir().join(format!("test_comm_div_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        std::fs::write(temp.join("app.js"), "const v = 1;\n").unwrap();
+
+        let diff_response = r#"
+<<<<<<< SEARCH: app.js
+const v = 1;
+// =======
+const v = 2;
+// >>>>>>>
+"#;
+
+        let results = apply_diff_blocks(&temp, diff_response, None).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let code = std::fs::read_to_string(temp.join("app.js")).unwrap();
+        assert!(code.contains("const v = 2;"));
 
         let _ = std::fs::remove_dir_all(&temp);
     }
